@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 import os
+import time
 from typing import Any
 
 import httpx
@@ -10,8 +11,12 @@ from fastapi.responses import JSONResponse, Response
 
 from orchesis.config import PolicyWatcher, load_policy
 from orchesis.engine import evaluate
+from orchesis.events import EventBus
+from orchesis.metrics import MetricsCollector
 from orchesis.policy_store import PolicyStore
 from orchesis.state import RateLimitTracker
+from orchesis.telemetry import JsonlEmitter
+from orchesis.webhooks import WebhookConfig, WebhookEmitter
 
 
 def _extract_tool(request: Request, body_json: dict[str, Any] | None) -> str:
@@ -78,11 +83,48 @@ def create_proxy_app(
     if transport is None and backend_app is not None:
         transport = httpx.ASGITransport(app=backend_app)
     state_tracker = RateLimitTracker(persist_path=None)
+    app_started_at = time.perf_counter()
     store = PolicyStore()
     current_policy = policy
     current_registry = None
     watcher: PolicyWatcher | None = None
-    current_policy_hash = ""
+    current_policy_hash = "inline"
+    event_bus = EventBus()
+    metrics = MetricsCollector()
+    decisions_log_path = os.getenv("DECISIONS_LOG_PATH", ".orchesis/decisions.jsonl")
+    _ = event_bus.subscribe(JsonlEmitter(decisions_log_path))
+    _ = event_bus.subscribe(metrics)
+    webhook_subscriber_ids: list[int] = []
+
+    def _sync_webhooks(candidate_policy: dict[str, Any]) -> None:
+        nonlocal webhook_subscriber_ids
+        for sub_id in webhook_subscriber_ids:
+            event_bus.unsubscribe(sub_id)
+        webhook_subscriber_ids = []
+
+        webhooks = candidate_policy.get("webhooks")
+        if not isinstance(webhooks, list):
+            return
+        for item in webhooks:
+            if not isinstance(item, dict):
+                continue
+            url = item.get("url")
+            if not isinstance(url, str) or not url.strip():
+                continue
+            events = item.get("events")
+            headers = item.get("headers")
+            timeout = item.get("timeout_seconds")
+            retry = item.get("retry_count")
+            secret = item.get("secret")
+            config = WebhookConfig(
+                url=url.strip(),
+                events=events if isinstance(events, list) else ["DENY"],
+                headers=headers if isinstance(headers, dict) else {},
+                timeout_seconds=float(timeout) if isinstance(timeout, int | float) else 5.0,
+                retry_count=int(retry) if isinstance(retry, int) else 2,
+                secret=secret if isinstance(secret, str) else None,
+            )
+            webhook_subscriber_ids.append(event_bus.subscribe(WebhookEmitter(config)))
 
     def _resolve_registry_for_policy(candidate_policy: dict[str, Any], store_version: Any) -> Any:
         has_identity_config = "agents" in candidate_policy or "default_trust_tier" in candidate_policy
@@ -93,16 +135,21 @@ def create_proxy_app(
         current_policy = current_version.policy
         current_registry = _resolve_registry_for_policy(current_policy, current_version)
         current_policy_hash = current_version.version_id
+        _sync_webhooks(current_policy)
 
         def _on_reload(new_policy: dict[str, Any]) -> None:
             _ = new_policy
-            nonlocal current_policy, current_registry
+            nonlocal current_policy, current_registry, current_policy_hash
             version = store.load(policy_path)
             current_policy = version.policy
             current_registry = _resolve_registry_for_policy(current_policy, version)
+            current_policy_hash = version.version_id
+            _sync_webhooks(current_policy)
 
         watcher = PolicyWatcher(policy_path, _on_reload)
         watcher._last_hash = PolicyWatcher(policy_path, lambda _policy: None).current_hash()
+    else:
+        _sync_webhooks(current_policy)
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
@@ -112,16 +159,18 @@ def create_proxy_app(
             state_tracker.flush()
 
     app = FastAPI(title="Orchesis Proxy", lifespan=_lifespan)
+    app.state.event_bus = event_bus
+    app.state.metrics = metrics
 
     @app.middleware("http")
     async def decision_middleware(request: Request, call_next: Any) -> Response:
-        _ = call_next
         nonlocal current_policy_hash
+        if request.url.path in {"/metrics", "/health"}:
+            return await call_next(request)
 
         if watcher is not None:
             old_hash = current_policy_hash
             if watcher.check():
-                current_policy_hash = watcher._last_hash
                 print(f"Policy reloaded: {old_hash} -> {current_policy_hash}")
 
         raw_body = await request.body()
@@ -144,6 +193,7 @@ def create_proxy_app(
             eval_request,
             current_policy,
             state=state_tracker,
+            emitter=event_bus,
             registry=current_registry,
         )
 
@@ -182,6 +232,28 @@ def create_proxy_app(
             status_code=forwarded.status_code,
             media_type=forwarded.headers.get("content-type"),
         )
+
+    @app.get("/metrics")
+    def metrics_endpoint() -> Response:
+        return Response(content=metrics.prometheus_text(), media_type="text/plain")
+
+    @app.get("/health")
+    def health_endpoint() -> dict[str, Any]:
+        snapshot = metrics.snapshot()
+        total_decisions = 0
+        counters = snapshot.get("counters")
+        if isinstance(counters, dict):
+            for key, value in counters.items():
+                if isinstance(key, str) and key.startswith("orchesis_decisions_total|decision="):
+                    if isinstance(value, int):
+                        total_decisions += value
+        return {
+            "status": "healthy",
+            "version": "0.3.1",
+            "policy_version": current_policy_hash,
+            "uptime_seconds": int(max(0.0, time.perf_counter() - app_started_at)),
+            "total_decisions": total_decisions,
+        }
 
     return app
 

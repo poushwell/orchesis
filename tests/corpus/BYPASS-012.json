@@ -1,0 +1,20 @@
+{
+  "id": "BYPASS-012",
+  "category": "identity_spoofing",
+  "mutation": "literal_asterisk_agent: *",
+  "request": {
+    "tool": "delete_file",
+    "params": {
+      "path": "/etc/passwd"
+    },
+    "cost": 0.1,
+    "context": {
+      "agent": "*"
+    }
+  },
+  "expected_decision": "DENY",
+  "discovered_at": "2026-02-28T18:31:50Z",
+  "fixed": true,
+  "fixed_at": "2026-02-28T18:46:50Z",
+  "cve_reference": null
+}

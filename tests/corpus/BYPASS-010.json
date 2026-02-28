@@ -1,0 +1,20 @@
+{
+  "id": "BYPASS-010",
+  "category": "identity_spoofing",
+  "mutation": "null_byte_agent: cursor\\u0000admin",
+  "request": {
+    "tool": "delete_file",
+    "params": {
+      "path": "/etc/passwd"
+    },
+    "cost": 0.1,
+    "context": {
+      "agent": "cursor\u0000admin"
+    }
+  },
+  "expected_decision": "DENY",
+  "discovered_at": "2026-02-28T18:31:30Z",
+  "fixed": true,
+  "fixed_at": "2026-02-28T18:46:30Z",
+  "cve_reference": null
+}

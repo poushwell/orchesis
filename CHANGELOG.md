@@ -1,3 +1,15 @@
+## [0.3.1] - 2026-02-28
+
+### Added
+- Synthetic Agent Fuzzer with 7 attack categories
+- 7 adversarial scenarios (escalation, budget drain, identity rotation, and others)
+- Regression corpus with 14 seeded attack patterns
+- Auto-generated regression tests from corpus
+- Audit query engine with stats and anomaly detection
+- CSV export for external analysis
+- CLI: `orchesis fuzz`, `orchesis scenarios`, `orchesis corpus`, `orchesis audit --stats/--anomalies/--export`
+- `THREAT_MODEL.md` v2 with formal guarantees table
+
 ## [0.3.0] - 2026-02-28
 
 ### Added

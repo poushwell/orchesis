@@ -20,6 +20,7 @@ from orchesis.config import (
 from orchesis.engine import evaluate
 from orchesis.fuzzer import SyntheticFuzzer
 from orchesis.logger import read_decisions
+from orchesis.corpus import RegressionCorpus
 from orchesis.policy_store import PolicyStore
 from orchesis.replay import ReplayEngine, read_events_from_jsonl
 from orchesis.scenarios import AdversarialScenarios
@@ -242,7 +243,8 @@ def rollback(policy_path: str) -> None:
 @click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
 @click.option("--count", "count", type=int, default=1000)
 @click.option("--seed", "seed", type=int, default=42)
-def fuzz(policy_path: str, count: int, seed: int) -> None:
+@click.option("--save-bypasses", "save_bypasses", is_flag=True, default=False)
+def fuzz(policy_path: str, count: int, seed: int, save_bypasses: bool) -> None:
     """Run synthetic adversarial fuzzing against policy."""
     try:
         policy = load_policy(policy_path)
@@ -269,6 +271,13 @@ def fuzz(policy_path: str, count: int, seed: int) -> None:
     click.echo("  Categories tested:")
     for category in sorted(fuzzer.category_counts):
         click.echo(f"    {category}: {fuzzer.category_counts[category]}")
+    if save_bypasses and report.bypasses:
+        corpus = RegressionCorpus()
+        created = [corpus.add_bypass(item) for item in report.bypasses]
+        click.echo("")
+        click.echo(f"  Saved {len(created)} new bypasses to corpus:")
+        for entry in created[:10]:
+            click.echo(f"    {entry.id}: {entry.category} - {entry.mutation}")
 
 
 @main.command()
@@ -293,6 +302,33 @@ def scenarios(policy_path: str) -> None:
         click.echo(
             f"  {marker} {result.name:<24} — {result.steps_total} steps, {suffix}"
         )
+
+
+@main.command()
+@click.option("--stats", "show_stats", is_flag=True, default=False)
+@click.option("--generate-tests", "generate_tests", is_flag=True, default=False)
+def corpus(show_stats: bool, generate_tests: bool) -> None:
+    """Manage regression corpus entries and generated tests."""
+    manager = RegressionCorpus()
+    if not show_stats and not generate_tests:
+        show_stats = True
+
+    if show_stats:
+        summary = manager.stats()
+        click.echo("Attack Corpus:")
+        click.echo(f"  Total entries: {summary['total']}")
+        click.echo(f"  Fixed: {summary['fixed']}")
+        click.echo(f"  Unfixed: {summary['unfixed']}")
+        click.echo("")
+        click.echo("  By category:")
+        for category, count in sorted(summary["by_category"].items()):
+            click.echo(f"    {category}: {count}")
+
+    if generate_tests:
+        target = manager.generate_test_file()
+        total = manager.stats()["total"]
+        click.echo(f"Generated {target}")
+        click.echo(f"{total} regression test cases from corpus")
 
 
 @main.command()
