@@ -10,7 +10,7 @@ from typing import Any
 import click
 from yaml import YAMLError
 
-from orchesis.config import load_policy, validate_policy
+from orchesis.config import load_agent_registry, load_policy, validate_policy
 from orchesis.engine import evaluate
 from orchesis.logger import read_decisions
 from orchesis.replay import ReplayEngine, read_events_from_jsonl
@@ -95,6 +95,8 @@ def verify(request_path: str, policy_path: str, should_sign: bool) -> None:
     try:
         request = json.loads(Path(request_path).read_text(encoding="utf-8"))
         policy = load_policy(policy_path)
+        has_identity_config = "agents" in policy or "default_trust_tier" in policy
+        registry = load_agent_registry(policy) if has_identity_config else None
     except (json.JSONDecodeError, OSError) as error:
         raise click.ClickException(f"Failed to load request: {error}") from error
     except (ValueError, YAMLError, OSError) as error:
@@ -108,7 +110,13 @@ def verify(request_path: str, policy_path: str, should_sign: bool) -> None:
         signature: str | None = None
         if should_sign:
             memory_emitter = InMemoryEmitter()
-            decision = evaluate(request, policy, state=state_tracker, emitter=memory_emitter)
+            decision = evaluate(
+                request,
+                policy,
+                state=state_tracker,
+                emitter=memory_emitter,
+                registry=registry,
+            )
             if not DEFAULT_PRIVATE_KEY_PATH.exists():
                 raise click.ClickException(
                     "Missing private key. Run 'orchesis keygen' before using --sign."
@@ -129,6 +137,7 @@ def verify(request_path: str, policy_path: str, should_sign: bool) -> None:
                 policy,
                 state=state_tracker,
                 emitter=JsonlEmitter(DEFAULT_DECISIONS_PATH),
+                registry=registry,
             )
 
         click.echo(json.dumps(asdict(decision), ensure_ascii=False, indent=2))
@@ -154,6 +163,29 @@ def validate(policy_path: str) -> None:
     for error in errors:
         click.echo(f"- {error}")
     raise SystemExit(1)
+
+
+@main.command()
+@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
+def agents(policy_path: str) -> None:
+    """List registered agent identities from policy."""
+    try:
+        policy = load_policy(policy_path)
+    except (ValueError, YAMLError, OSError) as error:
+        raise click.ClickException(f"Failed to load policy: {error}") from error
+
+    registry = load_agent_registry(policy)
+    click.echo("Registered agents:")
+    if not registry.agents:
+        click.echo("  (none)")
+    else:
+        for agent_id in sorted(registry.agents):
+            identity = registry.agents[agent_id]
+            tools = ", ".join(identity.allowed_tools) if identity.allowed_tools else "all"
+            click.echo(
+                f"  {identity.agent_id:<13} {identity.trust_tier.name.lower():<10} tools: {tools}"
+            )
+    click.echo(f"Default tier: {registry.default_tier.name.lower()}")
 
 
 @main.command()

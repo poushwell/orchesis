@@ -15,9 +15,14 @@ def _print_task_result(task_name: str, state) -> None:  # type: ignore[no-untype
     for step in state.steps:
         tool = step["tool"]
         params = step["params"]
+        agent = step.get("agent", "cursor")
+        trust_tier = step.get("trust_tier", "intern")
         decision = step["decision"]
         reasons = step["reasons"]
-        print(f"- step {step['step']}: tool={tool} params={params} decision={decision}")
+        print(
+            f"- step {step['step']}: agent={agent} tier={trust_tier} "
+            f"tool={tool} params={params} decision={decision}"
+        )
         if decision == "DENY":
             print(f"  reason={'; '.join(reasons)}")
     executed = sum(1 for s in state.steps if s["decision"] == "ALLOW")

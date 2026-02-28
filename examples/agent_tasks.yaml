@@ -1,6 +1,7 @@
 tasks:
   - name: "analyze_sales_data"
     description: "Read sales CSV, run summary query, write report"
+    context: {agent: "cursor"}
     steps:
       - tool: read_file
         params: {path: "/data/sales.csv"}
@@ -11,6 +12,7 @@ tasks:
 
   - name: "dangerous_cleanup"
     description: "Agent tries to delete system files and drop tables"
+    context: {agent: "cursor"}
     steps:
       - tool: delete_file
         params: {path: "/etc/passwd"}
@@ -21,6 +23,7 @@ tasks:
 
   - name: "budget_burn"
     description: "Agent makes expensive API calls exceeding budget"
+    context: {agent: "cursor"}
     steps:
       - tool: api_call
         params: {endpoint: "gpt-4"}
@@ -33,6 +36,7 @@ tasks:
 
   - name: "rate_limited_spam"
     description: "Agent repeatedly reads files to trigger rate limiting"
+    context: {agent: "cursor"}
     steps:
       - tool: read_file
         params: {path: "/data/spam-001.txt"}
@@ -437,6 +441,7 @@ tasks:
 
   - name: "untrusted_agent_attempt"
     description: "Untrusted agent attempts restricted operations"
+    context: {agent: "untrusted_bot"}
     steps:
       - tool: delete_file
         params: {path: "/data/notes.txt"}

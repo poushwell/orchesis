@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import yaml
+from orchesis.identity import AgentIdentity, AgentRegistry, TrustTier
 
 
 def _is_number(value: Any) -> bool:
@@ -25,6 +26,70 @@ def load_policy(path: str | Path) -> dict[str, Any]:
         raise ValueError("Policy top-level YAML object must be a mapping.")
 
     return loaded
+
+
+def _parse_trust_tier(value: Any, default: TrustTier = TrustTier.INTERN) -> TrustTier:
+    if isinstance(value, TrustTier):
+        return value
+    if isinstance(value, int):
+        try:
+            return TrustTier(value)
+        except ValueError:
+            return default
+    if isinstance(value, str):
+        normalized = value.strip().upper()
+        if normalized:
+            try:
+                return TrustTier[normalized]
+            except KeyError:
+                return default
+    return default
+
+
+def _parse_str_list(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        return None
+    parsed = [item for item in value if isinstance(item, str)]
+    return parsed
+
+
+def load_agent_registry(policy: dict[str, Any]) -> AgentRegistry:
+    """Parse policy agent definitions into an AgentRegistry."""
+    default_tier = _parse_trust_tier(policy.get("default_trust_tier"), TrustTier.INTERN)
+    registry = AgentRegistry(agents={}, default_tier=default_tier)
+    agents = policy.get("agents")
+    if not isinstance(agents, list):
+        return registry
+
+    for entry in agents:
+        if not isinstance(entry, dict):
+            continue
+        agent_id = entry.get("id")
+        if not isinstance(agent_id, str) or not agent_id.strip():
+            continue
+        normalized_id = agent_id.strip()
+        name = entry.get("name")
+        agent_name = name.strip() if isinstance(name, str) and name.strip() else normalized_id
+        tier = _parse_trust_tier(entry.get("trust_tier"), default_tier)
+        max_cost = entry.get("max_cost_per_call")
+        daily_budget = entry.get("daily_budget")
+        rate_limit = entry.get("rate_limit_per_minute")
+        metadata = entry.get("metadata")
+        identity = AgentIdentity(
+            agent_id=normalized_id,
+            name=agent_name,
+            trust_tier=tier,
+            allowed_tools=_parse_str_list(entry.get("allowed_tools")),
+            denied_tools=_parse_str_list(entry.get("denied_tools")),
+            max_cost_per_call=float(max_cost) if isinstance(max_cost, int | float) else None,
+            daily_budget=float(daily_budget) if isinstance(daily_budget, int | float) else None,
+            rate_limit_per_minute=rate_limit if isinstance(rate_limit, int) else None,
+            metadata=metadata if isinstance(metadata, dict) else {},
+        )
+        registry.register(identity)
+    return registry
 
 
 def validate_policy(policy: dict[str, Any]) -> list[str]:

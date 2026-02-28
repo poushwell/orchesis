@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from orchesis.agent.planner import load_task_catalog, resolve_task_steps
-from orchesis.config import load_policy
+from orchesis.config import load_agent_registry, load_policy
 from orchesis.engine import evaluate
 from orchesis.logger import append_decision
 from orchesis.models import Decision
@@ -33,6 +33,8 @@ class SimpleAgent:
         log_path: str | Path = "decisions.jsonl",
     ):
         self.policy = load_policy(policy_path)
+        has_identity_config = "agents" in self.policy or "default_trust_tier" in self.policy
+        self.registry = load_agent_registry(self.policy) if has_identity_config else None
         self.tools = tools
         self.tasks_path = Path(tasks_path)
         self.log_path = Path(log_path)
@@ -50,10 +52,19 @@ class SimpleAgent:
                 break
 
             decision = self.verify_action(action, tracker=tracker)
+            effective_agent = (
+                action.get("context", {}).get("agent")
+                if isinstance(action.get("context"), dict)
+                and isinstance(action.get("context", {}).get("agent"), str)
+                else "cursor"
+            )
+            identity = self.registry.get(effective_agent) if self.registry is not None else None
             step_record: dict[str, Any] = {
                 "step": state.current_step + 1,
                 "tool": action["tool"],
                 "params": action.get("params", {}),
+                "agent": effective_agent,
+                "trust_tier": identity.trust_tier.name.lower() if identity is not None else "n/a",
                 "cost": action.get("cost", 0.0),
                 "decision": "ALLOW" if decision.allowed else "DENY",
                 "reasons": decision.reasons,
@@ -65,7 +76,7 @@ class SimpleAgent:
                 "cost": action.get("cost", 0.0),
                 "context": {
                     "task": state.task,
-                    "agent": "simple_agent",
+                    "agent": "cursor",
                     **(action.get("context") if isinstance(action.get("context"), dict) else {}),
                 },
             }
@@ -103,11 +114,11 @@ class SimpleAgent:
             "params": action.get("params", {}),
             "cost": action.get("cost", 0.0),
             "context": {
-                "agent": "simple_agent",
+                "agent": "cursor",
                 **(action.get("context") if isinstance(action.get("context"), dict) else {}),
             },
         }
-        return evaluate(request, self.policy, state=tracker)
+        return evaluate(request, self.policy, state=tracker, registry=self.registry)
 
     def execute_action(self, action: dict[str, Any]) -> dict[str, Any]:
         """Execute allowed tool call via deterministic stubs."""

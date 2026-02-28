@@ -25,7 +25,7 @@ def test_rule_evaluation_order_is_fixed() -> None:
     }
     decision = evaluate(request, policy, state=RateLimitTracker(persist_path=None))
 
-    assert decision.rules_checked == RULE_EVALUATION_ORDER
+    assert decision.rules_checked == [rule for rule in RULE_EVALUATION_ORDER if rule != "identity_check"]
 
 
 def test_unknown_rule_type_causes_deny() -> None:

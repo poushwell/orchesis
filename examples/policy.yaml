@@ -1,3 +1,27 @@
+agents:
+  - id: "cursor"
+    name: "Cursor IDE Agent"
+    trust_tier: operator
+    allowed_tools:
+      - "read_file"
+      - "write_file"
+      - "run_sql"
+    max_cost_per_call: 2.00
+    daily_budget: 50.00
+
+  - id: "untrusted_bot"
+    name: "External Bot"
+    trust_tier: intern
+    allowed_tools:
+      - "read_file"
+    rate_limit_per_minute: 10
+
+  - id: "admin_agent"
+    name: "System Admin"
+    trust_tier: principal
+
+default_trust_tier: intern
+
 rules:
   - name: budget_limit
     max_cost_per_call: 0.50

@@ -13,11 +13,13 @@ from typing import Any
 from urllib.parse import unquote
 
 import yaml
+from orchesis.identity import AgentIdentity, AgentRegistry, TrustTier, check_capability
 from orchesis.models import Decision
 from orchesis.state import GLOBAL_AGENT_ID, RateLimitTracker
 from orchesis.telemetry import DecisionEvent, EventEmitter
 
 RULE_EVALUATION_ORDER = [
+    "identity_check",
     "budget_limit",
     "rate_limit",
     "file_access",
@@ -27,7 +29,7 @@ RULE_EVALUATION_ORDER = [
     "composite",
 ]
 
-KNOWN_RULE_TYPES = set(RULE_EVALUATION_ORDER)
+KNOWN_RULE_TYPES = set(RULE_EVALUATION_ORDER) - {"identity_check"}
 _POLICY_PLAN_CACHE: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
 
 
@@ -124,6 +126,64 @@ def _resolve_agent_id(request: dict[str, Any]) -> str:
         return GLOBAL_AGENT_ID
     cleaned = _sanitize_text(agent)
     return cleaned if cleaned else GLOBAL_AGENT_ID
+
+
+def _is_modify_or_destructive_action(request: dict[str, Any]) -> bool:
+    tool_name = request.get("tool")
+    if isinstance(tool_name, str):
+        normalized_tool = tool_name.strip().lower()
+    else:
+        normalized_tool = ""
+    modify_keywords = ("write", "delete", "modify", "update", "create", "remove")
+    if any(keyword in normalized_tool for keyword in modify_keywords):
+        return True
+
+    params = request.get("params")
+    query = params.get("query") if isinstance(params, dict) else None
+    if isinstance(query, str):
+        upper_query = _sanitize_text(query).upper()
+        for operation in ("UPDATE", "DELETE", "INSERT", "CREATE", "DROP", "ALTER", "TRUNCATE"):
+            if _query_contains_operation(upper_query, operation):
+                return True
+    return False
+
+
+def _apply_identity_check(
+    request: dict[str, Any],
+    identity: AgentIdentity,
+) -> tuple[list[str], list[str], bool]:
+    reasons: list[str] = []
+    checked = ["identity_check"]
+    tool_name = request.get("tool")
+    tool = tool_name if isinstance(tool_name, str) else "__unknown__"
+
+    if identity.trust_tier == TrustTier.BLOCKED:
+        reasons.append(f"identity: agent '{identity.agent_id}' is blocked")
+        return reasons, checked, True
+
+    if identity.trust_tier == TrustTier.PRINCIPAL:
+        return reasons, [], False
+
+    denied_tools = identity.denied_tools if isinstance(identity.denied_tools, list) else None
+    if denied_tools is not None and tool in denied_tools:
+        reasons.append(f"identity: tool '{tool}' is explicitly denied for agent '{identity.agent_id}'")
+
+    allowed_tools = identity.allowed_tools if isinstance(identity.allowed_tools, list) else None
+    if allowed_tools is not None and tool not in allowed_tools:
+        reasons.append(f"identity: tool '{tool}' is not in allowed_tools for agent '{identity.agent_id}'")
+
+    if not check_capability(identity, tool):
+        reasons.append(
+            f"identity: agent '{identity.agent_id}' tier '{identity.trust_tier.name.lower()}' "
+            f"lacks capability for tool '{tool}'"
+        )
+
+    if identity.trust_tier == TrustTier.INTERN and _is_modify_or_destructive_action(request):
+        reasons.append(
+            f"identity: intern agent '{identity.agent_id}' cannot perform write/delete/modify operations"
+        )
+
+    return reasons, checked, False
 
 
 def _resolve_rule_type(rule: dict[str, Any]) -> tuple[str | None, bool]:
@@ -381,6 +441,9 @@ def _apply_composite(
     now: datetime,
     all_rules_by_name: dict[str, dict[str, Any]],
     visited: set[str],
+    max_cost_per_call_override: float | None = None,
+    daily_budget_override: float | None = None,
+    rate_limit_per_minute_override: int | None = None,
 ) -> tuple[list[str], list[str]]:
     reasons: list[str] = []
     checked = ["composite"]
@@ -417,10 +480,20 @@ def _apply_composite(
         ref_type, _ = _resolve_rule_type(ref_rule)
         ref_reasons: list[str]
         if ref_type == "budget_limit":
-            ref_reasons, _ = _apply_budget_limit(ref_rule, request, state=state, agent_id=agent_id)
+            effective_ref_rule = dict(ref_rule)
+            if max_cost_per_call_override is not None:
+                effective_ref_rule["max_cost_per_call"] = max_cost_per_call_override
+            if daily_budget_override is not None:
+                effective_ref_rule["daily_budget"] = daily_budget_override
+            ref_reasons, _ = _apply_budget_limit(
+                effective_ref_rule, request, state=state, agent_id=agent_id
+            )
         elif ref_type == "rate_limit":
+            effective_ref_rule = dict(ref_rule)
+            if rate_limit_per_minute_override is not None:
+                effective_ref_rule["max_requests_per_minute"] = rate_limit_per_minute_override
             ref_reasons, _ = _apply_rate_limit(
-                ref_rule, request, state=state, agent_id=agent_id, now=now, dry_run=True
+                effective_ref_rule, request, state=state, agent_id=agent_id, now=now, dry_run=True
             )
         elif ref_type == "file_access":
             ref_reasons, _ = _apply_file_access(ref_rule, request)
@@ -439,6 +512,9 @@ def _apply_composite(
                 now=now,
                 all_rules_by_name=all_rules_by_name,
                 visited=next_visited,
+                max_cost_per_call_override=max_cost_per_call_override,
+                daily_budget_override=daily_budget_override,
+                rate_limit_per_minute_override=rate_limit_per_minute_override,
             )
         else:
             ref_reasons = [f"composite: referenced rule '{ref_name}' is unsupported"]
@@ -480,6 +556,7 @@ def evaluate(
     *,
     state: RateLimitTracker | None = None,
     emitter: EventEmitter | None = None,
+    registry: AgentRegistry | None = None,
     now: datetime | None = None,
 ) -> Decision:
     """Evaluate request against policy rules."""
@@ -489,11 +566,30 @@ def evaluate(
     tracker = state or RateLimitTracker(persist_path=None)
     evaluation_now = now if now is not None else datetime.now(timezone.utc)
     agent_id = _resolve_agent_id(request)
+    identity = registry.get(agent_id) if registry is not None else None
     policy_version = _policy_version_hash(policy) if emitter is not None else None
     decision: Decision
 
+    if identity is not None:
+        identity_reasons, identity_checked, blocked_immediately = _apply_identity_check(request, identity)
+        reasons.extend(identity_reasons)
+        rules_checked.extend(identity_checked)
+        if blocked_immediately:
+            decision = Decision(allowed=False, reasons=reasons, rules_checked=rules_checked)
+            _emit_event(
+                emitter=emitter,
+                request=request,
+                policy=policy,
+                agent_id=agent_id,
+                tracker=tracker,
+                decision=decision,
+                started_ns=started_ns,
+                policy_version=policy_version,
+            )
+            return decision
+
     if not policy:
-        decision = Decision(allowed=True, reasons=reasons, rules_checked=rules_checked)
+        decision = Decision(allowed=len(reasons) == 0, reasons=reasons, rules_checked=rules_checked)
         _emit_event(
             emitter=emitter,
             request=request,
@@ -508,7 +604,7 @@ def evaluate(
 
     rules = policy.get("rules")
     if not isinstance(rules, list) or len(rules) == 0:
-        decision = Decision(allowed=True, reasons=reasons, rules_checked=rules_checked)
+        decision = Decision(allowed=len(reasons) == 0, reasons=reasons, rules_checked=rules_checked)
         _emit_event(
             emitter=emitter,
             request=request,
@@ -527,25 +623,47 @@ def evaluate(
     unknown_explicit_rules = cached_plan["unknown_explicit_rules"]
     legacy_unknown_name_rules = cached_plan["legacy_unknown_name_rules"]
     cached_agent_spent: float | None = None
+    effective_max_cost_per_call = (
+        identity.max_cost_per_call if identity is not None else None
+    )
+    effective_daily_budget = identity.daily_budget if identity is not None else None
+    effective_rate_limit_per_minute = (
+        identity.rate_limit_per_minute if identity is not None else None
+    )
 
     for rule_type in RULE_EVALUATION_ORDER:
+        if rule_type == "identity_check":
+            continue
         handler_name = _RULE_HANDLERS.get(rule_type)
         handler = globals().get(handler_name) if isinstance(handler_name, str) else None
         if handler is None:
             continue
         for rule in ordered[rule_type]:
+            rule_for_eval = rule
+            if rule_type == "budget_limit" and (
+                effective_max_cost_per_call is not None or effective_daily_budget is not None
+            ):
+                rule_for_eval = dict(rule)
+                if effective_max_cost_per_call is not None:
+                    rule_for_eval["max_cost_per_call"] = effective_max_cost_per_call
+                if effective_daily_budget is not None:
+                    rule_for_eval["daily_budget"] = effective_daily_budget
+            elif rule_type == "rate_limit" and effective_rate_limit_per_minute is not None:
+                rule_for_eval = dict(rule)
+                rule_for_eval["max_requests_per_minute"] = effective_rate_limit_per_minute
+
             rule_name = rule.get("name")
             safe_rule_name = rule_name if isinstance(rule_name, str) else rule_type
             try:
                 if rule_type == "budget_limit":
                     try:
-                        has_daily_budget = isinstance(rule.get("daily_budget"), int | float)
+                        has_daily_budget = isinstance(rule_for_eval.get("daily_budget"), int | float)
                         if has_daily_budget and cached_agent_spent is None:
                             cached_agent_spent = tracker.get_agent_budget_spent(
                                 agent_id, window_seconds=86400, now=evaluation_now
                             )
                         rule_reasons, checked = handler(
-                            rule,
+                            rule_for_eval,
                             request,
                             state=tracker,
                             agent_id=agent_id,
@@ -559,7 +677,7 @@ def evaluate(
                 elif rule_type == "rate_limit":
                     try:
                         rule_reasons, checked = handler(
-                            rule,
+                            rule_for_eval,
                             request,
                             state=tracker,
                             agent_id=agent_id,
@@ -572,16 +690,19 @@ def evaluate(
                         checked = ["rate_limit"]
                 elif rule_type == "composite":
                     rule_reasons, checked = handler(
-                        rule,
+                        rule_for_eval,
                         request,
                         state=tracker,
                         agent_id=agent_id,
                         now=evaluation_now,
                         all_rules_by_name=all_rules_by_name,
                         visited=set(),
+                        max_cost_per_call_override=effective_max_cost_per_call,
+                        daily_budget_override=effective_daily_budget,
+                        rate_limit_per_minute_override=effective_rate_limit_per_minute,
                     )
                 else:
-                    rule_reasons, checked = handler(rule, request)
+                    rule_reasons, checked = handler(rule_for_eval, request)
             except Exception as error:
                 rule_reasons = [f"internal_error: rule '{safe_rule_name}' raised {error}"]
                 checked = [rule_type]

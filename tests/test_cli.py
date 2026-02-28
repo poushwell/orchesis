@@ -223,3 +223,26 @@ rules:
         assert "TAMPERED" in result.output
         assert "UNSIGNED" in result.output
         assert "1 verified, 1 tampered, 1 unsigned" in result.output
+
+
+def test_agents_lists_registered_agents() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        _write_file(
+            Path("policy.yaml"),
+            """
+agents:
+  - id: "cursor"
+    name: "Cursor IDE Agent"
+    trust_tier: operator
+    allowed_tools: ["read_file", "write_file", "run_sql"]
+default_trust_tier: intern
+rules: []
+""".strip(),
+        )
+        result = runner.invoke(main, ["agents", "--policy", "policy.yaml"])
+        assert result.exit_code == 0
+        assert "Registered agents:" in result.output
+        assert "cursor" in result.output
+        assert "operator" in result.output
+        assert "Default tier: intern" in result.output
