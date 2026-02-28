@@ -7,8 +7,9 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from orchesis.config import load_policy
+from orchesis.config import PolicyWatcher, load_policy
 from orchesis.engine import evaluate
+from orchesis.state import RateLimitTracker
 
 
 def _extract_tool(request: Request, body_json: dict[str, Any] | None) -> str:
@@ -52,6 +53,7 @@ def _extract_cost(request: Request, body_json: dict[str, Any] | None) -> float:
 def create_proxy_app(
     policy: dict[str, Any],
     *,
+    policy_path: str | None = None,
     backend_url: str = "http://backend",
     backend_app: FastAPI | None = None,
     backend_transport: httpx.AsyncBaseTransport | None = None,
@@ -62,10 +64,31 @@ def create_proxy_app(
     transport = backend_transport
     if transport is None and backend_app is not None:
         transport = httpx.ASGITransport(app=backend_app)
+    state_tracker = RateLimitTracker(persist_path=None)
+    current_policy = policy
+    watcher: PolicyWatcher | None = None
+    current_policy_hash = ""
+    if policy_path is not None:
+        current_policy_hash = PolicyWatcher(policy_path, lambda _policy: None).current_hash()
+
+        def _on_reload(new_policy: dict[str, Any]) -> None:
+            nonlocal current_policy
+            current_policy = new_policy
+
+        watcher = PolicyWatcher(policy_path, _on_reload)
+        watcher._last_hash = current_policy_hash
 
     @app.middleware("http")
     async def decision_middleware(request: Request, call_next: Any) -> Response:
         _ = call_next
+        nonlocal current_policy_hash
+
+        if watcher is not None:
+            old_hash = current_policy_hash
+            if watcher.check():
+                current_policy_hash = watcher._last_hash
+                print(f"Policy reloaded: {old_hash} -> {current_policy_hash}")
+
         raw_body = await request.body()
         body_json: dict[str, Any] | None = None
         if raw_body:
@@ -82,7 +105,7 @@ def create_proxy_app(
             "cost": _extract_cost(request, body_json),
             "context": {"method": request.method, "path": request.url.path},
         }
-        decision = evaluate(eval_request, policy)
+        decision = evaluate(eval_request, current_policy, state=state_tracker)
 
         if not decision.allowed:
             return JSONResponse(
@@ -136,7 +159,7 @@ def build_app_from_env() -> FastAPI:
     policy_path = os.getenv("POLICY_PATH", _default_policy_path())
     backend_url = os.getenv("BACKEND_URL", "http://127.0.0.1:8081")
     policy = load_policy(policy_path)
-    return create_proxy_app(policy=policy, backend_url=backend_url)
+    return create_proxy_app(policy=policy, policy_path=policy_path, backend_url=backend_url)
 
 
 app = build_app_from_env()

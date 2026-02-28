@@ -1,8 +1,9 @@
 """Policy loading and validation."""
 
+import hashlib
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -140,3 +141,28 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
             break
 
     return errors
+
+
+class PolicyWatcher:
+    """Monitors policy file and reloads on change."""
+
+    def __init__(self, path: str, on_reload: Callable[[dict[str, Any]], None]):
+        self.path = Path(path)
+        self.on_reload = on_reload
+        self._last_hash: str = ""
+
+    def current_hash(self) -> str:
+        if not self.path.exists():
+            return ""
+        content = self.path.read_bytes()
+        return hashlib.sha256(content).hexdigest()
+
+    def check(self) -> bool:
+        new_hash = self.current_hash()
+        if not new_hash or new_hash == self._last_hash:
+            return False
+
+        policy = load_policy(self.path)
+        self.on_reload(policy)
+        self._last_hash = new_hash
+        return True

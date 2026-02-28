@@ -158,6 +158,25 @@ class RateLimitTracker:
             >= max_requests
         )
 
+    def check_and_record(
+        self,
+        tool_name: str,
+        max_requests: int,
+        window_seconds: int,
+        *,
+        agent_id: str = GLOBAL_AGENT_ID,
+        timestamp: datetime | str | None = None,
+    ) -> bool:
+        current = _to_datetime_utc(timestamp)
+        safe_agent_id = agent_id if isinstance(agent_id, str) and agent_id else GLOBAL_AGENT_ID
+        with self._lock:
+            key = (safe_agent_id, tool_name)
+            self._prune(key, current, window_seconds)
+            over_limit = len(self._events[key]) >= max_requests
+            self._events[key].append(current)
+            self._persist_rate(tool_name, current, safe_agent_id)
+            return over_limit
+
     def get_agent_budget_spent(
         self,
         agent_id: str,

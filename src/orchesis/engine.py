@@ -1,14 +1,20 @@
 """Rule evaluation engine."""
 
+import hashlib
+import json
 import posixpath
 import re
+import time
 import unicodedata
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import unquote
 
+import yaml
 from orchesis.models import Decision
 from orchesis.state import GLOBAL_AGENT_ID, RateLimitTracker
+from orchesis.telemetry import DecisionEvent, EventEmitter
 
 RULE_EVALUATION_ORDER = [
     "budget_limit",
@@ -32,6 +38,40 @@ class EvaluationGuarantees:
     UNKNOWN_FIELD_SAFE = True
     THREAD_SAFE = True
     EVALUATION_ORDER = RULE_EVALUATION_ORDER
+
+
+def _stable_sha256(payload: Any) -> str:
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _policy_version_hash(policy: dict[str, Any] | None) -> str:
+    if policy is None:
+        return hashlib.sha256(b"null").hexdigest()
+    dumped = yaml.dump(policy, sort_keys=True)
+    return hashlib.sha256(dumped.encode("utf-8")).hexdigest()
+
+
+def _rules_triggered(reasons: list[str]) -> list[str]:
+    triggered: list[str] = []
+    seen: set[str] = set()
+    for reason in reasons:
+        if ":" not in reason:
+            continue
+        name = reason.split(":", 1)[0].strip()
+        if name and name not in seen:
+            seen.add(name)
+            triggered.append(name)
+    return triggered
+
+
+def _build_state_snapshot(state: RateLimitTracker, agent_id: str) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {"agent_id": agent_id, "window_seconds": 60, "tool_counts": {}}
+    for tool in state.get_tools():
+        snapshot["tool_counts"][tool] = state.get_count(
+            tool, window_seconds=60, agent_id=agent_id
+        )
+    return snapshot
 
 
 def _sanitize_text(value: str) -> str:
@@ -165,12 +205,18 @@ def _apply_rate_limit(
     tool_name = request.get("tool")
     tool = tool_name if isinstance(tool_name, str) else "__unknown__"
     now = datetime.now(timezone.utc)
-    if state.is_over_limit(tool, max_per_minute, 60, now=now, agent_id=agent_id):
-        reasons.append(
-            f"rate_limit: tool '{tool}' exceeded max_requests_per_minute {max_per_minute}"
+    if dry_run:
+        over_limit = state.is_over_limit(tool, max_per_minute, 60, now=now, agent_id=agent_id)
+    else:
+        over_limit = state.check_and_record(
+            tool,
+            max_requests=max_per_minute,
+            window_seconds=60,
+            timestamp=now,
+            agent_id=agent_id,
         )
-    if not dry_run:
-        state.record(tool, now, agent_id=agent_id)
+    if over_limit:
+        reasons.append(f"rate_limit: tool '{tool}' exceeded max_requests_per_minute {max_per_minute}")
     return reasons, checked
 
 
@@ -393,20 +439,42 @@ def evaluate(
     policy: dict[str, Any] | None,
     *,
     state: RateLimitTracker | None = None,
+    emitter: EventEmitter | None = None,
 ) -> Decision:
     """Evaluate request against policy rules."""
+    started_ns = time.perf_counter_ns()
     reasons: list[str] = []
     rules_checked: list[str] = []
     tracker = state or RateLimitTracker(persist_path=None)
+    agent_id = _resolve_agent_id(request)
+    decision: Decision
 
     if not policy:
-        return Decision(allowed=True, reasons=reasons, rules_checked=rules_checked)
+        decision = Decision(allowed=True, reasons=reasons, rules_checked=rules_checked)
+        _emit_event(
+            emitter=emitter,
+            request=request,
+            policy=policy,
+            agent_id=agent_id,
+            tracker=tracker,
+            decision=decision,
+            started_ns=started_ns,
+        )
+        return decision
 
     rules = policy.get("rules")
     if not isinstance(rules, list) or len(rules) == 0:
-        return Decision(allowed=True, reasons=reasons, rules_checked=rules_checked)
-
-    agent_id = _resolve_agent_id(request)
+        decision = Decision(allowed=True, reasons=reasons, rules_checked=rules_checked)
+        _emit_event(
+            emitter=emitter,
+            request=request,
+            policy=policy,
+            agent_id=agent_id,
+            tracker=tracker,
+            decision=decision,
+            started_ns=started_ns,
+        )
+        return decision
 
     all_rules_by_name: dict[str, dict[str, Any]] = {}
     ordered: dict[str, list[dict[str, Any]]] = {rule_type: [] for rule_type in RULE_EVALUATION_ORDER}
@@ -501,4 +569,58 @@ def evaluate(
                 reasons.append("state_error: rate limit state unavailable, denying for safety")
                 allowed = False
 
-    return Decision(allowed=allowed, reasons=reasons, rules_checked=rules_checked)
+    decision = Decision(allowed=allowed, reasons=reasons, rules_checked=rules_checked)
+    _emit_event(
+        emitter=emitter,
+        request=request,
+        policy=policy,
+        agent_id=agent_id,
+        tracker=tracker,
+        decision=decision,
+        started_ns=started_ns,
+    )
+    return decision
+
+
+def _emit_event(
+    *,
+    emitter: EventEmitter | None,
+    request: dict[str, Any],
+    policy: dict[str, Any] | None,
+    agent_id: str,
+    tracker: RateLimitTracker,
+    decision: Decision,
+    started_ns: int,
+) -> None:
+    if emitter is None:
+        return
+
+    params = request.get("params")
+    params_payload = params if isinstance(params, dict) else {}
+    cost = _coerce_cost(request.get("cost"))
+    safe_cost = cost if cost is not None else 0.0
+
+    try:
+        state_snapshot = _build_state_snapshot(tracker, agent_id)
+    except Exception:
+        state_snapshot = {"error": "state_unavailable"}
+
+    elapsed_us = max(0, (time.perf_counter_ns() - started_ns) // 1000)
+    tool = request.get("tool") if isinstance(request.get("tool"), str) else "__unknown__"
+    event = DecisionEvent(
+        event_id=str(uuid.uuid4()),
+        timestamp=decision.timestamp,
+        agent_id=agent_id,
+        tool=tool,
+        params_hash=_stable_sha256(params_payload),
+        cost=float(safe_cost),
+        decision="ALLOW" if decision.allowed else "DENY",
+        reasons=list(decision.reasons),
+        rules_checked=list(decision.rules_checked),
+        rules_triggered=_rules_triggered(decision.reasons),
+        evaluation_order=list(RULE_EVALUATION_ORDER),
+        evaluation_duration_us=int(elapsed_us),
+        policy_version=_policy_version_hash(policy),
+        state_snapshot=state_snapshot,
+    )
+    emitter.emit(event)
