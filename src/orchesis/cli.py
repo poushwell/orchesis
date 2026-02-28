@@ -25,6 +25,7 @@ from orchesis.invariants import InvariantChecker
 from orchesis.logger import read_decisions
 from orchesis.corpus import RegressionCorpus
 from orchesis.policy_store import PolicyStore
+from orchesis.plugins import load_plugins_for_policy
 from orchesis.replay import ReplayEngine, read_events_from_jsonl
 from orchesis.reliability import ReliabilityReportGenerator
 from orchesis.scenarios import AdversarialScenarios
@@ -111,13 +112,26 @@ def keygen() -> None:
 @click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
 @click.option("--sign", "should_sign", is_flag=True, default=False)
 @click.option("--debug", "debug_mode", is_flag=True, default=False)
-def verify(request_path: str, policy_path: str, should_sign: bool, debug_mode: bool) -> None:
+@click.option(
+    "--plugins",
+    "plugin_modules",
+    multiple=True,
+    help="Plugin module path(s), e.g. orchesis.contrib.pii_detector",
+)
+def verify(
+    request_path: str,
+    policy_path: str,
+    should_sign: bool,
+    debug_mode: bool,
+    plugin_modules: tuple[str, ...],
+) -> None:
     """Verify a request against policy."""
     try:
         request = json.loads(Path(request_path).read_text(encoding="utf-8"))
         policy = load_policy(policy_path)
         has_identity_config = "agents" in policy or "default_trust_tier" in policy
         registry = load_agent_registry(policy) if has_identity_config else None
+        plugins = load_plugins_for_policy(policy, _normalize_plugin_modules(plugin_modules))
     except (json.JSONDecodeError, OSError) as error:
         raise click.ClickException(f"Failed to load request: {error}") from error
     except (ValueError, YAMLError, OSError) as error:
@@ -137,6 +151,7 @@ def verify(request_path: str, policy_path: str, should_sign: bool, debug_mode: b
                 state=state_tracker,
                 emitter=memory_emitter,
                 registry=registry,
+                plugins=plugins,
                 debug=debug_mode,
             )
             if not DEFAULT_PRIVATE_KEY_PATH.exists():
@@ -160,6 +175,7 @@ def verify(request_path: str, policy_path: str, should_sign: bool, debug_mode: b
                 state=state_tracker,
                 emitter=JsonlEmitter(DEFAULT_DECISIONS_PATH),
                 registry=registry,
+                plugins=plugins,
                 debug=debug_mode,
             )
 
@@ -255,7 +271,13 @@ def rollback(policy_path: str) -> None:
 @main.command()
 @click.option("--port", type=int, default=8080)
 @click.option("--policy", "policy_path", type=click.Path(exists=True), default="policy.yaml")
-def serve(port: int, policy_path: str) -> None:
+@click.option(
+    "--plugins",
+    "plugin_modules",
+    multiple=True,
+    help="Plugin module path(s), e.g. orchesis.contrib.pii_detector",
+)
+def serve(port: int, policy_path: str, plugin_modules: tuple[str, ...]) -> None:
     """Run Orchesis control API server."""
     try:
         policy = load_policy(policy_path)
@@ -272,8 +294,49 @@ def serve(port: int, policy_path: str) -> None:
     )
     click.echo("Endpoints: /api/v1/policy, /api/v1/agents, /api/v1/evaluate, /api/v1/status")
     OPERATIONS_LOG.info("starting api server", port=port, policy_path=policy_path)
-    app = create_api_app(policy_path=policy_path)
+    app = create_api_app(
+        policy_path=policy_path,
+        plugin_modules=_normalize_plugin_modules(plugin_modules),
+    )
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+
+def _normalize_plugin_modules(raw_modules: tuple[str, ...]) -> list[str]:
+    normalized: list[str] = []
+    for entry in raw_modules:
+        if not isinstance(entry, str):
+            continue
+        parts = [item.strip() for item in entry.split(",") if item.strip()]
+        normalized.extend(parts)
+    return normalized
+
+
+@main.command("plugins")
+@click.option("--policy", "policy_path", type=click.Path(exists=True), default=None)
+@click.option("--plugins", "plugin_modules", multiple=True)
+def plugins_command(policy_path: str | None, plugin_modules: tuple[str, ...]) -> None:
+    """List registered plugins."""
+    policy: dict[str, Any] = {"rules": []}
+    if policy_path is not None:
+        try:
+            policy = load_policy(policy_path)
+        except (ValueError, YAMLError, OSError) as error:
+            raise click.ClickException(f"Failed to load policy: {error}") from error
+    modules = _normalize_plugin_modules(plugin_modules)
+    if not modules:
+        modules = [
+            "orchesis.contrib.pii_detector",
+            "orchesis.contrib.ip_allowlist",
+            "orchesis.contrib.time_window",
+        ]
+    registry = load_plugins_for_policy(policy, modules)
+    click.echo("Registered plugins:")
+    items = sorted(registry.list_plugins(), key=lambda item: item.rule_type)
+    if not items:
+        click.echo("  (none)")
+        return
+    for item in items:
+        click.echo(f"  {item.rule_type:<13} v{item.version:<4} {item.description}")
 
 
 @main.command()

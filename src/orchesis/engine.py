@@ -15,6 +15,7 @@ from urllib.parse import unquote
 import yaml
 from orchesis.identity import AgentIdentity, AgentRegistry, TrustTier, check_capability
 from orchesis.models import Decision
+from orchesis.plugins import PluginRegistry
 from orchesis.state import DEFAULT_SESSION_ID, GLOBAL_AGENT_ID, RateLimitTracker
 from orchesis.telemetry import DecisionEvent, EventEmitter
 
@@ -592,6 +593,7 @@ def evaluate(
     state: RateLimitTracker | None = None,
     emitter: EventEmitter | None = None,
     registry: AgentRegistry | None = None,
+    plugins: PluginRegistry | None = None,
     now: datetime | None = None,
     debug: bool = False,
 ) -> Decision:
@@ -802,8 +804,34 @@ def evaluate(
             rules_checked.extend(checked)
 
     for unknown_type, rule in unknown_explicit_rules:
-        rules_checked.append(f"unknown_rule_type:{unknown_type}")
-        reasons.append(f"unknown_rule_type: '{unknown_type}' is not supported")
+        plugin_handler = plugins.get_handler(unknown_type) if plugins is not None else None
+        if plugin_handler is None:
+            rules_checked.append(f"unknown_rule_type:{unknown_type}")
+            reasons.append(f"unknown_rule_type: '{unknown_type}' is not supported")
+            continue
+        rule_started_ns = time.perf_counter_ns() if debug else 0
+        try:
+            plugin_reasons, checked = plugin_handler.evaluate(
+                rule,
+                request,
+                state=tracker,
+                agent_id=agent_id,
+                session_id=session_id,
+            )
+        except Exception as error:
+            plugin_reasons = [f"internal_error: plugin '{unknown_type}' raised {error}"]
+            checked = [unknown_type]
+        reasons.extend(plugin_reasons)
+        rules_checked.extend(checked)
+        if debug:
+            debug_rule_results.append(
+                {
+                    "rule": unknown_type,
+                    "passed": len(plugin_reasons) == 0,
+                    "duration_us": max(0, (time.perf_counter_ns() - rule_started_ns) // 1000),
+                    "reason": plugin_reasons[0] if plugin_reasons else "",
+                }
+            )
 
     for rule in legacy_unknown_name_rules:
         rule_name = rule.get("name")

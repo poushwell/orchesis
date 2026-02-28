@@ -21,6 +21,7 @@ from orchesis.events import EventBus
 from orchesis.metrics import MetricsCollector
 from orchesis.otel import OTelEmitter, TraceContext
 from orchesis.policy_store import PolicyStore
+from orchesis.plugins import load_plugins_for_policy
 from orchesis.reliability import ReliabilityReportGenerator
 from orchesis.state import RateLimitTracker
 from orchesis.structured_log import StructuredLogger
@@ -32,6 +33,7 @@ def create_api_app(
     state_persist: str = ".orchesis/state.jsonl",
     decisions_log: str = ".orchesis/decisions.jsonl",
     history_path: str = ".orchesis/policy_versions.jsonl",
+    plugin_modules: list[str] | None = None,
 ) -> FastAPI:
     """Create governance control-plane API."""
     app = FastAPI(title="Orchesis Control API")
@@ -68,9 +70,15 @@ def create_api_app(
     app.state.policy_path = str(policy_file)
     app.state.decisions_log = decisions_log
     app.state.current_version = current_version
+    app.state.plugin_modules = list(plugin_modules or [])
+    app.state.plugins = load_plugins_for_policy(current_version.policy, app.state.plugin_modules)
 
     def _refresh_current_version() -> None:
         app.state.current_version = store.current or store.load(str(policy_file))
+        app.state.plugins = load_plugins_for_policy(
+            app.state.current_version.policy,
+            app.state.plugin_modules,
+        )
 
     def _auth_token_from_policy() -> str | None:
         policy = app.state.current_version.policy
@@ -395,6 +403,7 @@ def create_api_app(
             state=tracker,
             emitter=event_bus,
             registry=app.state.current_version.registry,
+            plugins=app.state.plugins,
             debug=debug_mode,
         )
         elapsed_us = max(0, (time.perf_counter_ns() - started_ns) // 1000)
