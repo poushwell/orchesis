@@ -1,0 +1,92 @@
+from pathlib import Path
+
+import pytest
+
+from orchesis.config import load_policy, validate_policy
+
+
+def _write_yaml(tmp_path: Path, name: str, content: str) -> Path:
+    file_path = tmp_path / name
+    file_path.write_text(content, encoding="utf-8")
+    return file_path
+
+
+def test_load_policy_reads_valid_yaml_mapping(tmp_path: Path) -> None:
+    policy_path = _write_yaml(
+        tmp_path,
+        "policy.yaml",
+        """
+rules:
+  - name: budget_limit
+    max_cost_per_call: 0.5
+""".strip(),
+    )
+
+    policy = load_policy(policy_path)
+
+    assert isinstance(policy, dict)
+    assert policy["rules"][0]["name"] == "budget_limit"
+
+
+def test_load_policy_raises_on_non_mapping_root(tmp_path: Path) -> None:
+    policy_path = _write_yaml(
+        tmp_path,
+        "invalid.yaml",
+        """
+- name: budget_limit
+  max_cost_per_call: 0.5
+""".strip(),
+    )
+
+    with pytest.raises(ValueError, match="top-level YAML object"):
+        load_policy(policy_path)
+
+
+def test_validate_policy_accepts_valid_policy() -> None:
+    policy = {
+        "rules": [
+            {"name": "budget_limit", "max_cost_per_call": 0.5, "daily_budget": 50.0},
+            {"name": "file_access", "allowed_paths": ["/tmp"], "denied_paths": ["/etc"]},
+            {
+                "name": "sql_restriction",
+                "allowed_operations": ["SELECT"],
+                "denied_operations": ["DROP"],
+            },
+            {"name": "rate_limit", "max_requests_per_minute": 100},
+        ]
+    }
+
+    errors = validate_policy(policy)
+
+    assert errors == []
+
+
+def test_validate_policy_requires_rules_list() -> None:
+    errors = validate_policy({})
+    assert "policy.rules must be a list" in errors
+
+
+def test_validate_policy_requires_rule_name() -> None:
+    policy = {"rules": [{"max_cost_per_call": 0.5}]}
+
+    errors = validate_policy(policy)
+
+    assert "rules[0].name must be a non-empty string" in errors
+
+
+def test_validate_policy_checks_required_fields_per_known_rule() -> None:
+    policy = {
+        "rules": [
+            {"name": "budget_limit"},
+            {"name": "file_access"},
+            {"name": "sql_restriction"},
+            {"name": "rate_limit"},
+        ]
+    }
+
+    errors = validate_policy(policy)
+
+    assert "rules[0].max_cost_per_call is required for budget_limit" in errors
+    assert "rules[1] must define allowed_paths and/or denied_paths for file_access" in errors
+    assert "rules[2].denied_operations is required for sql_restriction" in errors
+    assert "rules[3].max_requests_per_minute is required for rate_limit" in errors

@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orchesis"
+version = "0.1.0"
+description = "Verification kernel for AI agent tool calls"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+  {name = "Orchesis Team"},
+]
+keywords = ["ai", "agent", "verification", "policy", "mcp", "proxy", "audit"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: Security",
+]
+dependencies = [
+  "PyYAML",
+  "click",
+  "fastapi",
+  "uvicorn",
+  "httpx",
+  "mcp",
+  "cryptography",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "ruff",
+  "mcp-server-sqlite",
+  "hypothesis",
+]
+
+[project.scripts]
+orchesis = "orchesis.cli:main"
+orchesis-mcp-proxy = "orchesis.mcp_proxy:main"
+orchesis-agent = "orchesis.agent.runner:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 99
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

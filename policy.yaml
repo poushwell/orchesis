@@ -1,0 +1,26 @@
+rules:
+  - name: budget_limit
+    max_cost_per_call: 0.50
+    daily_budget: 50.00
+
+  - name: file_access
+    allowed_paths:
+      - "/data"
+      - "/tmp"
+    denied_paths:
+      - "/etc"
+      - "/root"
+      - "/var/secrets"
+
+  - name: sql_restriction
+    allowed_operations:
+      - "SELECT"
+      - "INSERT"
+    denied_operations:
+      - "DROP"
+      - "DELETE"
+      - "TRUNCATE"
+      - "ALTER"
+
+  - name: rate_limit
+    max_requests_per_minute: 100

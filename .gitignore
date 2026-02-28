@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+*.pyc
+.eggs/
+dist/
+build/
+*.egg-info/
+decisions.jsonl
+.ruff_cache/
