@@ -1,95 +1,102 @@
 # Orchesis — Agent Runtime Governance Layer
 
-[![CI](https://img.shields.io/badge/CI-pending-lightgrey)](#)
-[![PyPI](https://img.shields.io/badge/PyPI-pending-lightgrey)](#)
-[![License](https://img.shields.io/badge/license-MIT-yellow.svg)](#license)
+> Policy-based verification for AI agent tool calls.  
+> Deterministic. Fail-closed. Framework-agnostic.
 
-Policy-based verification proxy for AI agent tool calls.
+## Why Orchesis
 
-## What it does
+AI agents can execute powerful tools, but most systems still lack runtime guardrails between planner and execution. Recent industry reports show that incident rates remain high in agent-enabled environments, with many organizations reporting policy and data-access violations. Orchesis enforces explicit policy at runtime between agent and tool call, so risky actions are blocked before execution.
 
-Orchesis sits between AI agents and their tools.  
-Every tool call passes through a policy engine that decides ALLOW or DENY.  
-All decisions are logged with cryptographic signatures for audit.
-
-## Quick Demo
+## Quick Start
 
 ```bash
 pip install orchesis
 orchesis init
-orchesis verify request.json --policy policy.yaml
-orchesis agents --policy policy.yaml
-orchesis policy-history --policy policy.yaml
-orchesis audit
+orchesis verify examples/request.json --policy examples/policy.yaml
 ```
 
-Agent demo (condensed real output):
-- `analyze_sales_data`: 3 ALLOW
-- `dangerous_cleanup`: 2 DENY (`file_access`, `sql_restriction`)
-- `budget_burn`: 2 DENY (`budget_limit`)
-- `rate_limited_spam`: 100 ALLOW then 100 DENY (`rate_limit`)
-- `untrusted_agent_attempt`: 2 DENY (`context_rules`)
+## 30-Second Demo
 
-## Agent Identity
+Real behavior from the included demo flows:
 
-Every request can carry `context.agent` and `context.session`. Orchesis resolves the
-agent identity from policy and enforces trust-tier capabilities before normal rules.
-
-| Tier | Description | Default capabilities |
-|---|---|---|
-| `blocked` | no execution | none |
-| `intern` | read-only | read |
-| `assistant` | safe writes in scope | read, write |
-| `operator` | full operational tooling | read, write, delete, execute |
-| `principal` | admin/system | read, write, delete, execute, admin |
-
-## Policy Versioning
-
-`PolicyStore` assigns each loaded policy a SHA256 version id and keeps history with rollback:
-
-- In-memory history for hot reload
-- Persistent history at `.orchesis/policy_versions.jsonl`
-- CLI visibility via `orchesis policy-history`
-- Rollback via `orchesis rollback`
+- `cursor` (`operator`): full access to assigned tools inside policy limits
+- `untrusted_bot` (`intern`): read-only behavior, write/delete attempts denied
+- `blocked_agent` (`blocked`): all tool calls denied at identity check
+- `rate_limit` rule: first 100 allowed, then hard block with explicit reason
 
 ## Architecture
 
 ```text
-Agent -> Orchesis identity_check -> policy rules -> ALLOW -> Tool executes
-                                 -> DENY  -> Agent receives block + reason
-         |
-         +-> PolicyStore (version hash + history + rollback)
-         +-> Session-aware state (agent_id + session_id + tool)
+Agent -> Orchesis evaluate() -> ALLOW -> Tool executes
+                           \-> DENY  -> Agent blocked + reason logged
+
+Control API <-> Policy Store <-> Enforcement Nodes
+     |
+     +-> Agent Registry (trust tiers)
 ```
 
-## Policy Rules
+## Core Features
 
-- `file_access`: path prefix allow/deny
-- `sql_restriction`: blocked SQL operations
-- `budget_limit`: per-call and daily cost caps
-- `rate_limit`: sliding window per tool
-- `regex_match`: pattern-based blocking
-- `context_rules`: per-agent permissions
-- `composite`: AND/OR rule combinations
+### Policy Engine
 
-## MCP Proxy Integration
+- YAML-based declarative rules
+- 7 rule types: `file_access`, `sql_restriction`, `budget_limit`, `rate_limit`, `regex_match`, `context_rules`, `composite`
+- Deterministic evaluation order
+- Fail-closed guarantees
 
-Use Orchesis as MCP interceptor with real clients:
+### Agent Identity & Trust Tiers
+
+- 5 trust levels: `BLOCKED` -> `INTERN` -> `ASSISTANT` -> `OPERATOR` -> `PRINCIPAL`
+- Capability-based tool access
+- Per-agent rate limits and budgets
+
+### Security
+
+- 14 known attack patterns in regression corpus
+- Synthetic fuzzer with 7 attack categories
+- 7 mutation strategies for corpus evolution
+- 9 formal runtime invariants
+- Ed25519 signed audit trail
+- Adversarial hardening for path traversal, SQL injection, cost manipulation, identity spoofing, and regex evasion
+
+### Observability
+
+- Structured telemetry (`DecisionEvent`)
+- OpenTelemetry-compatible span export
+- Prometheus metrics endpoint
+- Webhook notifications with optional HMAC signing
+- Event bus with pub/sub subscribers
+- Debug mode with full evaluation trace
+
+### Governance
+
+- Policy versioning with rollback
+- HTTP Control API with token auth
+- Remote policy management endpoints
+- Audit query engine with anomaly detection
+- Forensic timeline per agent
+- Deterministic replay engine
+- Reliability report generation
+
+### Integration
+
+```python
+from orchesis.client import OrchesisClient
+
+client = OrchesisClient("http://localhost:8080", api_token="orch_sk_...")
+
+if client.is_allowed("read_file", params={"path": "/data/report.csv"}):
+    # proceed
+    ...
+```
+
+## MCP Proxy
+
+Ready-to-use MCP proxy examples:
+
 - Cursor config: `examples/cursor_mcp_config.json`
 - Claude Code config: `examples/claude_code_mcp_config.json`
-- Production policy template: `examples/production_policy.yaml`
-
-## Agent Harness
-
-```bash
-orchesis-agent run analyze_sales_data --policy policy.yaml --tasks agent_tasks.yaml
-```
-
-## Security
-
-- Ed25519 signed audit trail
-- 30 adversarial tests (path traversal, SQL bypass, cost manipulation, and more)
-- Formal threat model: `docs/THREAT_MODEL.md`
+- Production policy baseline: `examples/production_policy.yaml`
 
 ## Docker
 
@@ -97,14 +104,34 @@ orchesis-agent run analyze_sales_data --policy policy.yaml --tasks agent_tasks.y
 docker compose up -d
 ```
 
-## CI/CD
+## CLI Reference
 
-GitHub Actions workflows for lint, tests, and publish.
+| Command | Description |
+|---------|-------------|
+| `orchesis init` | Initialize project |
+| `orchesis verify` | Evaluate request against policy |
+| `orchesis validate` | Check policy syntax |
+| `orchesis audit` | Query decision logs |
+| `orchesis agents` | List registered agents |
+| `orchesis fuzz` | Run synthetic fuzzer |
+| `orchesis scenarios` | Run adversarial scenarios |
+| `orchesis mutate` | Run mutation engine |
+| `orchesis invariants` | Verify runtime invariants |
+| `orchesis replay` | Deterministic replay |
+| `orchesis forensic` | Agent timeline investigation |
+| `orchesis corpus` | Manage attack corpus |
+| `orchesis serve` | Start Control API |
+| `orchesis reliability-report` | Generate reliability report |
+| `orchesis policy-history` | View policy versions |
+| `orchesis rollback` | Rollback to previous policy |
 
-## Install
+## Testing
 
 ```bash
-pip install orchesis
+pytest                                    # 310 tests
+orchesis fuzz --policy policy.yaml        # synthetic fuzzer
+orchesis invariants --policy policy.yaml  # formal invariants
+orchesis scenarios --policy policy.yaml   # adversarial scenarios
 ```
 
 ## License

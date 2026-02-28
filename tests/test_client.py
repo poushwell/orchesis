@@ -100,7 +100,7 @@ def test_set_agent_tier(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_status(monkeypatch: pytest.MonkeyPatch) -> None:
     def _mock_request(**kwargs):
         _ = kwargs
-        return httpx.Response(200, json={"version": "0.4.0", "total_decisions": 10})
+        return httpx.Response(200, json={"version": "0.5.0", "total_decisions": 10})
 
     monkeypatch.setattr(httpx, "request", _mock_request)
     payload = OrchesisClient(api_token="orch_sk_test").status()

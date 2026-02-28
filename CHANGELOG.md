@@ -1,3 +1,21 @@
+## [0.5.0] - 2026-02-28
+
+### Added
+- OpenTelemetry-compatible span export
+- W3C Trace Context propagation
+- Structured JSON logging (replaces print statements)
+- Debug mode for `evaluate()` with full rule trace
+- Python SDK client with `OrchesisClient`
+- `orchesis_guard` decorator for easy integration
+- 5 integration examples (basic, MCP, FastAPI, LangChain, CrewAI)
+- 9 formal runtime invariants
+- Comprehensive documentation suite
+- PyPI-ready package metadata with release classifiers
+
+### Changed
+- Proxy/API operational logging now uses structured JSON format
+- Debug trace is available via CLI `--debug` and API `debug: true`
+
 ## [0.4.0] - 2026-02-28
 
 ### Added
