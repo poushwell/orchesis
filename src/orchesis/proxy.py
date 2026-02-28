@@ -1,5 +1,6 @@
 """FastAPI proxy layer using Orchesis rule engine."""
 
+from contextlib import asynccontextmanager
 import os
 from typing import Any
 
@@ -59,8 +60,6 @@ def create_proxy_app(
     backend_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     """Create a proxy app that evaluates rules before forwarding requests."""
-    app = FastAPI(title="Orchesis Proxy")
-
     transport = backend_transport
     if transport is None and backend_app is not None:
         transport = httpx.ASGITransport(app=backend_app)
@@ -78,9 +77,14 @@ def create_proxy_app(
         watcher = PolicyWatcher(policy_path, _on_reload)
         watcher._last_hash = current_policy_hash
 
-    @app.on_event("shutdown")
-    async def _flush_state_tracker() -> None:
-        state_tracker.flush()
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            state_tracker.flush()
+
+    app = FastAPI(title="Orchesis Proxy", lifespan=_lifespan)
 
     @app.middleware("http")
     async def decision_middleware(request: Request, call_next: Any) -> Response:

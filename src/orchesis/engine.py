@@ -28,6 +28,7 @@ RULE_EVALUATION_ORDER = [
 ]
 
 KNOWN_RULE_TYPES = set(RULE_EVALUATION_ORDER)
+_POLICY_PLAN_CACHE: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
 
 
 class EvaluationGuarantees:
@@ -81,6 +82,11 @@ def _build_state_snapshot(state: RateLimitTracker, agent_id: str) -> dict[str, A
 
 
 def _sanitize_text(value: str) -> str:
+    return _sanitize_text_cached(value)
+
+
+@lru_cache(maxsize=512)
+def _sanitize_text_cached(value: str) -> str:
     return unicodedata.normalize("NFKC", value.replace("\x00", " ").strip())
 
 
@@ -515,29 +521,12 @@ def evaluate(
         )
         return decision
 
-    all_rules_by_name: dict[str, dict[str, Any]] = {}
-    ordered: dict[str, list[dict[str, Any]]] = {rule_type: [] for rule_type in RULE_EVALUATION_ORDER}
-    unknown_explicit_rules: list[tuple[str, dict[str, Any]]] = []
-    legacy_unknown_name_rules: list[dict[str, Any]] = []
+    cached_plan = _get_policy_plan(policy, rules)
+    all_rules_by_name = cached_plan["all_rules_by_name"]
+    ordered = cached_plan["ordered"]
+    unknown_explicit_rules = cached_plan["unknown_explicit_rules"]
+    legacy_unknown_name_rules = cached_plan["legacy_unknown_name_rules"]
     cached_agent_spent: float | None = None
-
-    for rule in rules:
-        if not isinstance(rule, dict):
-            continue
-        name = rule.get("name")
-        if isinstance(name, str):
-            all_rules_by_name[name] = rule
-
-        rule_type, from_type_field = _resolve_rule_type(rule)
-        if rule_type is None:
-            continue
-
-        if rule_type in KNOWN_RULE_TYPES:
-            ordered[rule_type].append(rule)
-        elif from_type_field:
-            unknown_explicit_rules.append((rule_type, rule))
-        else:
-            legacy_unknown_name_rules.append(rule)
 
     for rule_type in RULE_EVALUATION_ORDER:
         handler_name = _RULE_HANDLERS.get(rule_type)
@@ -678,3 +667,46 @@ def _emit_event(
         emitter.emit(event)
     except Exception:
         pass
+
+
+def _get_policy_plan(
+    policy: dict[str, Any],
+    rules: list[Any],
+) -> dict[str, Any]:
+    key = id(policy)
+    cached = _POLICY_PLAN_CACHE.get(key)
+    if cached is not None and cached[0] is policy:
+        return cached[1]
+
+    all_rules_by_name: dict[str, dict[str, Any]] = {}
+    ordered: dict[str, list[dict[str, Any]]] = {rule_type: [] for rule_type in RULE_EVALUATION_ORDER}
+    unknown_explicit_rules: list[tuple[str, dict[str, Any]]] = []
+    legacy_unknown_name_rules: list[dict[str, Any]] = []
+
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        name = rule.get("name")
+        if isinstance(name, str):
+            all_rules_by_name[name] = rule
+
+        rule_type, from_type_field = _resolve_rule_type(rule)
+        if rule_type is None:
+            continue
+        if rule_type in KNOWN_RULE_TYPES:
+            ordered[rule_type].append(rule)
+        elif from_type_field:
+            unknown_explicit_rules.append((rule_type, rule))
+        else:
+            legacy_unknown_name_rules.append(rule)
+
+    plan = {
+        "all_rules_by_name": all_rules_by_name,
+        "ordered": ordered,
+        "unknown_explicit_rules": unknown_explicit_rules,
+        "legacy_unknown_name_rules": legacy_unknown_name_rules,
+    }
+    if len(_POLICY_PLAN_CACHE) >= 16:
+        _POLICY_PLAN_CACHE.pop(next(iter(_POLICY_PLAN_CACHE)))
+    _POLICY_PLAN_CACHE[key] = (policy, plan)
+    return plan
