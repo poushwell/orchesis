@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "orchesis"
-version = "0.1.0"
-description = "Verification kernel for AI agent tool calls"
+version = "0.2.0"
+description = "Agent Runtime Governance Layer — policy-based verification for AI agent tool calls"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -42,7 +42,6 @@ dev = [
 
 [project.scripts]
 orchesis = "orchesis.cli:main"
-orchesis-mcp-proxy = "orchesis.mcp_proxy:main"
 orchesis-agent = "orchesis.agent.runner:main"
 
 [tool.setuptools]
