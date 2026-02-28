@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\scenarios.py
+# hypothesis_version: 6.151.9
+
+[0.0, 0.01, 0.1, 2.0, 100.0, 100, '/data/config.yaml', '/data/safe.txt', '/data/test.txt', '/etc/hostname', '/etc/passwd', '/root/.ssh/id_rsa', 'DROP TABLE users', 'Slow denied probing', 'agent', 'api_call', 'budget_bot', 'budget_drainer', 'content', 'context', 'cost', 'daily_budget', 'delete_attempt', 'delete_file', 'endpoint', 'escalation_attack', 'hopper', 'identity_rotation', 'max_cost_per_call', 'mixed_bot', 'model', 'params', 'path', 'query', 'read_config', 'read_etc', 'read_file', 'read_root', 'read_safe', 'rules', 'run_sql', 'session', 'session_hopping', 'slow_probe', 'slow_probe_bot', 'sql_drop', 'tool', 'untrusted_bot', 'write_attempt', 'write_file', 'x']

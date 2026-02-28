@@ -18,9 +18,11 @@ from orchesis.config import (
     validate_policy_warnings,
 )
 from orchesis.engine import evaluate
+from orchesis.fuzzer import SyntheticFuzzer
 from orchesis.logger import read_decisions
 from orchesis.policy_store import PolicyStore
 from orchesis.replay import ReplayEngine, read_events_from_jsonl
+from orchesis.scenarios import AdversarialScenarios
 from orchesis.signing import generate_keypair, sign_entry, verify_entry
 from orchesis.state import RateLimitTracker
 from orchesis.telemetry import InMemoryEmitter, JsonlEmitter
@@ -234,6 +236,63 @@ def rollback(policy_path: str) -> None:
         return
     click.echo(f"Rolled back: {current.version_id[:12]} -> {rolled.version_id[:12]}")
     click.echo(f"Current policy version: {rolled.version_id[:12]}")
+
+
+@main.command()
+@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
+@click.option("--count", "count", type=int, default=1000)
+@click.option("--seed", "seed", type=int, default=42)
+def fuzz(policy_path: str, count: int, seed: int) -> None:
+    """Run synthetic adversarial fuzzing against policy."""
+    try:
+        policy = load_policy(policy_path)
+    except (ValueError, YAMLError, OSError) as error:
+        raise click.ClickException(f"Failed to load policy: {error}") from error
+
+    has_identity_config = "agents" in policy or "default_trust_tier" in policy
+    registry = load_agent_registry(policy) if has_identity_config else None
+    fuzzer = SyntheticFuzzer(policy, registry=registry, seed=seed)
+    report = fuzzer.run(num_requests=max(1, count))
+    click.echo("Fuzzer Report:")
+    click.echo(f"  Total requests: {report.total_requests}")
+    click.echo(f"  Correctly denied: {report.denied_correctly}")
+    click.echo(f"  Correctly allowed: {report.allowed_correctly}")
+    click.echo(f"  BYPASSES FOUND: {len(report.bypasses)} ({report.bypass_rate*100:.2f}%)")
+    if report.bypasses:
+        click.echo("")
+        click.echo("  Bypass details:")
+        for idx, bypass in enumerate(report.bypasses[:10], start=1):
+            click.echo(
+                f"    #{idx} [{bypass.category}] {bypass.mutation} -> ALLOW (should be DENY)"
+            )
+    click.echo("")
+    click.echo("  Categories tested:")
+    for category in sorted(fuzzer.category_counts):
+        click.echo(f"    {category}: {fuzzer.category_counts[category]}")
+
+
+@main.command()
+@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
+def scenarios(policy_path: str) -> None:
+    """Run prebuilt adversarial scenarios."""
+    try:
+        policy = load_policy(policy_path)
+    except (ValueError, YAMLError, OSError) as error:
+        raise click.ClickException(f"Failed to load policy: {error}") from error
+
+    has_identity_config = "agents" in policy or "default_trust_tier" in policy
+    registry = load_agent_registry(policy) if has_identity_config else None
+    runner = AdversarialScenarios(policy, registry=registry)
+    results = runner.run_all()
+    click.echo("Adversarial Scenarios:")
+    for result in results:
+        marker = "✓" if result.success else "⚠"
+        suffix = "known limitation" if "known limitation" in result.description.lower() else "bypasses found"
+        if result.success:
+            suffix = f"{len(result.bypasses)} bypasses"
+        click.echo(
+            f"  {marker} {result.name:<24} — {result.steps_total} steps, {suffix}"
+        )
 
 
 @main.command()
