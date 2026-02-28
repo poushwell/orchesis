@@ -45,9 +45,9 @@ def test_deterministic_replay_invariant(tmp_path: Path) -> None:
     _write_policy(policy_path)
     log_path = tmp_path / "decisions.jsonl"
     emitter = JsonlEmitter(log_path)
-    policy = json.loads(json.dumps({"rules": [
-        {"name": "budget_limit", "max_cost_per_call": 2.0}
-    ]}))
+    policy = json.loads(
+        json.dumps({"rules": [{"name": "budget_limit", "max_cost_per_call": 2.0}]})
+    )
     request = {"tool": "read_file", "params": {"path": "/data/safe.txt"}, "cost": 0.1}
     for _ in range(5):
         evaluate(request, policy, emitter=emitter, state=RateLimitTracker(persist_path=None))

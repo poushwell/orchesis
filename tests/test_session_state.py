@@ -49,7 +49,11 @@ def test_budget_per_session() -> None:
 def test_session_in_request_context() -> None:
     tracker = RateLimitTracker(persist_path=None)
     policy = {"rules": [{"name": "rate_limit", "max_requests_per_minute": 1}]}
-    req = {"tool": "read_file", "params": {"path": "/data/x.txt"}, "context": {"session": "abc123"}}
+    req = {
+        "tool": "read_file",
+        "params": {"path": "/data/x.txt"},
+        "context": {"session": "abc123"},
+    }
     first = evaluate(req, policy, state=tracker)
     second = evaluate(req, policy, state=tracker)
     assert first.allowed is True

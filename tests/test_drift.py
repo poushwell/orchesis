@@ -15,7 +15,9 @@ def test_counter_integrity_correct() -> None:
     for _ in range(5):
         tracker.record("read_file", agent_id="agent-a")
     detector = DriftDetector()
-    assert detector.check_counter_integrity(tracker, "agent-a", "read_file", expected_count=5) is None
+    assert (
+        detector.check_counter_integrity(tracker, "agent-a", "read_file", expected_count=5) is None
+    )
 
 
 def test_counter_integrity_mismatch() -> None:
@@ -97,6 +99,8 @@ rules:
 """.strip(),
         encoding="utf-8",
     )
-    checker = InvariantChecker(policy_path=str(policy_path), decisions_log=str(tmp_path / "empty.jsonl"))
+    checker = InvariantChecker(
+        policy_path=str(policy_path), decisions_log=str(tmp_path / "empty.jsonl")
+    )
     result = checker.check_no_state_drift()
     assert result.passed is True

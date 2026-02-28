@@ -76,9 +76,15 @@ class OTelEmitter(EventEmitter):
         duration_us = max(0, int(event.evaluation_duration_us))
         start_time_ns = end_time_ns - (duration_us * 1000)
         snapshot = event.state_snapshot if isinstance(event.state_snapshot, dict) else {}
-        trace_id = snapshot.get("trace_id") if isinstance(snapshot.get("trace_id"), str) else uuid.uuid4().hex
+        trace_id = (
+            snapshot.get("trace_id")
+            if isinstance(snapshot.get("trace_id"), str)
+            else uuid.uuid4().hex
+        )
         parent_span_id = (
-            snapshot.get("parent_span_id") if isinstance(snapshot.get("parent_span_id"), str) else None
+            snapshot.get("parent_span_id")
+            if isinstance(snapshot.get("parent_span_id"), str)
+            else None
         )
         span_id = uuid.uuid4().hex[:16]
         rules_triggered = set(event.rules_triggered)

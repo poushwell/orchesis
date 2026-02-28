@@ -106,7 +106,9 @@ async def _call(session: ClientSession, tool: str, **kwargs):
     return await session.call_tool(tool, kwargs)
 
 
-async def _expect_blocked(session: ClientSession, calls: Path, tool: str, reason: str, **kwargs) -> None:
+async def _expect_blocked(
+    session: ClientSession, calls: Path, tool: str, reason: str, **kwargs
+) -> None:
     before = _count_jsonl(calls)
     result = await _call(session, tool, **kwargs)
     after = _count_jsonl(calls)
@@ -120,7 +122,9 @@ async def test_e2e_safe_read_allowed(tmp_path: Path) -> None:
     policy = tmp_path / "policy.yaml"
     _write_policy(policy)
     async with _proxy_session(tmp_path, policy) as (session, _calls, decisions):
-        result = await _call(session, "read_file", path="/data/report.csv", agent_id="cursor", cost=0.1)
+        result = await _call(
+            session, "read_file", path="/data/report.csv", agent_id="cursor", cost=0.1
+        )
     assert result.isError is False
     assert "content of /data/report.csv" in _first_text(result)
     events = read_events_from_jsonl(decisions)
@@ -133,7 +137,13 @@ async def test_e2e_dangerous_read_blocked(tmp_path: Path) -> None:
     _write_policy(policy)
     async with _proxy_session(tmp_path, policy) as (session, calls, decisions):
         await _expect_blocked(
-            session, calls, "read_file", "file_access", path="/etc/passwd", agent_id="cursor", cost=0.1
+            session,
+            calls,
+            "read_file",
+            "file_access",
+            path="/etc/passwd",
+            agent_id="cursor",
+            cost=0.1,
         )
     assert read_events_from_jsonl(decisions)[-1].decision == "DENY"
 
@@ -144,7 +154,13 @@ async def test_e2e_sql_injection_blocked(tmp_path: Path) -> None:
     _write_policy(policy)
     async with _proxy_session(tmp_path, policy) as (session, calls, _decisions):
         await _expect_blocked(
-            session, calls, "run_sql", "drop is denied", query="DROP TABLE users", agent_id="cursor", cost=0.1
+            session,
+            calls,
+            "run_sql",
+            "drop is denied",
+            query="DROP TABLE users",
+            agent_id="cursor",
+            cost=0.1,
         )
 
 
@@ -154,7 +170,13 @@ async def test_e2e_blocked_agent_denied(tmp_path: Path) -> None:
     _write_policy(policy)
     async with _proxy_session(tmp_path, policy) as (session, calls, _decisions):
         await _expect_blocked(
-            session, calls, "read_file", "blocked", path="/data/safe.txt", agent_id="blocked_agent", cost=0.1
+            session,
+            calls,
+            "read_file",
+            "blocked",
+            path="/data/safe.txt",
+            agent_id="blocked_agent",
+            cost=0.1,
         )
 
 
@@ -202,9 +224,15 @@ async def test_e2e_budget_enforcement(tmp_path: Path) -> None:
     policy = tmp_path / "policy.yaml"
     _write_policy(policy, daily_budget=5.0)
     async with _proxy_session(tmp_path, policy) as (session, _calls, _decisions):
-        first = await _call(session, "expensive_operation", cost=2.0, agent_id="cursor", session_id="s-budget")
-        second = await _call(session, "expensive_operation", cost=2.0, agent_id="cursor", session_id="s-budget")
-        third = await _call(session, "expensive_operation", cost=2.0, agent_id="cursor", session_id="s-budget")
+        first = await _call(
+            session, "expensive_operation", cost=2.0, agent_id="cursor", session_id="s-budget"
+        )
+        second = await _call(
+            session, "expensive_operation", cost=2.0, agent_id="cursor", session_id="s-budget"
+        )
+        third = await _call(
+            session, "expensive_operation", cost=2.0, agent_id="cursor", session_id="s-budget"
+        )
     assert first.isError is False
     assert second.isError is False
     assert third.isError is True
@@ -216,7 +244,9 @@ async def test_e2e_full_audit_trail(tmp_path: Path) -> None:
     _write_policy(policy)
     async with _proxy_session(tmp_path, policy) as (session, _calls, decisions):
         for i in range(5):
-            await _call(session, "read_file", path=f"/data/safe-{i}.txt", agent_id="cursor", cost=0.1)
+            await _call(
+                session, "read_file", path=f"/data/safe-{i}.txt", agent_id="cursor", cost=0.1
+            )
         for _ in range(5):
             await _call(session, "read_file", path="/etc/passwd", agent_id="cursor", cost=0.1)
     events = read_events_from_jsonl(decisions)
@@ -231,7 +261,9 @@ async def test_e2e_debug_mode(tmp_path: Path) -> None:
     policy = tmp_path / "policy.yaml"
     _write_policy(policy)
     async with _proxy_session(tmp_path, policy) as (session, _calls, _decisions):
-        result = await _call(session, "read_file", path="/etc/passwd", agent_id="cursor", cost=0.1, debug=True)
+        result = await _call(
+            session, "read_file", path="/etc/passwd", agent_id="cursor", cost=0.1, debug=True
+        )
     assert result.isError is True
     text = "\n".join(str(getattr(item, "text", "")) for item in result.content)
     assert "debug_trace" in text
@@ -242,9 +274,13 @@ async def test_e2e_policy_hot_reload(tmp_path: Path) -> None:
     policy = tmp_path / "policy.yaml"
     _write_policy(policy, daily_budget=10.0)
     async with _proxy_session(tmp_path, policy) as (session, _calls, _decisions):
-        first = await _call(session, "expensive_operation", cost=8.0, agent_id="cursor", session_id="hot-reload")
+        first = await _call(
+            session, "expensive_operation", cost=8.0, agent_id="cursor", session_id="hot-reload"
+        )
         _write_policy(policy, daily_budget=5.0)
         time.sleep(0.02)
-        second = await _call(session, "expensive_operation", cost=8.0, agent_id="cursor", session_id="hot-reload-2")
+        second = await _call(
+            session, "expensive_operation", cost=8.0, agent_id="cursor", session_id="hot-reload-2"
+        )
     assert first.isError is False
     assert second.isError is True

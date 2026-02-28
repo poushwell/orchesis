@@ -15,7 +15,9 @@ def main() -> None:
 @main.command("run")
 @click.argument("task")
 @click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
-@click.option("--tasks", "tasks_path", type=click.Path(exists=True), default="examples/agent_tasks.yaml")
+@click.option(
+    "--tasks", "tasks_path", type=click.Path(exists=True), default="examples/agent_tasks.yaml"
+)
 @click.option("--max-steps", type=int, default=10)
 @click.option("--log-path", type=click.Path(), default="decisions.jsonl")
 def run_task(task: str, policy_path: str, tasks_path: str, max_steps: int, log_path: str) -> None:

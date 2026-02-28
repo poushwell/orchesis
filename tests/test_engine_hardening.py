@@ -61,7 +61,11 @@ def test_long_unicode_and_nested_request_does_not_crash() -> None:
 
 
 def test_concurrent_evaluate_calls_are_thread_safe_and_deterministic() -> None:
-    request = {"tool": "sql_query", "params": {"query": "SELECT 1", "path": "/data/x"}, "cost": 0.1}
+    request = {
+        "tool": "sql_query",
+        "params": {"query": "SELECT 1", "path": "/data/x"},
+        "cost": 0.1,
+    }
     policy = _policy()
     expected = evaluate(request, policy)
 

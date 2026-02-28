@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import httpx
@@ -112,8 +111,12 @@ async def test_policy_history(tmp_path: Path) -> None:
         history_path=str(tmp_path / "policy_versions.jsonl"),
     )
     async with await _client(app) as client:
-        await client.post("/api/v1/policy", headers=_auth(), json={"yaml_content": _policy_yaml(max_cost=2.0)})
-        await client.post("/api/v1/policy", headers=_auth(), json={"yaml_content": _policy_yaml(max_cost=3.0)})
+        await client.post(
+            "/api/v1/policy", headers=_auth(), json={"yaml_content": _policy_yaml(max_cost=2.0)}
+        )
+        await client.post(
+            "/api/v1/policy", headers=_auth(), json={"yaml_content": _policy_yaml(max_cost=3.0)}
+        )
         history = await client.get("/api/v1/policy/history", headers=_auth())
     assert history.status_code == 200
     assert len(history.json()["versions"]) >= 3
@@ -131,7 +134,9 @@ async def test_rollback(tmp_path: Path) -> None:
     )
     async with await _client(app) as client:
         first = (await client.get("/api/v1/policy", headers=_auth())).json()["version_id"]
-        await client.post("/api/v1/policy", headers=_auth(), json={"yaml_content": _policy_yaml(max_cost=4.0)})
+        await client.post(
+            "/api/v1/policy", headers=_auth(), json={"yaml_content": _policy_yaml(max_cost=4.0)}
+        )
         second = (await client.get("/api/v1/policy", headers=_auth())).json()["version_id"]
         rolled = await client.post("/api/v1/policy/rollback", headers=_auth())
         current = (await client.get("/api/v1/policy", headers=_auth())).json()["version_id"]
@@ -277,14 +282,26 @@ async def test_audit_stats_api(tmp_path: Path) -> None:
         await client.post(
             "/api/v1/evaluate",
             headers=_auth(),
-            json={"tool": "read_file", "params": {"path": "/data/safe.txt"}, "cost": 0.1, "context": {"agent": "cursor"}},
+            json={
+                "tool": "read_file",
+                "params": {"path": "/data/safe.txt"},
+                "cost": 0.1,
+                "context": {"agent": "cursor"},
+            },
         )
         await client.post(
             "/api/v1/evaluate",
             headers=_auth(),
-            json={"tool": "read_file", "params": {"path": "/etc/passwd"}, "cost": 0.1, "context": {"agent": "cursor"}},
+            json={
+                "tool": "read_file",
+                "params": {"path": "/etc/passwd"},
+                "cost": 0.1,
+                "context": {"agent": "cursor"},
+            },
         )
-        stats = await client.get("/api/v1/audit/stats?agent_id=cursor&since_hours=24", headers=_auth())
+        stats = await client.get(
+            "/api/v1/audit/stats?agent_id=cursor&since_hours=24", headers=_auth()
+        )
     assert stats.status_code == 200
     payload = stats.json()
     assert payload["total_events"] >= 2
@@ -365,7 +382,9 @@ async def test_timeline_api(tmp_path: Path) -> None:
                     "context": {"agent": "timeline_bot"},
                 },
             )
-        timeline = await client.get("/api/v1/audit/timeline/timeline_bot?hours=24", headers=_auth())
+        timeline = await client.get(
+            "/api/v1/audit/timeline/timeline_bot?hours=24", headers=_auth()
+        )
     assert timeline.status_code == 200
     payload = timeline.json()
     assert payload["agent_id"] == "timeline_bot"

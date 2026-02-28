@@ -1,3 +1,48 @@
+## [0.6.0] - 2026-03-01
+
+### Added
+- Concurrency torture suite (5000+ concurrent, 10k evals)
+- State drift detector with 5 drift types
+- Atomic budget enforcement (eliminates race condition)
+- Coverage-aware fuzzing with adaptive mode
+- Corpus quality metrics and gap analysis
+- Docker multi-stage build with non-root user
+- Docker Compose (API + proxy + fuzzer services)
+- Makefile with 18 targets
+- Plugin system with 3 contrib plugins (PII, IP, time window)
+- Policy templates (minimal, strict, MCP dev, multi-agent)
+- `orchesis new` project scaffolding
+- `orchesis doctor` health check
+- `orchesis torture` stress test
+- `orchesis drift` state drift detection
+- Python SDK client with `orchesis_guard` decorator
+- OpenTelemetry-compatible span export
+- Structured JSON logging
+- Debug mode with full evaluation trace
+- GitHub templates (issues, PRs, bypass reports)
+- `CONTRIBUTING.md`, `DEPLOYMENT.md`
+- CI matrix (Python 3.11 + 3.12)
+
+### Changed
+- Evaluation order includes `identity_check` first
+- Budget checks are atomic under concurrency
+- Fuzzer tracks coverage and generates suggestions
+- 10 formal invariants (was 9)
+- All logging converted to structured JSON
+
+### Fixed
+- Budget race condition under concurrent access
+- Policy hash computation overhead reduced
+- State snapshot overhead in telemetry reduced
+
+### Security
+- 14 attack patterns in regression corpus
+- 30+ adversarial tests
+- 7 adversarial scenarios
+- 7 mutation strategies
+- Drift detection for runtime anomalies
+- Torture-tested with 5000 concurrent evaluations
+
 ## [0.5.0] - 2026-02-28
 
 ### Added

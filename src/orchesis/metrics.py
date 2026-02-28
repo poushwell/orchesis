@@ -19,12 +19,12 @@ class MetricsCollector(EventEmitter):
 
     def emit(self, event: DecisionEvent) -> None:
         with self._lock:
-            self._counters[f'orchesis_decisions_total|decision={event.decision}'] += 1
+            self._counters[f"orchesis_decisions_total|decision={event.decision}"] += 1
             self._counters[
-                f'orchesis_decisions_by_agent|agent={event.agent_id}|decision={event.decision}'
+                f"orchesis_decisions_by_agent|agent={event.agent_id}|decision={event.decision}"
             ] += 1
             self._counters[
-                f'orchesis_decisions_by_tool|tool={event.tool}|decision={event.decision}'
+                f"orchesis_decisions_by_tool|tool={event.tool}|decision={event.decision}"
             ] += 1
             if any(reason.startswith("anomaly:") for reason in event.reasons):
                 self._counters["orchesis_anomalies_total"] += 1
@@ -70,7 +70,9 @@ class MetricsCollector(EventEmitter):
 
             lines.append("# HELP orchesis_anomalies_total Total detected anomalies")
             lines.append("# TYPE orchesis_anomalies_total counter")
-            lines.append(f"orchesis_anomalies_total {self._counter_value('orchesis_anomalies_total')}")
+            lines.append(
+                f"orchesis_anomalies_total {self._counter_value('orchesis_anomalies_total')}"
+            )
 
             values = self._histograms.get("orchesis_evaluation_duration_us", [])
             total = sum(values)

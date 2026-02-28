@@ -221,7 +221,11 @@ def _to_decision_event(payload: dict[str, Any], *, index: int) -> DecisionEvent 
         return None
 
     reasons_raw = payload.get("reasons")
-    reasons = [item for item in reasons_raw if isinstance(item, str)] if isinstance(reasons_raw, list) else []
+    reasons = (
+        [item for item in reasons_raw if isinstance(item, str)]
+        if isinstance(reasons_raw, list)
+        else []
+    )
     rules_checked_raw = payload.get("rules_checked")
     rules_checked = (
         [item for item in rules_checked_raw if isinstance(item, str)]
@@ -239,7 +243,11 @@ def _to_decision_event(payload: dict[str, Any], *, index: int) -> DecisionEvent 
 
     context = payload.get("context")
     agent_id = GLOBAL_AGENT_ID
-    if isinstance(context, dict) and isinstance(context.get("agent"), str) and context.get("agent"):
+    if (
+        isinstance(context, dict)
+        and isinstance(context.get("agent"), str)
+        and context.get("agent")
+    ):
         agent_id = str(context["agent"])
 
     raw_id = f"{timestamp}:{tool}:{index}"

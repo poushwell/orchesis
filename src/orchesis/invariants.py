@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from orchesis.config import load_policy
 from orchesis.drift import DriftDetector
@@ -101,8 +100,16 @@ class InvariantChecker:
     def check_state_isolation(self) -> InvariantResult:
         tracker = RateLimitTracker(persist_path=None)
         policy = {"rules": [{"name": "rate_limit", "max_requests_per_minute": 2}]}
-        request_a = {"tool": "read_file", "params": {"path": "/data/a.txt"}, "context": {"agent": "agent_a"}}
-        request_b = {"tool": "read_file", "params": {"path": "/data/b.txt"}, "context": {"agent": "agent_b"}}
+        request_a = {
+            "tool": "read_file",
+            "params": {"path": "/data/a.txt"},
+            "context": {"agent": "agent_a"},
+        }
+        request_b = {
+            "tool": "read_file",
+            "params": {"path": "/data/b.txt"},
+            "context": {"agent": "agent_b"},
+        }
         _ = evaluate(request_a, policy, state=tracker)
         _ = evaluate(request_a, policy, state=tracker)
         denied_a = evaluate(request_a, policy, state=tracker)
@@ -139,7 +146,9 @@ class InvariantChecker:
 
         tracker = BrokenTracker(persist_path=None)
         policy = {"rules": [{"name": "rate_limit", "max_requests_per_minute": 1}]}
-        decision = evaluate({"tool": "read_file", "params": {"path": "/data/a"}}, policy, state=tracker)
+        decision = evaluate(
+            {"tool": "read_file", "params": {"path": "/data/a"}}, policy, state=tracker
+        )
         passed = not decision.allowed
         detail = "state error denied" if passed else "state error allowed request"
         return InvariantResult("fail_closed_on_error", passed, detail, _now_iso())
@@ -151,9 +160,23 @@ class InvariantChecker:
                 {"name": "rate_limit", "max_requests_per_minute": 100},
                 {"name": "file_access", "denied_paths": ["/etc"]},
                 {"name": "sql_restriction", "denied_operations": ["DROP"]},
-                {"name": "regex", "type": "regex_match", "field": "params.query", "deny_patterns": ["DROP"]},
-                {"name": "ctx", "type": "context_rules", "rules": [{"agent": "*", "max_cost_per_call": 100.0}]},
-                {"name": "combo", "type": "composite", "operator": "AND", "conditions": [{"rule": "budget_limit"}]},
+                {
+                    "name": "regex",
+                    "type": "regex_match",
+                    "field": "params.query",
+                    "deny_patterns": ["DROP"],
+                },
+                {
+                    "name": "ctx",
+                    "type": "context_rules",
+                    "rules": [{"agent": "*", "max_cost_per_call": 100.0}],
+                },
+                {
+                    "name": "combo",
+                    "type": "composite",
+                    "operator": "AND",
+                    "conditions": [{"rule": "budget_limit"}],
+                },
             ]
         }
         request = {
@@ -171,23 +194,39 @@ class InvariantChecker:
     def check_identity_enforcement(self) -> InvariantResult:
         registry = AgentRegistry(
             agents={
-                "blocked": AgentIdentity(agent_id="blocked", name="Blocked", trust_tier=TrustTier.BLOCKED),
-                "intern": AgentIdentity(agent_id="intern", name="Intern", trust_tier=TrustTier.INTERN),
+                "blocked": AgentIdentity(
+                    agent_id="blocked", name="Blocked", trust_tier=TrustTier.BLOCKED
+                ),
+                "intern": AgentIdentity(
+                    agent_id="intern", name="Intern", trust_tier=TrustTier.INTERN
+                ),
             }
         )
         policy = {"rules": [{"name": "budget_limit", "max_cost_per_call": 10.0}]}
         blocked = evaluate(
-            {"tool": "read_file", "params": {"path": "/data/x.txt"}, "context": {"agent": "blocked"}},
+            {
+                "tool": "read_file",
+                "params": {"path": "/data/x.txt"},
+                "context": {"agent": "blocked"},
+            },
             policy,
             registry=registry,
         )
         intern_read = evaluate(
-            {"tool": "read_file", "params": {"path": "/data/x.txt"}, "context": {"agent": "intern"}},
+            {
+                "tool": "read_file",
+                "params": {"path": "/data/x.txt"},
+                "context": {"agent": "intern"},
+            },
             policy,
             registry=registry,
         )
         intern_write = evaluate(
-            {"tool": "write_file", "params": {"path": "/data/x.txt"}, "context": {"agent": "intern"}},
+            {
+                "tool": "write_file",
+                "params": {"path": "/data/x.txt"},
+                "context": {"agent": "intern"},
+            },
             policy,
             registry=registry,
         )
@@ -197,7 +236,9 @@ class InvariantChecker:
 
     def check_cost_never_negative_allow(self) -> InvariantResult:
         policy = {"rules": [{"name": "budget_limit", "max_cost_per_call": 1.0}]}
-        decision = evaluate({"tool": "read_file", "params": {"path": "/data/safe.txt"}, "cost": -1.0}, policy)
+        decision = evaluate(
+            {"tool": "read_file", "params": {"path": "/data/safe.txt"}, "cost": -1.0}, policy
+        )
         passed = not decision.allowed
         detail = "negative cost denied" if passed else "negative cost allowed"
         return InvariantResult("cost_never_negative_allow", passed, detail, _now_iso())
@@ -205,7 +246,11 @@ class InvariantChecker:
     def check_rate_limit_atomic(self) -> InvariantResult:
         tracker = RateLimitTracker(persist_path=None)
         policy = {"rules": [{"name": "rate_limit", "max_requests_per_minute": 20}]}
-        request = {"tool": "read_file", "params": {"path": "/data/a.txt"}, "context": {"agent": "atomic"}}
+        request = {
+            "tool": "read_file",
+            "params": {"path": "/data/a.txt"},
+            "context": {"agent": "atomic"},
+        }
 
         def _call() -> bool:
             return evaluate(request, policy, state=tracker).allowed

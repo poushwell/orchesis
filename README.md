@@ -3,7 +3,7 @@
 ![Tests](https://github.com/YOUR_USERNAME/orchesis/actions/workflows/ci.yml/badge.svg)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-0.5.0-orange)
+![Version](https://img.shields.io/badge/version-0.6.0-orange)
 
 > Policy-based verification for AI agent tool calls.  
 > Deterministic. Fail-closed. Framework-agnostic.
@@ -148,7 +148,7 @@ orchesis scenarios --policy policy.yaml   # adversarial scenarios
 
 ## Project Status
 
-Orchesis is in active development. Current: v0.5.0 (Beta).
+Orchesis is in active development. Current: v0.6.0 (Beta).
 
 | Metric | Value |
 |--------|-------|

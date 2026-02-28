@@ -56,7 +56,9 @@ class SyntheticFuzzer:
         self._rng = random.Random(seed)
         self._provided_coverage = coverage
         self._coverage = coverage or CoverageTracker()
-        self._max_cost_hint, self._daily_budget_hint, self._rate_limit_hint = self._extract_limits(policy)
+        self._max_cost_hint, self._daily_budget_hint, self._rate_limit_hint = self._extract_limits(
+            policy
+        )
         self._rate_limit_probe_seen = 0
         self._category_counts: dict[str, int] = {}
         self._generators = [
@@ -147,7 +149,9 @@ class SyntheticFuzzer:
         allowed_correctly = 0
         generators = dict(self._generators)
 
-        def _evaluate_one(request: dict[str, Any], expected_deny: bool, category: str, mutation: str) -> None:
+        def _evaluate_one(
+            request: dict[str, Any], expected_deny: bool, category: str, mutation: str
+        ) -> None:
             nonlocal denied_correctly, allowed_correctly
             decision = evaluate(request, self._policy, registry=self._registry, state=tracker)
             self._coverage.record(
@@ -258,7 +262,9 @@ class SyntheticFuzzer:
         except Exception:
             return ""
 
-    def _extract_limits(self, policy: dict[str, Any]) -> tuple[float | None, float | None, int | None]:
+    def _extract_limits(
+        self, policy: dict[str, Any]
+    ) -> tuple[float | None, float | None, int | None]:
         max_cost: float | None = None
         daily_budget: float | None = None
         rate_limit: int | None = None
@@ -315,7 +321,11 @@ class SyntheticFuzzer:
             if not isinstance(command, str):
                 return False
             normalized = command.lower()
-            return ("rm -rf" in normalized) or ("chmod 777" in normalized) or ("curl" in normalized and "| bash" in normalized)
+            return (
+                ("rm -rf" in normalized)
+                or ("chmod 777" in normalized)
+                or ("curl" in normalized and "| bash" in normalized)
+            )
         if category == "rate_limit":
             if self._rate_limit_hint is None:
                 return False
@@ -463,9 +473,7 @@ class SyntheticFuzzer:
         return "".join(self._rng.choices(string.ascii_letters, k=length))
 
     def _random_case(self, text: str) -> str:
-        return "".join(
-            char.upper() if self._rng.random() > 0.5 else char.lower() for char in text
-        )
+        return "".join(char.upper() if self._rng.random() > 0.5 else char.lower() for char in text)
 
 
 def update_fuzz_metadata(
@@ -510,8 +518,10 @@ def update_fuzz_metadata(
     data["total_invariant_checks"] += max(0, int(invariant_checks))
     data["invariant_failures"] += max(0, int(invariant_failures))
 
-    clean_run = (bypasses_found == 0) and (invariant_failures == 0) and (
-        total_requests > 0 or total_mutations > 0
+    clean_run = (
+        (bypasses_found == 0)
+        and (invariant_failures == 0)
+        and (total_requests > 0 or total_mutations > 0)
     )
     if clean_run:
         data["consecutive_clean_runs"] += 1

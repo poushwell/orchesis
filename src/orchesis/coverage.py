@@ -87,7 +87,9 @@ class CoverageTracker:
         unique_categories = sorted(
             {item for item in all_categories if isinstance(item, str) and item}
         )
-        normalized_tiers = sorted({item.upper() for item in all_tiers if isinstance(item, str) and item})
+        normalized_tiers = sorted(
+            {item.upper() for item in all_tiers if isinstance(item, str) and item}
+        )
 
         rules_never = [rule for rule in unique_rules if self._rule_hits.get(rule, 0) == 0]
         categories_missing = [
@@ -95,7 +97,9 @@ class CoverageTracker:
         ]
         tiers_never = [tier for tier in normalized_tiers if self._tier_hits.get(tier, 0) == 0]
 
-        rule_cov = (len(unique_rules) - len(rules_never)) / len(unique_rules) if unique_rules else 1.0
+        rule_cov = (
+            (len(unique_rules) - len(rules_never)) / len(unique_rules) if unique_rules else 1.0
+        )
         cat_cov = (
             (len(unique_categories) - len(categories_missing)) / len(unique_categories)
             if unique_categories
@@ -128,7 +132,9 @@ class CoverageTracker:
             else:
                 suggestions.append(f"Rule {rule} never triggered - add targeted attack vectors")
         for tier in report.tiers_never_tested:
-            suggestions.append(f"Trust tier {tier} never tested - add {tier.lower()} agent scenarios")
+            suggestions.append(
+                f"Trust tier {tier} never tested - add {tier.lower()} agent scenarios"
+            )
         total_categories = sum(report.categories_tested.values())
         if total_categories > 0:
             for category, count in sorted(report.categories_tested.items()):

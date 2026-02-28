@@ -134,7 +134,9 @@ class MutationEngine:
             )
         ]
 
-    def _combination_mutations(self, entry: CorpusEntry, request: dict[str, Any]) -> list[Mutation]:
+    def _combination_mutations(
+        self, entry: CorpusEntry, request: dict[str, Any]
+    ) -> list[Mutation]:
         req = self._clone(request)
         req["tool"] = "run_sql"
         req["params"]["query"] = "DROP TABLE users"

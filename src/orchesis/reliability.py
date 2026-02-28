@@ -223,7 +223,7 @@ Version: {report.orchesis_version}
 | Fuzz requests (lifetime) | {report.total_fuzz_requests} |
 | Mutations tested | {report.total_mutations_tested} |
 | Bypasses found | {report.bypasses_found_lifetime} |
-| Current bypass rate | {report.current_bypass_rate*100:.2f}% |
+| Current bypass rate | {report.current_bypass_rate * 100:.2f}% |
 | Invariant checks | {report.total_invariant_checks} |
 | Invariant failures | {report.invariant_failures} |
 | Consecutive clean runs | {report.consecutive_clean_runs} |

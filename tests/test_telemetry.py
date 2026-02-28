@@ -22,7 +22,9 @@ def _request() -> dict[str, object]:
 
 def test_decision_event_has_all_fields() -> None:
     emitter = InMemoryEmitter()
-    decision = evaluate(_request(), _policy(), emitter=emitter, state=RateLimitTracker(persist_path=None))
+    decision = evaluate(
+        _request(), _policy(), emitter=emitter, state=RateLimitTracker(persist_path=None)
+    )
     event = emitter.get_events()[0]
 
     assert event.event_id
@@ -83,8 +85,16 @@ def test_evaluation_duration_is_measured() -> None:
 def test_policy_version_changes_on_different_policy() -> None:
     emitter_a = InMemoryEmitter()
     emitter_b = InMemoryEmitter()
-    evaluate(_request(), {"rules": [{"name": "budget_limit", "max_cost_per_call": 1.0}]}, emitter=emitter_a)
-    evaluate(_request(), {"rules": [{"name": "budget_limit", "max_cost_per_call": 2.0}]}, emitter=emitter_b)
+    evaluate(
+        _request(),
+        {"rules": [{"name": "budget_limit", "max_cost_per_call": 1.0}]},
+        emitter=emitter_a,
+    )
+    evaluate(
+        _request(),
+        {"rules": [{"name": "budget_limit", "max_cost_per_call": 2.0}]},
+        emitter=emitter_b,
+    )
     assert emitter_a.get_events()[0].policy_version != emitter_b.get_events()[0].policy_version
 
 
@@ -94,9 +104,9 @@ def test_params_hash_is_sha256_not_raw_params() -> None:
     evaluate(request, _policy(), emitter=emitter)
     event = emitter.get_events()[0]
     expected_hash = hashlib.sha256(
-        json.dumps(request["params"], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
+        json.dumps(
+            request["params"], ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
     ).hexdigest()
 
     assert event.params_hash == expected_hash

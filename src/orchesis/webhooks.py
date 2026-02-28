@@ -43,7 +43,9 @@ class WebhookEmitter(EventEmitter):
         configured = {item.upper() for item in self._config.events}
         if "ALL" in configured:
             return True
-        if "ANOMALY" in configured and any(reason.startswith("anomaly:") for reason in event.reasons):
+        if "ANOMALY" in configured and any(
+            reason.startswith("anomaly:") for reason in event.reasons
+        ):
             return True
         if event.decision in configured:
             return True

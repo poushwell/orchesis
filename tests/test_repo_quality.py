@@ -53,7 +53,7 @@ def test_readme_has_badges() -> None:
     assert "actions/workflows/ci.yml/badge.svg" in content
     assert "img.shields.io/badge/python-3.11%2B-blue" in content
     assert "img.shields.io/badge/license-MIT-green" in content
-    assert "img.shields.io/badge/version-0.5.0-orange" in content
+    assert "img.shields.io/badge/version-0.6.0-orange" in content
 
 
 def test_readme_has_docker_section() -> None:

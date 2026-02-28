@@ -150,16 +150,16 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
             if not isinstance(field, str) or not field.strip():
                 errors.append(f"rules[{index}].field is required for regex_match")
             if not isinstance(deny_patterns, list) or not deny_patterns:
-                errors.append(f"rules[{index}].deny_patterns must be a non-empty list for regex_match")
+                errors.append(
+                    f"rules[{index}].deny_patterns must be a non-empty list for regex_match"
+                )
             elif isinstance(deny_patterns, list):
                 for pattern in deny_patterns:
                     if not isinstance(pattern, str):
                         errors.append(f"rules[{index}] contains non-string regex pattern")
                         continue
                     if re.search(r"\([^)]*[+*][^)]*\)[+*?]", pattern):
-                        errors.append(
-                            f"rules[{index}] contains unsafe regex pattern: {pattern}"
-                        )
+                        errors.append(f"rules[{index}] contains unsafe regex pattern: {pattern}")
 
         if rule_type == "composite":
             operator = rule.get("operator")
@@ -230,9 +230,7 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
                 errors.append(f"agents[{index}].name must be a non-empty string")
 
             if not isinstance(trust_tier, str) or trust_tier.strip().lower() not in valid_tiers:
-                errors.append(
-                    f"agents[{index}].trust_tier must be one of {sorted(valid_tiers)}"
-                )
+                errors.append(f"agents[{index}].trust_tier must be one of {sorted(valid_tiers)}")
 
             allowed_tools = agent.get("allowed_tools")
             if allowed_tools is not None:

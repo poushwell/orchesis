@@ -131,7 +131,9 @@ def create_proxy_app(
             webhook_subscriber_ids.append(event_bus.subscribe(WebhookEmitter(config)))
 
     def _resolve_registry_for_policy(candidate_policy: dict[str, Any], store_version: Any) -> Any:
-        has_identity_config = "agents" in candidate_policy or "default_trust_tier" in candidate_policy
+        has_identity_config = (
+            "agents" in candidate_policy or "default_trust_tier" in candidate_policy
+        )
         return store_version.registry if has_identity_config else None
 
     if policy_path is not None:
@@ -178,7 +180,9 @@ def create_proxy_app(
         if watcher is not None:
             old_hash = current_policy_hash
             if watcher.check():
-                logger.info("policy reloaded", old_version=old_hash, new_version=current_policy_hash)
+                logger.info(
+                    "policy reloaded", old_version=old_hash, new_version=current_policy_hash
+                )
 
         raw_body = await request.body()
         body_json: dict[str, Any] | None = None
@@ -266,7 +270,7 @@ def create_proxy_app(
                         total_decisions += value
         return {
             "status": "healthy",
-            "version": "0.5.0",
+            "version": "0.6.0",
             "policy_version": current_policy_hash,
             "uptime_seconds": int(max(0.0, time.perf_counter() - app_started_at)),
             "total_decisions": total_decisions,

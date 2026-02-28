@@ -51,7 +51,12 @@ def test_replay_detects_policy_drift() -> None:
     policy_a = {"rules": [{"name": "budget_limit", "max_cost_per_call": 1.0}]}
     policy_b = {"rules": [{"name": "budget_limit", "max_cost_per_call": 0.1}]}
     emitter = InMemoryEmitter()
-    _ = evaluate(_request("a", cost=0.5), policy_a, emitter=emitter, state=RateLimitTracker(persist_path=None))
+    _ = evaluate(
+        _request("a", cost=0.5),
+        policy_a,
+        emitter=emitter,
+        state=RateLimitTracker(persist_path=None),
+    )
     event = emitter.get_events()[0]
 
     result = ReplayEngine().replay_event(event, policy_b, strict=True)
@@ -168,7 +173,9 @@ def test_forensic_agent_timeline(tmp_path: Path) -> None:
     with runner.isolated_filesystem():
         local_log = Path("decisions.jsonl")
         local_log.write_text(log_path.read_text(encoding="utf-8"), encoding="utf-8")
-        result = runner.invoke(main, ["forensic", "--agent", "untrusted_bot", "--log", "decisions.jsonl"])
+        result = runner.invoke(
+            main, ["forensic", "--agent", "untrusted_bot", "--log", "decisions.jsonl"]
+        )
 
     assert result.exit_code == 0
     assert "Agent: untrusted_bot" in result.output

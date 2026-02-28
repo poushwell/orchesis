@@ -26,14 +26,18 @@ class IPAllowlistHandler:
         denied = rule.get("denied_ips")
         if isinstance(denied, list):
             try:
-                if self._ip_in_networks(source_ip, [item for item in denied if isinstance(item, str)]):
+                if self._ip_in_networks(
+                    source_ip, [item for item in denied if isinstance(item, str)]
+                ):
                     return [f"ip_allowlist: source_ip {source_ip} is denied"], checked
             except ValueError:
                 return ["ip_allowlist: invalid denied_ips configuration"], checked
         allowed = rule.get("allowed_ips")
         if isinstance(allowed, list) and allowed:
             try:
-                if not self._ip_in_networks(source_ip, [item for item in allowed if isinstance(item, str)]):
+                if not self._ip_in_networks(
+                    source_ip, [item for item in allowed if isinstance(item, str)]
+                ):
                     return [f"ip_allowlist: source_ip {source_ip} is not in allowlist"], checked
             except ValueError:
                 return ["ip_allowlist: invalid allowed_ips configuration"], checked

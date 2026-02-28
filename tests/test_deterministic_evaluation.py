@@ -9,11 +9,20 @@ def test_rule_evaluation_order_is_fixed() -> None:
     policy = {
         "rules": [
             {"name": "composite", "type": "composite", "operator": "AND", "conditions": []},
-            {"name": "regex_match", "type": "regex_match", "field": "params.query", "deny_patterns": ["DROP"]},
+            {
+                "name": "regex_match",
+                "type": "regex_match",
+                "field": "params.query",
+                "deny_patterns": ["DROP"],
+            },
             {"name": "file_access", "type": "file_access", "denied_paths": ["/etc"]},
             {"name": "budget_limit", "type": "budget_limit", "max_cost_per_call": 10.0},
             {"name": "sql_restriction", "type": "sql_restriction", "denied_operations": ["DROP"]},
-            {"name": "context_rules", "type": "context_rules", "rules": [{"agent": "*", "max_cost_per_call": 100.0}]},
+            {
+                "name": "context_rules",
+                "type": "context_rules",
+                "rules": [{"agent": "*", "max_cost_per_call": 100.0}],
+            },
             {"name": "rate_limit", "type": "rate_limit", "max_requests_per_minute": 1000},
         ]
     }
@@ -25,7 +34,9 @@ def test_rule_evaluation_order_is_fixed() -> None:
     }
     decision = evaluate(request, policy, state=RateLimitTracker(persist_path=None))
 
-    assert decision.rules_checked == [rule for rule in RULE_EVALUATION_ORDER if rule != "identity_check"]
+    assert decision.rules_checked == [
+        rule for rule in RULE_EVALUATION_ORDER if rule != "identity_check"
+    ]
 
 
 def test_unknown_rule_type_causes_deny() -> None:
@@ -47,7 +58,9 @@ def test_fail_closed_on_internal_error(monkeypatch) -> None:
     decision = evaluate(request, policy)
 
     assert decision.allowed is False
-    assert any("internal_error: rule 'file_access' raised boom" in reason for reason in decision.reasons)
+    assert any(
+        "internal_error: rule 'file_access' raised boom" in reason for reason in decision.reasons
+    )
 
 
 def test_all_rules_evaluated_no_short_circuit() -> None:

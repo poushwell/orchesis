@@ -33,7 +33,9 @@ def test_fuzzer_deterministic_with_seed() -> None:
     assert report_a.denied_correctly == report_b.denied_correctly
     assert report_a.allowed_correctly == report_b.allowed_correctly
     assert report_a.bypass_rate == report_b.bypass_rate
-    assert [item.mutation for item in report_a.bypasses] == [item.mutation for item in report_b.bypasses]
+    assert [item.mutation for item in report_a.bypasses] == [
+        item.mutation for item in report_b.bypasses
+    ]
     assert first.category_counts == second.category_counts
 
 

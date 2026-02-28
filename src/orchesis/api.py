@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +37,7 @@ def create_api_app(
     """Create governance control-plane API."""
     app = FastAPI(title="Orchesis Control API")
     logger = StructuredLogger("api")
+
     @app.exception_handler(HTTPException)
     async def _http_error_handler(request, exc: HTTPException):  # noqa: ANN001
         _ = request
@@ -228,7 +228,9 @@ def create_api_app(
         return {"agents": agents, "default_tier": registry.default_tier.name.lower()}
 
     @app.get("/api/v1/agents/{agent_id}")
-    def get_agent(agent_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    def get_agent(
+        agent_id: str, authorization: str | None = Header(default=None)
+    ) -> dict[str, Any]:
         _require_auth(authorization)
         _refresh_current_version()
         identity = app.state.current_version.registry.get(agent_id)
@@ -279,7 +281,9 @@ def create_api_app(
         if not found:
             raise HTTPException(status_code=404, detail={"error": "agent not found"})
 
-        policy_file.write_text(yaml.safe_dump(policy, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        policy_file.write_text(
+            yaml.safe_dump(policy, sort_keys=False, allow_unicode=True), encoding="utf-8"
+        )
         version = store.load(str(policy_file))
         _refresh_current_version()
         logger.warn(
@@ -313,7 +317,7 @@ def create_api_app(
         )
         corpus_stats = corpus.stats()
         return {
-            "version": "0.5.0",
+            "version": "0.6.0",
             "uptime_seconds": int(max(0.0, time.perf_counter() - started_at)),
             "policy_version": app.state.current_version.version_id,
             "total_decisions": total_decisions,

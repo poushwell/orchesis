@@ -123,12 +123,23 @@ def test_rate_limit_under_concurrent_load() -> None:
 def test_evaluation_latency_with_large_policy() -> None:
     mixed_rules: list[dict[str, object]] = []
     for idx in range(20):
-        mixed_rules.append({"name": f"budget_limit_{idx}", "type": "budget_limit", "max_cost_per_call": 1.0})
         mixed_rules.append(
-            {"name": f"file_access_{idx}", "type": "file_access", "allowed_paths": ["/data"], "denied_paths": ["/etc"]}
+            {"name": f"budget_limit_{idx}", "type": "budget_limit", "max_cost_per_call": 1.0}
         )
         mixed_rules.append(
-            {"name": f"sql_restriction_{idx}", "type": "sql_restriction", "denied_operations": ["DROP"]}
+            {
+                "name": f"file_access_{idx}",
+                "type": "file_access",
+                "allowed_paths": ["/data"],
+                "denied_paths": ["/etc"],
+            }
+        )
+        mixed_rules.append(
+            {
+                "name": f"sql_restriction_{idx}",
+                "type": "sql_restriction",
+                "denied_operations": ["DROP"],
+            }
         )
         mixed_rules.append(
             {
@@ -138,7 +149,9 @@ def test_evaluation_latency_with_large_policy() -> None:
                 "deny_patterns": [r"(?i)drop\s+table"],
             }
         )
-        mixed_rules.append({"name": f"rate_limit_{idx}", "type": "rate_limit", "max_requests_per_minute": 100000})
+        mixed_rules.append(
+            {"name": f"rate_limit_{idx}", "type": "rate_limit", "max_requests_per_minute": 100000}
+        )
 
     policy = {"rules": mixed_rules}
     request = _request()

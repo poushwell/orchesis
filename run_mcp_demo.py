@@ -41,21 +41,19 @@ async def run_demo() -> None:
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
 
-            allow_result = await session.call_tool("read_file", arguments={"path": "/data/report.csv"})
+            allow_result = await session.call_tool(
+                "read_file", arguments={"path": "/data/report.csv"}
+            )
             print("read_file('/data/report.csv'):")
             print(f"  isError={allow_result.isError}")
             print(f"  content={_extract_text(allow_result)}")
 
-            deny_delete = await session.call_tool(
-                "delete_file", arguments={"path": "/etc/passwd"}
-            )
+            deny_delete = await session.call_tool("delete_file", arguments={"path": "/etc/passwd"})
             print("delete_file('/etc/passwd'):")
             print(f"  isError={deny_delete.isError}")
             print(f"  content={_extract_text(deny_delete)}")
 
-            deny_sql = await session.call_tool(
-                "run_sql", arguments={"query": "DROP TABLE users"}
-            )
+            deny_sql = await session.call_tool("run_sql", arguments={"query": "DROP TABLE users"})
             print("run_sql('DROP TABLE users'):")
             print(f"  isError={deny_sql.isError}")
             print(f"  content={_extract_text(deny_sql)}")

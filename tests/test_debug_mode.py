@@ -80,7 +80,9 @@ rules:
             json.dumps({"tool": "read_file", "params": {"path": "/etc/passwd"}, "cost": 0.1}),
             encoding="utf-8",
         )
-        result = runner.invoke(main, ["verify", "request.json", "--policy", "policy.yaml", "--debug"])
+        result = runner.invoke(
+            main, ["verify", "request.json", "--policy", "policy.yaml", "--debug"]
+        )
         assert result.exit_code == 1
         assert "debug_trace" in result.output
 
@@ -111,7 +113,12 @@ rules:
         response = await client.post(
             "/api/v1/evaluate",
             headers={"Authorization": "Bearer orch_sk_test"},
-            json={"tool": "read_file", "params": {"path": "/etc/passwd"}, "cost": 0.1, "debug": True},
+            json={
+                "tool": "read_file",
+                "params": {"path": "/etc/passwd"},
+                "cost": 0.1,
+                "debug": True,
+            },
         )
     assert response.status_code == 200
     payload = response.json()

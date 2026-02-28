@@ -168,7 +168,9 @@ rules:
         )
         _write_file(Path("request.json"), '{"tool":"sql_query","params":{},"cost":0.10}')
 
-        result = runner.invoke(main, ["verify", "request.json", "--policy", "policy.yaml", "--sign"])
+        result = runner.invoke(
+            main, ["verify", "request.json", "--policy", "policy.yaml", "--sign"]
+        )
 
         assert result.exit_code == 0
         line = Path("decisions.jsonl").read_text(encoding="utf-8").splitlines()[0]

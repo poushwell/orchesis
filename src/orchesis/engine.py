@@ -84,7 +84,9 @@ def _rules_triggered(reasons: list[str]) -> list[str]:
     return triggered
 
 
-def _build_state_snapshot(state: RateLimitTracker, agent_id: str, session_id: str) -> dict[str, Any]:
+def _build_state_snapshot(
+    state: RateLimitTracker, agent_id: str, session_id: str
+) -> dict[str, Any]:
     snapshot: dict[str, Any] = {
         "agent_id": agent_id,
         "session_id": session_id,
@@ -192,11 +194,15 @@ def _apply_identity_check(
 
     denied_tools = identity.denied_tools if isinstance(identity.denied_tools, list) else None
     if denied_tools is not None and tool in denied_tools:
-        reasons.append(f"identity: tool '{tool}' is explicitly denied for agent '{identity.agent_id}'")
+        reasons.append(
+            f"identity: tool '{tool}' is explicitly denied for agent '{identity.agent_id}'"
+        )
 
     allowed_tools = identity.allowed_tools if isinstance(identity.allowed_tools, list) else None
     if allowed_tools is not None and tool not in allowed_tools:
-        reasons.append(f"identity: tool '{tool}' is not in allowed_tools for agent '{identity.agent_id}'")
+        reasons.append(
+            f"identity: tool '{tool}' is not in allowed_tools for agent '{identity.agent_id}'"
+        )
 
     if not check_capability(identity, tool):
         reasons.append(
@@ -336,11 +342,15 @@ def _apply_rate_limit(
             session_id=session_id,
         )
     if over_limit:
-        reasons.append(f"rate_limit: tool '{tool}' exceeded max_requests_per_minute {max_per_minute}")
+        reasons.append(
+            f"rate_limit: tool '{tool}' exceeded max_requests_per_minute {max_per_minute}"
+        )
     return reasons, checked
 
 
-def _apply_file_access(rule: dict[str, Any], request: dict[str, Any]) -> tuple[list[str], list[str]]:
+def _apply_file_access(
+    rule: dict[str, Any], request: dict[str, Any]
+) -> tuple[list[str], list[str]]:
     reasons: list[str] = []
     checked = ["file_access"]
     path = _get_path(request)
@@ -366,7 +376,9 @@ def _apply_file_access(rule: dict[str, Any], request: dict[str, Any]) -> tuple[l
     return reasons, checked
 
 
-def _apply_sql_restriction(rule: dict[str, Any], request: dict[str, Any]) -> tuple[list[str], list[str]]:
+def _apply_sql_restriction(
+    rule: dict[str, Any], request: dict[str, Any]
+) -> tuple[list[str], list[str]]:
     reasons: list[str] = []
     checked = ["sql_restriction"]
     params = request.get("params")
@@ -385,7 +397,9 @@ def _apply_sql_restriction(rule: dict[str, Any], request: dict[str, Any]) -> tup
     return reasons, checked
 
 
-def _apply_regex_match(rule: dict[str, Any], request: dict[str, Any]) -> tuple[list[str], list[str]]:
+def _apply_regex_match(
+    rule: dict[str, Any], request: dict[str, Any]
+) -> tuple[list[str], list[str]]:
     reasons: list[str] = []
     checked = ["regex_match"]
     field = rule.get("field")
@@ -407,7 +421,9 @@ def _apply_regex_match(rule: dict[str, Any], request: dict[str, Any]) -> tuple[l
     return reasons, checked
 
 
-def _apply_context_rules(rule: dict[str, Any], request: dict[str, Any]) -> tuple[list[str], list[str]]:
+def _apply_context_rules(
+    rule: dict[str, Any], request: dict[str, Any]
+) -> tuple[list[str], list[str]]:
     reasons: list[str] = []
     checked = ["context_rules"]
 
@@ -630,7 +646,9 @@ def evaluate(
             snapshot = {"error": "state_unavailable"}
         total_duration_us = max(0, (time.perf_counter_ns() - started_ns) // 1000)
         target.debug_trace = {
-            "evaluation_order": [name for name in RULE_EVALUATION_ORDER if name != "identity_check"],
+            "evaluation_order": [
+                name for name in RULE_EVALUATION_ORDER if name != "identity_check"
+            ],
             "rule_results": list(debug_rule_results),
             "agent_id": agent_id,
             "agent_tier": identity.trust_tier.name.lower() if identity is not None else "unknown",
@@ -641,7 +659,9 @@ def evaluate(
         }
 
     if identity is not None:
-        identity_reasons, identity_checked, blocked_immediately = _apply_identity_check(request, identity)
+        identity_reasons, identity_checked, blocked_immediately = _apply_identity_check(
+            request, identity
+        )
         reasons.extend(identity_reasons)
         rules_checked.extend(identity_checked)
         debug_identity_passed = len(identity_reasons) == 0
@@ -671,7 +691,9 @@ def evaluate(
             return decision
 
     if not policy:
-        decision = Decision(allowed=len(reasons) == 0, reasons=reasons, rules_checked=rules_checked)
+        decision = Decision(
+            allowed=len(reasons) == 0, reasons=reasons, rules_checked=rules_checked
+        )
         _attach_debug_trace(decision)
         _emit_event(
             emitter=emitter,
@@ -688,7 +710,9 @@ def evaluate(
 
     rules = policy.get("rules")
     if not isinstance(rules, list) or len(rules) == 0:
-        decision = Decision(allowed=len(reasons) == 0, reasons=reasons, rules_checked=rules_checked)
+        decision = Decision(
+            allowed=len(reasons) == 0, reasons=reasons, rules_checked=rules_checked
+        )
         _attach_debug_trace(decision)
         _emit_event(
             emitter=emitter,
@@ -709,9 +733,7 @@ def evaluate(
     unknown_explicit_rules = cached_plan["unknown_explicit_rules"]
     legacy_unknown_name_rules = cached_plan["legacy_unknown_name_rules"]
     cached_agent_spent: float | None = None
-    effective_max_cost_per_call = (
-        identity.max_cost_per_call if identity is not None else None
-    )
+    effective_max_cost_per_call = identity.max_cost_per_call if identity is not None else None
     effective_daily_budget = identity.daily_budget if identity is not None else None
     effective_rate_limit_per_minute = (
         identity.rate_limit_per_minute if identity is not None else None
@@ -753,7 +775,9 @@ def evaluate(
             try:
                 if rule_type == "budget_limit":
                     try:
-                        has_daily_budget = isinstance(rule_for_eval.get("daily_budget"), int | float)
+                        has_daily_budget = isinstance(
+                            rule_for_eval.get("daily_budget"), int | float
+                        )
                         if has_daily_budget and cached_agent_spent is None:
                             cached_agent_spent = tracker.get_agent_budget_spent(
                                 agent_id,
@@ -871,10 +895,7 @@ def evaluate(
                         session_id=session_id,
                     )
                     if over_budget:
-                        reasons.append(
-                            "budget_limit: agent "
-                            f"'{agent_id}' daily budget exceeded"
-                        )
+                        reasons.append(f"budget_limit: agent '{agent_id}' daily budget exceeded")
                         allowed = False
                 else:
                     tracker.record_spend(
@@ -981,7 +1002,9 @@ def _get_policy_plan(
         return cached[1]
 
     all_rules_by_name: dict[str, dict[str, Any]] = {}
-    ordered: dict[str, list[dict[str, Any]]] = {rule_type: [] for rule_type in RULE_EVALUATION_ORDER}
+    ordered: dict[str, list[dict[str, Any]]] = {
+        rule_type: [] for rule_type in RULE_EVALUATION_ORDER
+    }
     unknown_explicit_rules: list[tuple[str, dict[str, Any]]] = []
     legacy_unknown_name_rules: list[dict[str, Any]] = []
 

@@ -210,7 +210,7 @@ class AuditEngine:
                     {
                         "rule": "high_deny_rate",
                         "agent_id": agent_id,
-                        "detail": f"{rate*100:.0f}% deny rate ({deny}/{total} requests)",
+                        "detail": f"{rate * 100:.0f}% deny rate ({deny}/{total} requests)",
                         "severity": "high",
                         "timestamp": now,
                     }

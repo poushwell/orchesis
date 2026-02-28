@@ -63,7 +63,9 @@ def test_combination_mutations_cross_categories() -> None:
 
 def test_boundary_mutations_test_limits() -> None:
     engine = MutationEngine(_seeded_corpus(), seed=42)
-    entry = next(item for item in _seeded_corpus().load_all() if item.category == "cost_manipulation")
+    entry = next(
+        item for item in _seeded_corpus().load_all() if item.category == "cost_manipulation"
+    )
     variants = [m for m in engine._mutate_entry(entry) if m.mutation_type == "boundary"]
     costs = sorted({float(m.request["cost"]) for m in variants})
     assert costs == [1.999, 2.0, 2.001]

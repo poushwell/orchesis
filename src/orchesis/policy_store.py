@@ -74,7 +74,11 @@ class PolicyStore:
         if self._current is None or len(self._versions) < 2:
             return None
         current_index = next(
-            (idx for idx, version in enumerate(self._versions) if version.version_id == self._current.version_id),
+            (
+                idx
+                for idx, version in enumerate(self._versions)
+                if version.version_id == self._current.version_id
+            ),
             -1,
         )
         if current_index < 0 or current_index >= len(self._versions) - 1:

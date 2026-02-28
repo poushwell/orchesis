@@ -45,13 +45,20 @@ def test_context_rules_blocks_untrusted_agent() -> None:
                 "name": "agent_restrictions",
                 "type": "context_rules",
                 "rules": [
-                    {"agent": "untrusted_bot", "denied_tools": ["delete_file", "run_sql", "write_file"]},
+                    {
+                        "agent": "untrusted_bot",
+                        "denied_tools": ["delete_file", "run_sql", "write_file"],
+                    },
                     {"agent": "*", "max_cost_per_call": 0.5},
                 ],
             }
         ]
     }
-    request = {"tool": "delete_file", "params": {"path": "/data/x"}, "context": {"agent": "untrusted_bot"}}
+    request = {
+        "tool": "delete_file",
+        "params": {"path": "/data/x"},
+        "context": {"agent": "untrusted_bot"},
+    }
 
     decision = evaluate(request, policy)
     assert decision.allowed is False

@@ -59,7 +59,9 @@ class AdversarialScenarios:
             mutation=mutation,
         )
 
-    def _build_result(self, name: str, description: str, steps: list[FuzzResult], success: bool) -> ScenarioResult:
+    def _build_result(
+        self, name: str, description: str, steps: list[FuzzResult], success: bool
+    ) -> ScenarioResult:
         allowed = sum(1 for step in steps if step.decision_allowed)
         denied = len(steps) - allowed
         bypasses = [step for step in steps if step.is_bypass]
@@ -77,13 +79,76 @@ class AdversarialScenarios:
         """Gradual privilege escalation simulation."""
         tracker = RateLimitTracker(persist_path=None)
         steps: list[tuple[dict[str, Any], bool, str]] = [
-            ({"tool": "read_file", "params": {"path": "/data/safe.txt"}, "cost": 0.1, "context": {"agent": "untrusted_bot"}}, False, "read_safe"),
-            ({"tool": "read_file", "params": {"path": "/data/config.yaml"}, "cost": 0.1, "context": {"agent": "untrusted_bot"}}, False, "read_config"),
-            ({"tool": "read_file", "params": {"path": "/etc/hostname"}, "cost": 0.1, "context": {"agent": "untrusted_bot"}}, True, "read_etc"),
-            ({"tool": "write_file", "params": {"path": "/data/test.txt", "content": "x"}, "cost": 0.1, "context": {"agent": "untrusted_bot"}}, True, "write_attempt"),
-            ({"tool": "delete_file", "params": {"path": "/data/test.txt"}, "cost": 0.1, "context": {"agent": "untrusted_bot"}}, True, "delete_attempt"),
-            ({"tool": "read_file", "params": {"path": "/root/.ssh/id_rsa"}, "cost": 0.1, "context": {"agent": "untrusted_bot"}}, True, "read_root"),
-            ({"tool": "run_sql", "params": {"query": "DROP TABLE users"}, "cost": 0.1, "context": {"agent": "untrusted_bot"}}, True, "sql_drop"),
+            (
+                {
+                    "tool": "read_file",
+                    "params": {"path": "/data/safe.txt"},
+                    "cost": 0.1,
+                    "context": {"agent": "untrusted_bot"},
+                },
+                False,
+                "read_safe",
+            ),
+            (
+                {
+                    "tool": "read_file",
+                    "params": {"path": "/data/config.yaml"},
+                    "cost": 0.1,
+                    "context": {"agent": "untrusted_bot"},
+                },
+                False,
+                "read_config",
+            ),
+            (
+                {
+                    "tool": "read_file",
+                    "params": {"path": "/etc/hostname"},
+                    "cost": 0.1,
+                    "context": {"agent": "untrusted_bot"},
+                },
+                True,
+                "read_etc",
+            ),
+            (
+                {
+                    "tool": "write_file",
+                    "params": {"path": "/data/test.txt", "content": "x"},
+                    "cost": 0.1,
+                    "context": {"agent": "untrusted_bot"},
+                },
+                True,
+                "write_attempt",
+            ),
+            (
+                {
+                    "tool": "delete_file",
+                    "params": {"path": "/data/test.txt"},
+                    "cost": 0.1,
+                    "context": {"agent": "untrusted_bot"},
+                },
+                True,
+                "delete_attempt",
+            ),
+            (
+                {
+                    "tool": "read_file",
+                    "params": {"path": "/root/.ssh/id_rsa"},
+                    "cost": 0.1,
+                    "context": {"agent": "untrusted_bot"},
+                },
+                True,
+                "read_root",
+            ),
+            (
+                {
+                    "tool": "run_sql",
+                    "params": {"query": "DROP TABLE users"},
+                    "cost": 0.1,
+                    "context": {"agent": "untrusted_bot"},
+                },
+                True,
+                "sql_drop",
+            ),
         ]
         results = [
             self._run_step(
@@ -95,7 +160,9 @@ class AdversarialScenarios:
             )
             for request, expected_deny, mutation in steps
         ]
-        return self._build_result("escalation_attack", "Progressive escalation probe", results, success=True)
+        return self._build_result(
+            "escalation_attack", "Progressive escalation probe", results, success=True
+        )
 
     def budget_drainer(self) -> ScenarioResult:
         """Repeated near-limit calls that should hit daily budget."""
@@ -149,14 +216,14 @@ class AdversarialScenarios:
                 "tool": "read_file",
                 "params": {"path": "/data/safe.txt"},
                 "cost": 0.1,
-                "context": {"agent": f"bot_{idx+1}"},
+                "context": {"agent": f"bot_{idx + 1}"},
             }
             results.append(
                 self._run_step(
                     request,
                     expected_deny=False,
                     category="identity_rotation",
-                    mutation=f"agent_rotated_{idx+1}",
+                    mutation=f"agent_rotated_{idx + 1}",
                     tracker=tracker,
                 )
             )
@@ -177,18 +244,20 @@ class AdversarialScenarios:
                 "tool": "read_file",
                 "params": {"path": "/data/safe.txt"},
                 "cost": 0.1,
-                "context": {"agent": "hopper", "session": f"s{idx+1}"},
+                "context": {"agent": "hopper", "session": f"s{idx + 1}"},
             }
             results.append(
                 self._run_step(
                     request,
                     expected_deny=False,
                     category="session_hopping",
-                    mutation=f"session_{idx+1}",
+                    mutation=f"session_{idx + 1}",
                     tracker=tracker,
                 )
             )
-        return self._build_result("session_hopping", "Session hopping probe", results, success=True)
+        return self._build_result(
+            "session_hopping", "Session hopping probe", results, success=True
+        )
 
     def slow_probe(self) -> ScenarioResult:
         """Slow denied probes across sensitive paths."""
@@ -207,7 +276,7 @@ class AdversarialScenarios:
                     request,
                     expected_deny=True,
                     category="slow_probe",
-                    mutation=f"probe_{idx+1}",
+                    mutation=f"probe_{idx + 1}",
                     tracker=tracker,
                 )
             )

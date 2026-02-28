@@ -90,7 +90,9 @@ def test_corpus_seeded_entries_exist() -> None:
     required = {f"BYPASS-{idx:03d}.json" for idx in range(1, 15)}
     present = {path.name for path in files}
     assert required.issubset(present)
-    payloads = [json.loads((corpus_dir / name).read_text(encoding="utf-8")) for name in sorted(required)]
+    payloads = [
+        json.loads((corpus_dir / name).read_text(encoding="utf-8")) for name in sorted(required)
+    ]
     assert all(item.get("fixed") is True for item in payloads)
 
 

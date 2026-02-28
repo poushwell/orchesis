@@ -27,7 +27,9 @@ def resolve_task_steps(task: str, catalog: dict[str, Any]) -> list[dict[str, Any
 
     normalized = task.strip().lower()
 
-    def _steps_with_task_context(item: dict[str, Any], steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _steps_with_task_context(
+        item: dict[str, Any], steps: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         item_context = item.get("context")
         if not isinstance(item_context, dict):
             return steps

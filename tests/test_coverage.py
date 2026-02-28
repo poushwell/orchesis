@@ -18,7 +18,9 @@ def test_coverage_tracker_records_decisions() -> None:
     tracker = CoverageTracker()
     for _ in range(10):
         tracker.record(
-            Decision(allowed=False, reasons=["file_access: denied"], rules_checked=["file_access"]),
+            Decision(
+                allowed=False, reasons=["file_access: denied"], rules_checked=["file_access"]
+            ),
             category="path_traversal",
             agent_tier="INTERN",
             request={"tool": "read_file", "context": {"agent": "a1"}},
@@ -87,7 +89,9 @@ def test_coverage_identifies_missing_categories() -> None:
         "rate_limit",
     ]
     for category in tested:
-        tracker.record(Decision(allowed=False, reasons=["x: y"], rules_checked=["x"]), category=category)
+        tracker.record(
+            Decision(allowed=False, reasons=["x: y"], rules_checked=["x"]), category=category
+        )
     report = tracker.report(
         all_rules=["x"],
         all_categories=tested + ["composite"],

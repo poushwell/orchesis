@@ -26,7 +26,13 @@ def test_all_doc_files_exist() -> None:
 
 def test_readme_has_required_sections() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
-    for section in ("## Quick Start", "## Architecture", "## Core Features", "## CLI Reference", "## License"):
+    for section in (
+        "## Quick Start",
+        "## Architecture",
+        "## Core Features",
+        "## CLI Reference",
+        "## License",
+    ):
         assert section in text
 
 
@@ -72,8 +78,8 @@ def test_package_builds_cleanly(tmp_path: Path) -> None:
     result = subprocess.run(build_cmd, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
 
-    artifacts = sorted(dist_dir.glob("orchesis-0.5.0*"))
-    assert artifacts, "Build artifacts for 0.5.0 not found"
+    artifacts = sorted(dist_dir.glob("orchesis-0.6.0*"))
+    assert artifacts, "Build artifacts for 0.6.0 not found"
 
     twine_cmd = [sys.executable, "-m", "twine", "check", *[str(item) for item in artifacts]]
     check = subprocess.run(twine_cmd, capture_output=True, text=True)

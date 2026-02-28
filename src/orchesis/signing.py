@@ -59,7 +59,9 @@ def sign_entry(entry: dict[str, object], private_key_path: str | Path) -> str:
     return base64.b64encode(signature).decode("ascii")
 
 
-def verify_entry(entry: dict[str, object], signature_b64: str, public_key_path: str | Path) -> bool:
+def verify_entry(
+    entry: dict[str, object], signature_b64: str, public_key_path: str | Path
+) -> bool:
     """Verify base64 Ed25519 signature against canonical decision fields."""
     public_key_bytes = Path(public_key_path).read_bytes()
     public_key = serialization.load_pem_public_key(public_key_bytes)

@@ -68,7 +68,9 @@ async def _proxy_session(policy_path: Path, decisions_log: Path, state_log: Path
     env["DECISIONS_LOG_PATH"] = str(decisions_log)
     env["STATE_PATH"] = str(state_log)
     env["DOWNSTREAM_COMMAND"] = sys.executable
-    env["DOWNSTREAM_ARGS"] = " ".join([shlex.quote("-m"), shlex.quote("orchesis.testing.mcp_server")])
+    env["DOWNSTREAM_ARGS"] = " ".join(
+        [shlex.quote("-m"), shlex.quote("orchesis.testing.mcp_server")]
+    )
     env["TEST_MCP_CALL_LOG"] = str(call_log)
     params = StdioServerParameters(
         command=sys.executable,
@@ -95,7 +97,7 @@ async def run_demo(rate_burst: int = 100) -> dict[str, int | float | str]:
     _write_demo_policy(policy_path)
 
     print("╔══════════════════════════════════════╗")
-    print("║  Orchesis v0.5.0 — Live Demo         ║")
+    print("║  Orchesis v0.6.0 — Live Demo         ║")
     print("╚══════════════════════════════════════╝")
     print("")
     print("Starting MCP server... ✓")
@@ -103,6 +105,7 @@ async def run_demo(rate_burst: int = 100) -> dict[str, int | float | str]:
     print("")
 
     async with _proxy_session(policy_path, decisions_log, state_log, call_log) as session:
+
         async def _invoke(tool: str, **kwargs):
             started = time.perf_counter_ns()
             result = await session.call_tool(tool, kwargs)
@@ -112,8 +115,16 @@ async def run_demo(rate_burst: int = 100) -> dict[str, int | float | str]:
 
         print("─── Scenario 1: Normal Operations ───")
         for tool, label, args in [
-            ("read_file", "[cursor/operator] read_file /data/report.csv", {"path": "/data/report.csv", "agent_id": "cursor", "cost": 0.1}),
-            ("run_sql", "[cursor/operator] run_sql SELECT * FROM sales", {"query": "SELECT * FROM sales", "agent_id": "cursor", "cost": 0.2}),
+            (
+                "read_file",
+                "[cursor/operator] read_file /data/report.csv",
+                {"path": "/data/report.csv", "agent_id": "cursor", "cost": 0.1},
+            ),
+            (
+                "run_sql",
+                "[cursor/operator] run_sql SELECT * FROM sales",
+                {"query": "SELECT * FROM sales", "agent_id": "cursor", "cost": 0.2},
+            ),
         ]:
             result, elapsed, _ = await _invoke(tool, **args)
             print(f"{label}\n  → {'ALLOW' if not result.isError else 'DENY'} ({elapsed}μs)")
@@ -121,8 +132,16 @@ async def run_demo(rate_burst: int = 100) -> dict[str, int | float | str]:
 
         print("─── Scenario 2: Attack Prevention ───")
         for tool, label, args in [
-            ("read_file", "[cursor/operator] read_file /etc/passwd", {"path": "/etc/passwd", "agent_id": "cursor", "cost": 0.1}),
-            ("run_sql", "[cursor/operator] run_sql DROP TABLE users", {"query": "DROP TABLE users", "agent_id": "cursor", "cost": 0.1}),
+            (
+                "read_file",
+                "[cursor/operator] read_file /etc/passwd",
+                {"path": "/etc/passwd", "agent_id": "cursor", "cost": 0.1},
+            ),
+            (
+                "run_sql",
+                "[cursor/operator] run_sql DROP TABLE users",
+                {"query": "DROP TABLE users", "agent_id": "cursor", "cost": 0.1},
+            ),
         ]:
             result, elapsed, reason = await _invoke(tool, **args)
             print(f"{label}\n  → {'DENY' if result.isError else 'ALLOW'}: {reason} ({elapsed}μs)")
@@ -130,9 +149,26 @@ async def run_demo(rate_burst: int = 100) -> dict[str, int | float | str]:
 
         print("─── Scenario 3: Identity Enforcement ───")
         for tool, label, args in [
-            ("read_file", "[untrusted_bot/intern] read_file /data/safe.txt", {"path": "/data/safe.txt", "agent_id": "untrusted_bot", "cost": 0.1}),
-            ("write_file", "[untrusted_bot/intern] write_file /data/hack.txt", {"path": "/data/hack.txt", "content": "x", "agent_id": "untrusted_bot", "cost": 0.1}),
-            ("read_file", "[blocked_agent/blocked] read_file /data/safe.txt", {"path": "/data/safe.txt", "agent_id": "blocked_agent", "cost": 0.1}),
+            (
+                "read_file",
+                "[untrusted_bot/intern] read_file /data/safe.txt",
+                {"path": "/data/safe.txt", "agent_id": "untrusted_bot", "cost": 0.1},
+            ),
+            (
+                "write_file",
+                "[untrusted_bot/intern] write_file /data/hack.txt",
+                {
+                    "path": "/data/hack.txt",
+                    "content": "x",
+                    "agent_id": "untrusted_bot",
+                    "cost": 0.1,
+                },
+            ),
+            (
+                "read_file",
+                "[blocked_agent/blocked] read_file /data/safe.txt",
+                {"path": "/data/safe.txt", "agent_id": "blocked_agent", "cost": 0.1},
+            ),
         ]:
             result, elapsed, reason = await _invoke(tool, **args)
             arrow = "ALLOW" if not result.isError else f"DENY: {reason}"
@@ -141,7 +177,15 @@ async def run_demo(rate_burst: int = 100) -> dict[str, int | float | str]:
 
         print("─── Scenario 4: Rate Limiting ───")
         rate_results = [
-            (await _invoke("read_file", path=f"/data/rate-{idx}.txt", agent_id="cursor", session_id="demo-rate", cost=0.0))[0]
+            (
+                await _invoke(
+                    "read_file",
+                    path=f"/data/rate-{idx}.txt",
+                    agent_id="cursor",
+                    session_id="demo-rate",
+                    cost=0.0,
+                )
+            )[0]
             for idx in range(rate_burst)
         ]
         allow = sum(1 for item in rate_results if not item.isError)
@@ -151,32 +195,50 @@ async def run_demo(rate_burst: int = 100) -> dict[str, int | float | str]:
         print("")
 
         print("─── Scenario 5: Budget Control ───")
-        budget_calls = [(await _invoke("expensive_operation", cost=2.0, agent_id="cursor", session_id="demo-budget"))[0] for _ in range(3)]
+        budget_calls = [
+            (
+                await _invoke(
+                    "expensive_operation", cost=2.0, agent_id="cursor", session_id="demo-budget"
+                )
+            )[0]
+            for _ in range(3)
+        ]
         b_status = ["ALLOW" if not item.isError else "DENY" for item in budget_calls]
         print("[cursor/operator] expensive_operation cost=2.0 x3")
-        print(f"  → {b_status[0]} ($2.00), {b_status[1]} ($4.00), {b_status[2]} (daily budget $5.00 exceeded)")
+        print(
+            f"  → {b_status[0]} ($2.00), {b_status[1]} ($4.00), {b_status[2]} (daily budget $5.00 exceeded)"
+        )
         print("")
 
     events = read_events_from_jsonl(decisions_log)
     allowed = sum(1 for event in events if event.decision == "ALLOW")
     denied = sum(1 for event in events if event.decision == "DENY")
-    avg_latency = (sum(event.evaluation_duration_us for event in events) / len(events)) if events else 0.0
+    avg_latency = (
+        (sum(event.evaluation_duration_us for event in events) / len(events)) if events else 0.0
+    )
     policy_version = events[0].policy_version if events else "unknown"
     invariant_log = runtime_dir / "invariants_input.jsonl"
-    report = InvariantChecker(policy_path=str(policy_path), decisions_log=str(invariant_log)).check_all()
+    report = InvariantChecker(
+        policy_path=str(policy_path), decisions_log=str(invariant_log)
+    ).check_all()
     passed = sum(1 for item in report.results if item.passed)
     print("─── Summary ───")
     print("")
     print(f"Total decisions: {len(events)}")
-    print(f"Allowed: {allowed} ({(allowed/len(events)*100.0) if events else 0:.0f}%)")
-    print(f"Denied: {denied} ({(denied/len(events)*100.0) if events else 0:.0f}%)")
+    print(f"Allowed: {allowed} ({(allowed / len(events) * 100.0) if events else 0:.0f}%)")
+    print(f"Denied: {denied} ({(denied / len(events) * 100.0) if events else 0:.0f}%)")
     print(f"Avg latency: {avg_latency:.0f}μs")
     print(f"Policy version: {policy_version[:6]}")
     print("")
     print(f"Invariant check: {passed}/{len(report.results)} passed ✓")
     print("")
     print(f"Full audit trail: {decisions_log} ({len(events)} entries)")
-    return {"total": len(events), "allowed": allowed, "denied": denied, "invariants_passed": int(report.all_passed)}
+    return {
+        "total": len(events),
+        "allowed": allowed,
+        "denied": denied,
+        "invariants_passed": int(report.all_passed),
+    }
 
 
 def main() -> None:

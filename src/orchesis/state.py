@@ -29,6 +29,7 @@ def _to_datetime_utc(timestamp: datetime | str | None) -> datetime:
 
 class RateLimitTracker:
     """Thread-safe in-memory counter with optional JSONL persistence."""
+
     _TRACKERS_BY_PATH: dict[str, WeakSet["RateLimitTracker"]] = {}
 
     def __init__(self, persist_path: str | Path | None = ".orchesis/state.jsonl"):
@@ -120,7 +121,9 @@ class RateLimitTracker:
 
     def _prune_spend(self, key: tuple[str, str], now: datetime, window_seconds: int) -> None:
         threshold = now - timedelta(seconds=window_seconds)
-        self._spend_events[key] = [(ts, cost) for ts, cost in self._spend_events[key] if ts >= threshold]
+        self._spend_events[key] = [
+            (ts, cost) for ts, cost in self._spend_events[key] if ts >= threshold
+        ]
         self._spend_totals[key] = sum(cost for _, cost in self._spend_events[key])
 
     def record(

@@ -82,7 +82,9 @@ def new_project(target: str, template_name: str, force: bool) -> None:
     request_file = root / "request.json"
     readme_file = root / "README.md"
     if not force:
-        existing = [str(path.name) for path in (policy_file, request_file, readme_file) if path.exists()]
+        existing = [
+            str(path.name) for path in (policy_file, request_file, readme_file) if path.exists()
+        ]
         if existing:
             raise click.ClickException(
                 f"Refusing to overwrite existing files: {', '.join(existing)}. Use --force to overwrite."
@@ -144,7 +146,13 @@ def doctor(policy_path: str) -> None:
             policy = load_policy(policy_file)
             errors = validate_policy(policy)
             checks.append(("policy_load", True, str(policy_file)))
-            checks.append(("policy_validate", len(errors) == 0, "OK" if not errors else "; ".join(errors[:2])))
+            checks.append(
+                (
+                    "policy_validate",
+                    len(errors) == 0,
+                    "OK" if not errors else "; ".join(errors[:2]),
+                )
+            )
         except Exception as error:  # noqa: BLE001
             checks.append(("policy_load", False, str(error)))
             checks.append(("policy_validate", False, "invalid policy"))
@@ -152,7 +160,10 @@ def doctor(policy_path: str) -> None:
         checks.append(("policy_load", False, f"missing: {policy_file}"))
         checks.append(("policy_validate", False, "policy file not found"))
 
-    template_ok = all((Path(__file__).resolve().parent / "templates" / f"{name}.yaml").exists() for name in TEMPLATE_NAMES)
+    template_ok = all(
+        (Path(__file__).resolve().parent / "templates" / f"{name}.yaml").exists()
+        for name in TEMPLATE_NAMES
+    )
     checks.append(("templates", template_ok, ", ".join(TEMPLATE_NAMES)))
 
     runtime_dir = Path(".orchesis")
@@ -168,7 +179,7 @@ def doctor(policy_path: str) -> None:
     click.echo("Doctor checks:")
     all_ok = True
     for name, ok, detail in checks:
-        marker = "✓" if ok else "✗"
+        marker = "[OK]" if ok else "[FAIL]"
         click.echo(f"  {marker} {name}: {detail}")
         all_ok = all_ok and ok
     raise SystemExit(0 if all_ok else 1)
@@ -434,7 +445,9 @@ def _normalize_plugin_modules(raw_modules: tuple[str, ...]) -> list[str]:
     return normalized
 
 
-def _print_coverage_report(click_module, coverage: CoverageReport, fuzzer: SyntheticFuzzer) -> None:  # noqa: ANN001
+def _print_coverage_report(
+    click_module, coverage: CoverageReport, fuzzer: SyntheticFuzzer
+) -> None:  # noqa: ANN001
     click_module.echo("")
     click_module.echo("Coverage Report:")
     total_rules = len(coverage.rules_triggered) + len(coverage.rules_never_triggered)
@@ -443,12 +456,14 @@ def _print_coverage_report(click_module, coverage: CoverageReport, fuzzer: Synth
         f"  Rules: {triggered}/{total_rules} triggered ({coverage.rule_coverage_pct:.1f}%)"
     )
     for rule in sorted(coverage.rules_triggered):
-        click_module.echo(f"    ✓ {rule} ({coverage.rules_triggered[rule]} hits)")
+        click_module.echo(f"    [OK] {rule} ({coverage.rules_triggered[rule]} hits)")
     for rule in coverage.rules_never_triggered:
-        click_module.echo(f"    ✗ {rule} (0 hits)")
+        click_module.echo(f"    [MISS] {rule} (0 hits)")
 
     all_categories = fuzzer.categories
-    tested_categories = len([cat for cat in all_categories if coverage.categories_tested.get(cat, 0) > 0])
+    tested_categories = len(
+        [cat for cat in all_categories if coverage.categories_tested.get(cat, 0) > 0]
+    )
     click_module.echo(
         f"  Categories: {tested_categories}/{len(all_categories)} tested "
         f"({coverage.category_coverage_pct:.1f}%)"
@@ -460,10 +475,12 @@ def _print_coverage_report(click_module, coverage: CoverageReport, fuzzer: Synth
         suffix = " <- gap" if count == 0 else ""
         click_module.echo(f"    {category}: {pct:.0f}%{suffix}")
 
-    tested_tiers = len([tier for tier in coverage.tier_coverage if coverage.tier_coverage[tier] > 0])
+    tested_tiers = len(
+        [tier for tier in coverage.tier_coverage if coverage.tier_coverage[tier] > 0]
+    )
     click_module.echo(f"  Trust tiers: {tested_tiers}/5 tested")
     for tier in coverage.tiers_never_tested:
-        click_module.echo(f"    ✗ {tier} never tested")
+        click_module.echo(f"    [MISS] {tier} never tested")
 
     suggestions = fuzzer.coverage_suggestions(coverage)
     if suggestions:
@@ -563,7 +580,7 @@ def fuzz(
     click.echo(f"  Total requests: {report.total_requests}")
     click.echo(f"  Correctly denied: {report.denied_correctly}")
     click.echo(f"  Correctly allowed: {report.allowed_correctly}")
-    click.echo(f"  BYPASSES FOUND: {len(report.bypasses)} ({report.bypass_rate*100:.2f}%)")
+    click.echo(f"  BYPASSES FOUND: {len(report.bypasses)} ({report.bypass_rate * 100:.2f}%)")
     if report.bypasses:
         click.echo("")
         click.echo("  Bypass details:")
@@ -601,13 +618,15 @@ def scenarios(policy_path: str) -> None:
     results = runner.run_all()
     click.echo("Adversarial Scenarios:")
     for result in results:
-        marker = "✓" if result.success else "⚠"
-        suffix = "known limitation" if "known limitation" in result.description.lower() else "bypasses found"
+        marker = "[OK]" if result.success else "[WARN]"
+        suffix = (
+            "known limitation"
+            if "known limitation" in result.description.lower()
+            else "bypasses found"
+        )
         if result.success:
             suffix = f"{len(result.bypasses)} bypasses"
-        click.echo(
-            f"  {marker} {result.name:<24} — {result.steps_total} steps, {suffix}"
-        )
+        click.echo(f"  {marker} {result.name:<24} - {result.steps_total} steps, {suffix}")
 
 
 @main.command()
@@ -673,7 +692,7 @@ def invariants(policy_path: str) -> None:
     report = checker.check_all()
     click.echo("Invariant Checks:")
     for result in report.results:
-        marker = "✓" if result.passed else "✗"
+        marker = "[OK]" if result.passed else "[FAIL]"
         click.echo(f"  {marker} {result.name}")
     passed = sum(1 for result in report.results if result.passed)
     total = len(report.results)
@@ -711,11 +730,11 @@ def drift(policy_path: str, log_path: str) -> None:
     )
     counts = Counter(item.drift_type for item in events)
     click.echo("Drift Detection:")
-    click.echo(f"  Counter integrity: {'✗' if counts.get('counter_mismatch') else '✓'}")
-    click.echo(f"  Budget integrity: {'✗' if counts.get('budget_mismatch') else '✓'}")
+    click.echo(f"  Counter integrity: {'FAIL' if counts.get('counter_mismatch') else 'OK'}")
+    click.echo(f"  Budget integrity: {'FAIL' if counts.get('budget_mismatch') else 'OK'}")
     click.echo(
         "  Replay consistency: "
-        f"{'✗' if counts.get('replay_divergence') else '✓'} "
+        f"{'FAIL' if counts.get('replay_divergence') else 'OK'} "
         f"(sampled {detector.replay_sample_size} events)"
     )
     baseline = detector.baseline_latency_us
@@ -730,7 +749,7 @@ def drift(policy_path: str, log_path: str) -> None:
         if detector.has_critical_drift:
             raise SystemExit(1)
     else:
-        click.echo("0 drift events detected ✓")
+        click.echo("0 drift events detected [OK]")
     tracker.flush()
 
 
@@ -816,20 +835,19 @@ def torture(policy_path: str, duration: int, agents: int) -> None:
     click.echo(f"Torture Test Results ({duration_seconds}s):")
     click.echo(f"  Total evaluations: {total:,}")
     click.echo(f"  Throughput: {throughput:.0f} evals/sec")
+    click.echo(f"  Latency: avg={avg_us:.0f}us p95={p95_us}us p99={p99_us}us max={max_us}us")
     click.echo(
-        "  Latency: "
-        f"avg={avg_us:.0f}us p95={p95_us}us p99={p99_us}us max={max_us}us"
+        f"  Memory growth: {memory_growth_mb:.1f}MB (peak={peak_mem / (1024 * 1024):.1f}MB)"
     )
-    click.echo(f"  Memory growth: {memory_growth_mb:.1f}MB (peak={peak_mem / (1024 * 1024):.1f}MB)")
     click.echo(f"  Fail-open events: {fail_open_events}")
     click.echo(f"  State drift events: {len(drift_events)}")
     click.echo(f"  Rate limit accuracy: {'100%' if fail_open_events == 0 else 'degraded'}")
     click.echo("  Budget accuracy: best-effort")
     click.echo("")
     if fail_open_events == 0 and not detector.has_critical_drift:
-        click.echo("PASSED ✓")
+        click.echo("PASSED [OK]")
         return
-    click.echo("FAILED ✗")
+    click.echo("FAILED [FAIL]")
     raise SystemExit(1)
 
 
@@ -1050,7 +1068,9 @@ def audit(
                 tampered_count += 1
                 click.echo(f"Entry {index}: TAMPERED")
 
-        click.echo(f"{verified_count} verified, {tampered_count} tampered, {unsigned_count} unsigned")
+        click.echo(
+            f"{verified_count} verified, {tampered_count} tampered, {unsigned_count} unsigned"
+        )
     state_tracker.flush()
 
 

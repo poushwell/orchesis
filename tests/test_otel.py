@@ -21,7 +21,10 @@ def _event() -> DecisionEvent:
         evaluation_order=["identity_check", "budget_limit", "rate_limit", "file_access"],
         evaluation_duration_us=50,
         policy_version="pv-1",
-        state_snapshot={"trace_id": "0123456789abcdef0123456789abcdef", "parent_span_id": "0123456789abcdef"},
+        state_snapshot={
+            "trace_id": "0123456789abcdef0123456789abcdef",
+            "parent_span_id": "0123456789abcdef",
+        },
     )
 
 
@@ -77,7 +80,9 @@ def test_trace_context_from_headers() -> None:
 
 
 def test_trace_context_to_headers() -> None:
-    context = TraceContext(trace_id="0123456789abcdef0123456789abcdef", parent_span_id="0123456789abcdef")
+    context = TraceContext(
+        trace_id="0123456789abcdef0123456789abcdef", parent_span_id="0123456789abcdef"
+    )
     headers = context.to_headers()
     assert "traceparent" in headers
     assert headers["traceparent"].startswith("00-0123456789abcdef0123456789abcdef-")

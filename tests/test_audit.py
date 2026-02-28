@@ -119,7 +119,9 @@ def test_stats_computation(tmp_path: Path) -> None:
     _write_jsonl(
         log,
         [
-            _event(1, agent_id="a", tool="read_file", decision="ALLOW", timestamp=now, session_id="s1"),
+            _event(
+                1, agent_id="a", tool="read_file", decision="ALLOW", timestamp=now, session_id="s1"
+            ),
             _event(
                 2,
                 agent_id="b",
@@ -188,7 +190,9 @@ def test_anomaly_high_deny_rate(tmp_path: Path) -> None:
         )
     _write_jsonl(log, rows)
     anomalies = AuditEngine(str(log)).anomalies()
-    assert any(item["rule"] == "high_deny_rate" and item["agent_id"] == "probe_bot" for item in anomalies)
+    assert any(
+        item["rule"] == "high_deny_rate" and item["agent_id"] == "probe_bot" for item in anomalies
+    )
 
 
 def test_anomaly_rate_limit_hammering(tmp_path: Path) -> None:
@@ -229,7 +233,10 @@ def test_anomaly_tool_persistence(tmp_path: Path) -> None:
     ]
     _write_jsonl(log, rows)
     anomalies = AuditEngine(str(log)).anomalies()
-    assert any(item["rule"] == "tool_persistence" and item["agent_id"] == "untrusted_bot" for item in anomalies)
+    assert any(
+        item["rule"] == "tool_persistence" and item["agent_id"] == "untrusted_bot"
+        for item in anomalies
+    )
 
 
 def test_anomaly_no_false_positives(tmp_path: Path) -> None:
@@ -255,7 +262,16 @@ def test_export_csv(tmp_path: Path) -> None:
     log = tmp_path / "decisions.jsonl"
     _write_jsonl(
         log,
-        [_event(1, agent_id="a", tool="read_file", decision="ALLOW", timestamp=now, session_id="abc")],
+        [
+            _event(
+                1,
+                agent_id="a",
+                tool="read_file",
+                decision="ALLOW",
+                timestamp=now,
+                session_id="abc",
+            )
+        ],
     )
     engine = AuditEngine(str(log))
     events = engine.query(AuditQuery(limit=100))

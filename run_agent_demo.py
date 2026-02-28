@@ -70,7 +70,9 @@ def main() -> None:
     print(result.output.strip())
 
     print("\nForensic (cursor):")
-    forensic = runner.invoke(orchesis_cli, ["forensic", "--agent", "cursor", "--log", str(log_path)])
+    forensic = runner.invoke(
+        orchesis_cli, ["forensic", "--agent", "cursor", "--log", str(log_path)]
+    )
     print(forensic.output.strip())
 
 

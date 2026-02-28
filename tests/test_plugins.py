@@ -41,7 +41,9 @@ def test_cannot_override_builtin_type() -> None:
 def test_plugin_evaluation() -> None:
     registry = PluginRegistry()
     registry.register(
-        PluginInfo("custom", "custom_rule", "1.0", "custom", _SimpleHandler("custom_rule: blocked"))
+        PluginInfo(
+            "custom", "custom_rule", "1.0", "custom", _SimpleHandler("custom_rule: blocked")
+        )
     )
     policy = {"rules": [{"name": "r1", "type": "custom_rule"}]}
     decision = evaluate({"tool": "read_file", "params": {}, "cost": 0.0}, policy, plugins=registry)
@@ -126,7 +128,10 @@ def test_time_window_allows_in_hours() -> None:
     handler = TimeWindowHandler()
     handler._now = lambda tz: datetime(2026, 2, 28, 10, 0, tzinfo=timezone.utc)  # type: ignore[method-assign]
     reasons, _ = handler.evaluate(
-        {"type": "time_window", "allowed_hours": {"start": "09:00", "end": "17:00", "timezone": "UTC"}},
+        {
+            "type": "time_window",
+            "allowed_hours": {"start": "09:00", "end": "17:00", "timezone": "UTC"},
+        },
         {"params": {}},
         state=RateLimitTracker(persist_path=None),
         agent_id="a",
@@ -139,7 +144,10 @@ def test_time_window_blocks_outside() -> None:
     handler = TimeWindowHandler()
     handler._now = lambda tz: datetime(2026, 2, 28, 22, 0, tzinfo=timezone.utc)  # type: ignore[method-assign]
     reasons, _ = handler.evaluate(
-        {"type": "time_window", "allowed_hours": {"start": "09:00", "end": "17:00", "timezone": "UTC"}},
+        {
+            "type": "time_window",
+            "allowed_hours": {"start": "09:00", "end": "17:00", "timezone": "UTC"},
+        },
         {"params": {}},
         state=RateLimitTracker(persist_path=None),
         agent_id="a",

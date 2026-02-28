@@ -39,7 +39,9 @@ def test_blocked_agent_always_denied() -> None:
         }
     )
     request = {"tool": "read_file", "params": {"path": "/tmp/a"}, "context": {"agent": "blocked"}}
-    decision = evaluate(request, {"rules": [{"name": "budget_limit", "max_cost_per_call": 5.0}]}, registry=registry)
+    decision = evaluate(
+        request, {"rules": [{"name": "budget_limit", "max_cost_per_call": 5.0}]}, registry=registry
+    )
     assert decision.allowed is False
     assert "identity: agent 'blocked' is blocked" in decision.reasons
 

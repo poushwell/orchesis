@@ -92,7 +92,9 @@ class McpToolInterceptor:
         self.registry = load_agent_registry(self.policy) if has_identity else None
         self._policy_hash = current_hash
 
-    def _append_debug(self, result: types.CallToolResult, debug_trace: dict[str, Any] | None) -> types.CallToolResult:
+    def _append_debug(
+        self, result: types.CallToolResult, debug_trace: dict[str, Any] | None
+    ) -> types.CallToolResult:
         if not isinstance(debug_trace, dict):
             return result
         content = list(result.content)
@@ -124,7 +126,9 @@ class McpToolInterceptor:
         if not decision.allowed:
             reason = "; ".join(decision.reasons) if decision.reasons else "Denied by policy"
             if debug and isinstance(decision.debug_trace, dict):
-                reason = f"{reason}\ndebug_trace={json.dumps(decision.debug_trace, ensure_ascii=False)}"
+                reason = (
+                    f"{reason}\ndebug_trace={json.dumps(decision.debug_trace, ensure_ascii=False)}"
+                )
             raise ValueError(reason)
         try:
             if self.downstream_timeout_seconds is None:

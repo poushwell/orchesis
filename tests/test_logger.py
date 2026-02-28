@@ -48,8 +48,12 @@ def test_append_decision_appends_multiple_lines_in_order(tmp_path: Path) -> None
     log_path = tmp_path / "decisions.jsonl"
     request = {"tool": "sql_query", "cost": 0.1}
 
-    append_decision(Decision(allowed=True, timestamp="2026-03-01T10:00:00+00:00"), request, log_path)
-    append_decision(Decision(allowed=False, timestamp="2026-03-01T11:00:00+00:00"), request, log_path)
+    append_decision(
+        Decision(allowed=True, timestamp="2026-03-01T10:00:00+00:00"), request, log_path
+    )
+    append_decision(
+        Decision(allowed=False, timestamp="2026-03-01T11:00:00+00:00"), request, log_path
+    )
 
     lines = _read_lines(log_path)
     assert len(lines) == 2

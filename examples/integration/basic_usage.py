@@ -8,7 +8,9 @@ from orchesis.client import OrchesisClient
 def main() -> None:
     client = OrchesisClient("http://localhost:8080", api_token="orch_sk_example")
 
-    allowed = client.is_allowed("read_file", params={"path": "/data/report.csv"}, agent_id="demo_agent")
+    allowed = client.is_allowed(
+        "read_file", params={"path": "/data/report.csv"}, agent_id="demo_agent"
+    )
     print(f"read_file /data/report.csv allowed: {allowed}")
 
     denied = client.evaluate(

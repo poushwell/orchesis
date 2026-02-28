@@ -8,8 +8,16 @@ def test_two_agents_independent_rate_limits() -> None:
     tracker = RateLimitTracker(persist_path=None)
     policy = {"rules": [{"name": "rate_limit", "max_requests_per_minute": 100}]}
 
-    request_a = {"tool": "read_file", "params": {"path": "/data/a.txt"}, "context": {"agent": "agent_a"}}
-    request_b = {"tool": "read_file", "params": {"path": "/data/b.txt"}, "context": {"agent": "agent_b"}}
+    request_a = {
+        "tool": "read_file",
+        "params": {"path": "/data/a.txt"},
+        "context": {"agent": "agent_a"},
+    }
+    request_b = {
+        "tool": "read_file",
+        "params": {"path": "/data/b.txt"},
+        "context": {"agent": "agent_b"},
+    }
 
     last_a = None
     for _ in range(101):

@@ -186,9 +186,7 @@ def orchesis_guard(client: OrchesisClient, tool: str, agent_id: str | None = Non
             bound = signature.bind_partial(*args, **kwargs)
             bound.apply_defaults()
             params = {
-                key: value
-                for key, value in bound.arguments.items()
-                if key not in {"self", "cls"}
+                key: value for key, value in bound.arguments.items() if key not in {"self", "cls"}
             }
             result = client.evaluate(tool=tool, params=params, agent_id=agent_id)
             if not result.allowed:

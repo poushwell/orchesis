@@ -75,7 +75,9 @@ class TestMCPServer:
             if name == "write_file":
                 path = str(arguments.get("path", ""))
                 content = str(arguments.get("content", ""))
-                return [types.TextContent(type="text", text=f"wrote {len(content)} bytes to {path}")]
+                return [
+                    types.TextContent(type="text", text=f"wrote {len(content)} bytes to {path}")
+                ]
             if name == "delete_file":
                 path = str(arguments.get("path", ""))
                 return [types.TextContent(type="text", text=f"deleted {path}")]

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 
 from orchesis.client import OrchesisClient
 
@@ -29,7 +28,9 @@ class OrchesisGuardedTool(BaseTool):
         self.name = wrapped_tool.name
 
     def _run(self, query: str) -> str:
-        if not self.orchesis.is_allowed(self.name, params={"query": query}, agent_id=self.agent_id):
+        if not self.orchesis.is_allowed(
+            self.name, params={"query": query}, agent_id=self.agent_id
+        ):
             return "Tool call denied by policy"
         return self.wrapped_tool._run(query)
 

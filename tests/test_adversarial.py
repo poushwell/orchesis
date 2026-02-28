@@ -14,20 +14,34 @@ def _base_policy() -> dict:
     return {
         "rules": [
             {"name": "budget_limit", "max_cost_per_call": 1.0},
-            {"name": "file_access", "allowed_paths": ["/data", "/tmp"], "denied_paths": ["/etc", "/root"]},
-            {"name": "sql_restriction", "denied_operations": ["DROP", "DELETE", "TRUNCATE", "ALTER"]},
+            {
+                "name": "file_access",
+                "allowed_paths": ["/data", "/tmp"],
+                "denied_paths": ["/etc", "/root"],
+            },
+            {
+                "name": "sql_restriction",
+                "denied_operations": ["DROP", "DELETE", "TRUNCATE", "ALTER"],
+            },
             {"name": "rate_limit", "max_requests_per_minute": 100},
             {
                 "name": "cmd_regex",
                 "type": "regex_match",
                 "field": "params.command",
-                "deny_patterns": [r"(?i)rm\s+-rf\s+", r"(?i)chmod\s+777\s+", r"(?i)curl\s+[^|]*\|\s*bash"],
+                "deny_patterns": [
+                    r"(?i)rm\s+-rf\s+",
+                    r"(?i)chmod\s+777\s+",
+                    r"(?i)curl\s+[^|]*\|\s*bash",
+                ],
             },
             {
                 "name": "agent_rules",
                 "type": "context_rules",
                 "rules": [
-                    {"agent": "untrusted_bot", "denied_tools": ["delete_file", "run_sql", "write_file"]},
+                    {
+                        "agent": "untrusted_bot",
+                        "denied_tools": ["delete_file", "run_sql", "write_file"],
+                    },
                     {"agent": "*", "max_cost_per_call": 0.5},
                 ],
             },
@@ -66,7 +80,9 @@ def test_path_traversal_and_encoding_bypasses_are_denied(attack_path: str) -> No
 )
 def test_sql_evasion_tricks_are_blocked(query: str) -> None:
     # VULN-002: SQL deny bypass through case/comments/newlines/unicode
-    decision = evaluate({"tool": "run_sql", "params": {"query": query}, "cost": 0.1}, _base_policy())
+    decision = evaluate(
+        {"tool": "run_sql", "params": {"query": query}, "cost": 0.1}, _base_policy()
+    )
     assert decision.allowed is False
     assert any("sql_restriction" in reason for reason in decision.reasons)
 
@@ -132,7 +148,9 @@ def test_rate_limit_alias_bypass_is_current_limitation() -> None:
     now = datetime.now(timezone.utc)
     tracker.record("read_file", now)
     tracker.record("read_file_alias", now)
-    allowed = evaluate({"tool": "read_file_alias_2", "params": {}, "cost": 0.0}, policy, state=tracker)
+    allowed = evaluate(
+        {"tool": "read_file_alias_2", "params": {}, "cost": 0.0}, policy, state=tracker
+    )
     assert allowed.allowed is True
 
 
@@ -147,7 +165,9 @@ def test_rate_limit_alias_bypass_is_current_limitation() -> None:
 )
 def test_regex_evasion_cases(command: str, expected_allowed: bool) -> None:
     # VULN-007: regex evasion via spacing/tabs/null-bytes/base64
-    decision = evaluate({"tool": "shell", "params": {"command": command}, "cost": 0.1}, _base_policy())
+    decision = evaluate(
+        {"tool": "shell", "params": {"command": command}, "cost": 0.1}, _base_policy()
+    )
     assert decision.allowed is expected_allowed
 
 
@@ -207,7 +227,9 @@ def test_catastrophic_backtracking_regex_is_rejected() -> None:
 def test_request_with_10mb_string_does_not_crash() -> None:
     # VULN-012: oversized payload in request params
     big = "x" * (10 * 1024 * 1024)
-    decision = evaluate({"tool": "read_file", "params": {"path": "/data/" + big}, "cost": 0.1}, _base_policy())
+    decision = evaluate(
+        {"tool": "read_file", "params": {"path": "/data/" + big}, "cost": 0.1}, _base_policy()
+    )
     assert isinstance(decision.allowed, bool)
 
 

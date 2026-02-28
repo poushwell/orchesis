@@ -118,9 +118,7 @@ class DriftDetector:
         if result.match:
             return None
         drift_detail = (
-            result.drift_reasons[0]
-            if result.drift_reasons
-            else f"original={event.decision}"
+            result.drift_reasons[0] if result.drift_reasons else f"original={event.decision}"
         )
         return self._record(
             agent_id=event.agent_id,
@@ -170,7 +168,9 @@ class DriftDetector:
         actual = "ALLOW" if decision.allowed else "DENY"
         severity = "critical" if drift_type == "unexpected_allow" else "high"
         context = request.get("context")
-        agent_id = context.get("agent", "__global__") if isinstance(context, dict) else "__global__"
+        agent_id = (
+            context.get("agent", "__global__") if isinstance(context, dict) else "__global__"
+        )
         return self._record(
             agent_id=str(agent_id),
             drift_type=drift_type,

@@ -4,7 +4,9 @@ from orchesis.metrics import MetricsCollector
 from orchesis.telemetry import DecisionEvent
 
 
-def _event(*, agent: str, tool: str, decision: str, duration: int = 10, reasons: list[str] | None = None):
+def _event(
+    *, agent: str, tool: str, decision: str, duration: int = 10, reasons: list[str] | None = None
+):
     return DecisionEvent(
         event_id=f"{agent}-{tool}-{decision}-{duration}",
         timestamp="2026-01-01T00:00:00+00:00",
@@ -49,7 +51,7 @@ def test_metrics_prometheus_format() -> None:
     metrics.emit(_event(agent="a", tool="read_file", decision="ALLOW"))
     text = metrics.prometheus_text()
     assert "# HELP orchesis_decisions_total" in text
-    assert "orchesis_decisions_total{decision=\"ALLOW\"}" in text
+    assert 'orchesis_decisions_total{decision="ALLOW"}' in text
     assert "# TYPE orchesis_evaluation_duration_us histogram" in text
 
 
