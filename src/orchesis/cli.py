@@ -13,6 +13,7 @@ from yaml import YAMLError
 from orchesis.config import load_policy, validate_policy
 from orchesis.engine import evaluate
 from orchesis.logger import read_decisions
+from orchesis.replay import ReplayEngine, read_events_from_jsonl
 from orchesis.signing import generate_keypair, sign_entry, verify_entry
 from orchesis.state import RateLimitTracker
 from orchesis.telemetry import InMemoryEmitter, JsonlEmitter
@@ -103,34 +104,37 @@ def verify(request_path: str, policy_path: str, should_sign: bool) -> None:
         raise click.ClickException("Request JSON must be an object.")
 
     state_tracker = RateLimitTracker(persist_path=DEFAULT_STATE_PATH)
-    signature: str | None = None
-    if should_sign:
-        memory_emitter = InMemoryEmitter()
-        decision = evaluate(request, policy, state=state_tracker, emitter=memory_emitter)
-        if not DEFAULT_PRIVATE_KEY_PATH.exists():
-            raise click.ClickException(
-                "Missing private key. Run 'orchesis keygen' before using --sign."
+    try:
+        signature: str | None = None
+        if should_sign:
+            memory_emitter = InMemoryEmitter()
+            decision = evaluate(request, policy, state=state_tracker, emitter=memory_emitter)
+            if not DEFAULT_PRIVATE_KEY_PATH.exists():
+                raise click.ClickException(
+                    "Missing private key. Run 'orchesis keygen' before using --sign."
+                )
+            sign_input: dict[str, object] = {
+                "timestamp": decision.timestamp,
+                "tool": request.get("tool"),
+                "decision": "ALLOW" if decision.allowed else "DENY",
+                "reasons": decision.reasons,
+            }
+            signature = sign_entry(sign_input, DEFAULT_PRIVATE_KEY_PATH)
+            events = memory_emitter.get_events()
+            if events:
+                JsonlEmitter(DEFAULT_DECISIONS_PATH).emit(replace(events[-1], signature=signature))
+        else:
+            decision = evaluate(
+                request,
+                policy,
+                state=state_tracker,
+                emitter=JsonlEmitter(DEFAULT_DECISIONS_PATH),
             )
-        sign_input: dict[str, object] = {
-            "timestamp": decision.timestamp,
-            "tool": request.get("tool"),
-            "decision": "ALLOW" if decision.allowed else "DENY",
-            "reasons": decision.reasons,
-        }
-        signature = sign_entry(sign_input, DEFAULT_PRIVATE_KEY_PATH)
-        events = memory_emitter.get_events()
-        if events:
-            JsonlEmitter(DEFAULT_DECISIONS_PATH).emit(replace(events[-1], signature=signature))
-    else:
-        decision = evaluate(
-            request,
-            policy,
-            state=state_tracker,
-            emitter=JsonlEmitter(DEFAULT_DECISIONS_PATH),
-        )
 
-    click.echo(json.dumps(asdict(decision), ensure_ascii=False, indent=2))
-    raise SystemExit(0 if decision.allowed else 1)
+        click.echo(json.dumps(asdict(decision), ensure_ascii=False, indent=2))
+        raise SystemExit(0 if decision.allowed else 1)
+    finally:
+        state_tracker.flush()
 
 
 @main.command()
@@ -240,6 +244,7 @@ def audit(since: int | None, limit: int, verify_signatures: bool) -> None:
                 click.echo(f"Entry {index}: TAMPERED")
 
         click.echo(f"{verified_count} verified, {tampered_count} tampered, {unsigned_count} unsigned")
+    state_tracker.flush()
 
 
 def _normalize_audit_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
@@ -257,3 +262,74 @@ def _normalize_audit_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
     if "signature" in entry:
         normalized["signature"] = entry.get("signature")
     return normalized
+
+
+@main.command()
+@click.option("--log", "log_path", type=click.Path(exists=True), required=True)
+@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
+@click.option("--strict", is_flag=True, default=False)
+def replay(log_path: str, policy_path: str, strict: bool) -> None:
+    """Replay structured decision logs and check determinism."""
+    try:
+        policy = load_policy(policy_path)
+    except (ValueError, YAMLError, OSError) as error:
+        raise click.ClickException(f"Failed to load policy: {error}") from error
+
+    engine = ReplayEngine()
+    report = engine.replay_file(log_path, policy, strict=strict)
+
+    click.echo("Replay summary:")
+    click.echo(f"  Total events: {report.total}")
+    click.echo(f"  Matches: {report.matches}")
+    click.echo(f"  Drifts: {report.drifts}")
+    click.echo(f"  Deterministic: {'YES' if report.deterministic else 'NO'}")
+    if report.drift_details:
+        click.echo("")
+        click.echo("Drift details:")
+        for drift in report.drift_details:
+            original = drift.original_event.decision
+            replayed = "ALLOW" if drift.replayed_decision.allowed else "DENY"
+            click.echo(
+                f"  Event {drift.original_event.event_id}: original={original} replayed={replayed}"
+            )
+            for reason in drift.drift_reasons:
+                click.echo(f"    - {reason}")
+
+
+@main.command()
+@click.option("--agent", "agent_id", required=True)
+@click.option("--since", type=int, default=None)
+@click.option("--log", "log_path", type=click.Path(exists=True), default="decisions.jsonl")
+def forensic(agent_id: str, since: int | None, log_path: str) -> None:
+    """Show decision timeline for a specific agent."""
+    events = read_events_from_jsonl(log_path)
+    filtered = [event for event in events if event.agent_id == agent_id]
+
+    if since is not None:
+        threshold = datetime.now(timezone.utc) - timedelta(hours=since)
+        recent: list[Any] = []
+        for event in filtered:
+            try:
+                if datetime.fromisoformat(event.timestamp) >= threshold:
+                    recent.append(event)
+            except ValueError:
+                continue
+        filtered = recent
+
+    filtered = sorted(filtered, key=lambda item: item.timestamp)
+    allow_count = sum(1 for event in filtered if event.decision == "ALLOW")
+    deny_count = sum(1 for event in filtered if event.decision == "DENY")
+
+    period_label = f"last {since}h" if since is not None else "all time"
+    click.echo(f"Agent: {agent_id}")
+    click.echo(f"Period: {period_label}")
+    click.echo(f"Decisions: {len(filtered)} total ({allow_count} ALLOW, {deny_count} DENY)")
+    click.echo("")
+    click.echo("Timeline:")
+
+    for event in filtered:
+        ts = event.timestamp
+        time_only = ts[11:19] if len(ts) >= 19 else ts
+        click.echo(f"  {time_only} {event.decision} {event.tool} params_hash={event.params_hash}")
+        for reason in event.reasons:
+            click.echo(f"    -> {reason}")

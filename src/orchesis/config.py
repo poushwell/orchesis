@@ -158,11 +158,17 @@ class PolicyWatcher:
         return hashlib.sha256(content).hexdigest()
 
     def check(self) -> bool:
-        new_hash = self.current_hash()
+        try:
+            new_hash = self.current_hash()
+        except OSError:
+            return False
         if not new_hash or new_hash == self._last_hash:
             return False
 
-        policy = load_policy(self.path)
+        try:
+            policy = load_policy(self.path)
+        except ValueError:
+            return False
         self.on_reload(policy)
         self._last_hash = new_hash
         return True

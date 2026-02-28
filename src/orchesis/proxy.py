@@ -78,6 +78,10 @@ def create_proxy_app(
         watcher = PolicyWatcher(policy_path, _on_reload)
         watcher._last_hash = current_policy_hash
 
+    @app.on_event("shutdown")
+    async def _flush_state_tracker() -> None:
+        state_tracker.flush()
+
     @app.middleware("http")
     async def decision_middleware(request: Request, call_next: Any) -> Response:
         _ = call_next

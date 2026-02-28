@@ -8,6 +8,7 @@ import time
 import unicodedata
 import uuid
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any
 from urllib.parse import unquote
 
@@ -49,7 +50,12 @@ def _policy_version_hash(policy: dict[str, Any] | None) -> str:
     if policy is None:
         return hashlib.sha256(b"null").hexdigest()
     dumped = yaml.dump(policy, sort_keys=True)
-    return hashlib.sha256(dumped.encode("utf-8")).hexdigest()
+    return _policy_version_hash_cached(dumped)
+
+
+@lru_cache(maxsize=16)
+def _policy_version_hash_cached(serialized_policy: str) -> str:
+    return hashlib.sha256(serialized_policy.encode("utf-8")).hexdigest()
 
 
 def _rules_triggered(reasons: list[str]) -> list[str]:
@@ -146,12 +152,22 @@ def _get_path(request: dict[str, Any]) -> str | None:
 def _query_contains_operation(query: str, operation: str) -> bool:
     normalized = _sanitize_text(query)
     without_comments = re.sub(r"/\*.*?\*/", " ", normalized, flags=re.DOTALL)
-    pattern = r"\b" + r"\s*".join(re.escape(ch) for ch in operation.upper()) + r"\b"
-    return re.search(pattern, without_comments.upper()) is not None
+    return _operation_pattern(operation.upper()).search(without_comments.upper()) is not None
 
 
 def _is_unsafe_regex_pattern(pattern: str) -> bool:
     return re.search(r"\([^)]*[+*][^)]*\)[+*?]", pattern) is not None
+
+
+@lru_cache(maxsize=64)
+def _operation_pattern(operation_upper: str) -> re.Pattern[str]:
+    pattern = r"\b" + r"\s*".join(re.escape(ch) for ch in operation_upper) + r"\b"
+    return re.compile(pattern)
+
+
+@lru_cache(maxsize=256)
+def _compiled_regex(pattern: str) -> re.Pattern[str]:
+    return re.compile(pattern)
 
 
 def _apply_budget_limit(
@@ -160,6 +176,7 @@ def _apply_budget_limit(
     *,
     state: RateLimitTracker,
     agent_id: str,
+    agent_budget_spent: float | None = None,
 ) -> tuple[list[str], list[str]]:
     reasons: list[str] = []
     checked = ["budget_limit"]
@@ -174,7 +191,11 @@ def _apply_budget_limit(
 
     daily_budget = rule.get("daily_budget")
     if isinstance(daily_budget, int | float):
-        spent = state.get_agent_budget_spent(agent_id, window_seconds=86400)
+        spent = (
+            agent_budget_spent
+            if isinstance(agent_budget_spent, int | float)
+            else state.get_agent_budget_spent(agent_id, window_seconds=86400)
+        )
         if cost is None:
             projected = spent
         elif cost < 0:
@@ -194,6 +215,7 @@ def _apply_rate_limit(
     *,
     state: RateLimitTracker,
     agent_id: str,
+    now: datetime,
     dry_run: bool = False,
 ) -> tuple[list[str], list[str]]:
     reasons: list[str] = []
@@ -204,7 +226,6 @@ def _apply_rate_limit(
 
     tool_name = request.get("tool")
     tool = tool_name if isinstance(tool_name, str) else "__unknown__"
-    now = datetime.now(timezone.utc)
     if dry_run:
         over_limit = state.is_over_limit(tool, max_per_minute, 60, now=now, agent_id=agent_id)
     else:
@@ -281,7 +302,7 @@ def _apply_regex_match(rule: dict[str, Any], request: dict[str, Any]) -> tuple[l
             if _is_unsafe_regex_pattern(pattern):
                 reasons.append(f"regex_match: pattern '{pattern}' rejected as unsafe regex")
                 break
-            if re.search(pattern, _sanitize_text(value)):
+            if _compiled_regex(pattern).search(_sanitize_text(value)):
                 reasons.append(f"regex_match: field '{field}' matched deny pattern '{pattern}'")
                 break
     return reasons, checked
@@ -351,6 +372,7 @@ def _apply_composite(
     *,
     state: RateLimitTracker,
     agent_id: str,
+    now: datetime,
     all_rules_by_name: dict[str, dict[str, Any]],
     visited: set[str],
 ) -> tuple[list[str], list[str]]:
@@ -392,7 +414,7 @@ def _apply_composite(
             ref_reasons, _ = _apply_budget_limit(ref_rule, request, state=state, agent_id=agent_id)
         elif ref_type == "rate_limit":
             ref_reasons, _ = _apply_rate_limit(
-                ref_rule, request, state=state, agent_id=agent_id, dry_run=True
+                ref_rule, request, state=state, agent_id=agent_id, now=now, dry_run=True
             )
         elif ref_type == "file_access":
             ref_reasons, _ = _apply_file_access(ref_rule, request)
@@ -408,6 +430,7 @@ def _apply_composite(
                 request,
                 state=state,
                 agent_id=agent_id,
+                now=now,
                 all_rules_by_name=all_rules_by_name,
                 visited=next_visited,
             )
@@ -434,19 +457,33 @@ def _apply_composite(
     return reasons, checked
 
 
+_RULE_HANDLERS: dict[str, str] = {
+    "budget_limit": "_apply_budget_limit",
+    "rate_limit": "_apply_rate_limit",
+    "file_access": "_apply_file_access",
+    "sql_restriction": "_apply_sql_restriction",
+    "regex_match": "_apply_regex_match",
+    "context_rules": "_apply_context_rules",
+    "composite": "_apply_composite",
+}
+
+
 def evaluate(
     request: dict[str, Any],
     policy: dict[str, Any] | None,
     *,
     state: RateLimitTracker | None = None,
     emitter: EventEmitter | None = None,
+    now: datetime | None = None,
 ) -> Decision:
     """Evaluate request against policy rules."""
     started_ns = time.perf_counter_ns()
     reasons: list[str] = []
     rules_checked: list[str] = []
     tracker = state or RateLimitTracker(persist_path=None)
+    evaluation_now = now if now is not None else datetime.now(timezone.utc)
     agent_id = _resolve_agent_id(request)
+    policy_version = _policy_version_hash(policy) if emitter is not None else None
     decision: Decision
 
     if not policy:
@@ -459,6 +496,7 @@ def evaluate(
             tracker=tracker,
             decision=decision,
             started_ns=started_ns,
+            policy_version=policy_version,
         )
         return decision
 
@@ -473,6 +511,7 @@ def evaluate(
             tracker=tracker,
             decision=decision,
             started_ns=started_ns,
+            policy_version=policy_version,
         )
         return decision
 
@@ -480,6 +519,7 @@ def evaluate(
     ordered: dict[str, list[dict[str, Any]]] = {rule_type: [] for rule_type in RULE_EVALUATION_ORDER}
     unknown_explicit_rules: list[tuple[str, dict[str, Any]]] = []
     legacy_unknown_name_rules: list[dict[str, Any]] = []
+    cached_agent_spent: float | None = None
 
     for rule in rules:
         if not isinstance(rule, dict):
@@ -500,14 +540,27 @@ def evaluate(
             legacy_unknown_name_rules.append(rule)
 
     for rule_type in RULE_EVALUATION_ORDER:
+        handler_name = _RULE_HANDLERS.get(rule_type)
+        handler = globals().get(handler_name) if isinstance(handler_name, str) else None
+        if handler is None:
+            continue
         for rule in ordered[rule_type]:
             rule_name = rule.get("name")
             safe_rule_name = rule_name if isinstance(rule_name, str) else rule_type
             try:
                 if rule_type == "budget_limit":
                     try:
-                        rule_reasons, checked = _apply_budget_limit(
-                            rule, request, state=tracker, agent_id=agent_id
+                        has_daily_budget = isinstance(rule.get("daily_budget"), int | float)
+                        if has_daily_budget and cached_agent_spent is None:
+                            cached_agent_spent = tracker.get_agent_budget_spent(
+                                agent_id, window_seconds=86400, now=evaluation_now
+                            )
+                        rule_reasons, checked = handler(
+                            rule,
+                            request,
+                            state=tracker,
+                            agent_id=agent_id,
+                            agent_budget_spent=cached_agent_spent if has_daily_budget else None,
                         )
                     except Exception:
                         rule_reasons = [
@@ -516,33 +569,30 @@ def evaluate(
                         checked = ["budget_limit"]
                 elif rule_type == "rate_limit":
                     try:
-                        rule_reasons, checked = _apply_rate_limit(
-                            rule, request, state=tracker, agent_id=agent_id
+                        rule_reasons, checked = handler(
+                            rule,
+                            request,
+                            state=tracker,
+                            agent_id=agent_id,
+                            now=evaluation_now,
                         )
                     except Exception:
                         rule_reasons = [
                             "state_error: rate limit state unavailable, denying for safety"
                         ]
                         checked = ["rate_limit"]
-                elif rule_type == "file_access":
-                    rule_reasons, checked = _apply_file_access(rule, request)
-                elif rule_type == "sql_restriction":
-                    rule_reasons, checked = _apply_sql_restriction(rule, request)
-                elif rule_type == "regex_match":
-                    rule_reasons, checked = _apply_regex_match(rule, request)
-                elif rule_type == "context_rules":
-                    rule_reasons, checked = _apply_context_rules(rule, request)
                 elif rule_type == "composite":
-                    rule_reasons, checked = _apply_composite(
+                    rule_reasons, checked = handler(
                         rule,
                         request,
                         state=tracker,
                         agent_id=agent_id,
+                        now=evaluation_now,
                         all_rules_by_name=all_rules_by_name,
                         visited=set(),
                     )
-                else:  # pragma: no cover
-                    rule_reasons, checked = [], []
+                else:
+                    rule_reasons, checked = handler(rule, request)
             except Exception as error:
                 rule_reasons = [f"internal_error: rule '{safe_rule_name}' raised {error}"]
                 checked = [rule_type]
@@ -564,7 +614,7 @@ def evaluate(
         cost = _coerce_cost(request.get("cost"))
         if cost is not None and cost > 0:
             try:
-                tracker.record_spend(agent_id, cost)
+                tracker.record_spend(agent_id, cost, timestamp=evaluation_now)
             except Exception:
                 reasons.append("state_error: rate limit state unavailable, denying for safety")
                 allowed = False
@@ -578,6 +628,7 @@ def evaluate(
         tracker=tracker,
         decision=decision,
         started_ns=started_ns,
+        policy_version=policy_version,
     )
     return decision
 
@@ -591,36 +642,39 @@ def _emit_event(
     tracker: RateLimitTracker,
     decision: Decision,
     started_ns: int,
+    policy_version: str | None,
 ) -> None:
     if emitter is None:
         return
-
-    params = request.get("params")
-    params_payload = params if isinstance(params, dict) else {}
-    cost = _coerce_cost(request.get("cost"))
-    safe_cost = cost if cost is not None else 0.0
-
     try:
-        state_snapshot = _build_state_snapshot(tracker, agent_id)
-    except Exception:
-        state_snapshot = {"error": "state_unavailable"}
+        params = request.get("params")
+        params_payload = params if isinstance(params, dict) else {}
+        cost = _coerce_cost(request.get("cost"))
+        safe_cost = cost if cost is not None else 0.0
 
-    elapsed_us = max(0, (time.perf_counter_ns() - started_ns) // 1000)
-    tool = request.get("tool") if isinstance(request.get("tool"), str) else "__unknown__"
-    event = DecisionEvent(
-        event_id=str(uuid.uuid4()),
-        timestamp=decision.timestamp,
-        agent_id=agent_id,
-        tool=tool,
-        params_hash=_stable_sha256(params_payload),
-        cost=float(safe_cost),
-        decision="ALLOW" if decision.allowed else "DENY",
-        reasons=list(decision.reasons),
-        rules_checked=list(decision.rules_checked),
-        rules_triggered=_rules_triggered(decision.reasons),
-        evaluation_order=list(RULE_EVALUATION_ORDER),
-        evaluation_duration_us=int(elapsed_us),
-        policy_version=_policy_version_hash(policy),
-        state_snapshot=state_snapshot,
-    )
-    emitter.emit(event)
+        try:
+            state_snapshot = _build_state_snapshot(tracker, agent_id)
+        except Exception:
+            state_snapshot = {"error": "state_unavailable"}
+
+        elapsed_us = max(0, (time.perf_counter_ns() - started_ns) // 1000)
+        tool = request.get("tool") if isinstance(request.get("tool"), str) else "__unknown__"
+        event = DecisionEvent(
+            event_id=str(uuid.uuid4()),
+            timestamp=decision.timestamp,
+            agent_id=agent_id,
+            tool=tool,
+            params_hash=_stable_sha256(params_payload),
+            cost=float(safe_cost),
+            decision="ALLOW" if decision.allowed else "DENY",
+            reasons=list(decision.reasons),
+            rules_checked=list(decision.rules_checked),
+            rules_triggered=_rules_triggered(decision.reasons),
+            evaluation_order=list(RULE_EVALUATION_ORDER),
+            evaluation_duration_us=int(elapsed_us),
+            policy_version=policy_version or "",
+            state_snapshot=state_snapshot,
+        )
+        emitter.emit(event)
+    except Exception:
+        pass
