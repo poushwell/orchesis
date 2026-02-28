@@ -69,3 +69,32 @@ def test_rate_limit_integration_with_evaluate() -> None:
     assert second.allowed is True
     assert third.allowed is False
     assert any("rate_limit" in reason for reason in third.reasons)
+
+
+def test_per_agent_state_isolation() -> None:
+    tracker = RateLimitTracker(persist_path=None)
+    now = datetime.now(timezone.utc)
+    for _ in range(3):
+        tracker.record("read_file", now - timedelta(seconds=5), agent_id="agent_a")
+
+    assert (
+        tracker.is_over_limit(
+            "read_file", max_requests=3, window_seconds=60, now=now, agent_id="agent_a"
+        )
+        is True
+    )
+    assert (
+        tracker.is_over_limit(
+            "read_file", max_requests=3, window_seconds=60, now=now, agent_id="agent_b"
+        )
+        is False
+    )
+
+
+def test_backward_compatible_global_default() -> None:
+    tracker = RateLimitTracker(persist_path=None)
+    tracker.record("read_file")
+    tracker.record("read_file")
+
+    assert tracker.get_count("read_file", window_seconds=3600) == 2
+    assert tracker.get_count("read_file", window_seconds=3600, agent_id="__global__") == 2
