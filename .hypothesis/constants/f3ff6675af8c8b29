@@ -1,4 +1,0 @@
-# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\cli.py
-# hypothesis_version: 6.151.9
-
-['--limit', '--policy', '--sign', '--since', '--verify', '.orchesis', 'ALLOW', 'DENY', 'OK', 'Top deny reasons:', 'decision', 'decisions.jsonl', 'keys', 'policy.yaml', 'policy_path', 'private.pem', 'public.pem', 'reasons', 'request.json', 'request_path', 'should_sign', 'signature', 'timestamp', 'tool', 'utf-8', 'verify_signatures']

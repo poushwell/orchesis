@@ -1,5 +1,0 @@
-{"event": "spend", "agent_id": "__global__", "timestamp": "2026-02-28T14:49:25.709589+00:00", "cost": 0.5}
-{"event": "rate", "tool": "get_data", "timestamp": "2026-02-28T14:49:25.749923+00:00", "agent_id": "__global__"}
-{"event": "rate", "tool": "get_data", "timestamp": "2026-02-28T14:49:25.764063+00:00", "agent_id": "__global__"}
-{"event": "spend", "agent_id": "__global__", "timestamp": "2026-02-28T14:49:50.134502+00:00", "cost": 0.5}
-{"event": "rate", "tool": "get_data", "timestamp": "2026-02-28T14:49:50.168569+00:00", "agent_id": "__global__"}

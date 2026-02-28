@@ -1,4 +1,0 @@
-# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\state.py
-# hypothesis_version: 6.151.9
-
-[0.0, 86400, 'RateLimitTracker', '__global__', 'a', 'agent_id', 'cost', 'event', 'rate', 'spend', 'timestamp', 'tool', 'utf-8']

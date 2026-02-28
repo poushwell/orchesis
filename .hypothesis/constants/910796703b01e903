@@ -1,4 +1,0 @@
-# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\otel.py
-# hypothesis_version: 6.151.9
-
-[1000, '-', '0123456789abcdef', 'ALLOW', 'ERROR', 'OK', 'TraceContext', 'a', 'attributes', 'name', 'orchesis.agent_id', 'orchesis.decision', 'orchesis.evaluate', 'orchesis.tool', 'parent_span_id', 'rule.checked', 'rule_name', 'timestamp_ns', 'trace_id', 'traceparent', 'triggered', 'utf-8']

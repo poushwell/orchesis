@@ -1,4 +1,0 @@
-# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\proxy.py
-# hypothesis_version: 6.151.9
-
-[0.0, 5.0, 10.0, 403, '/', '/files/', '/health', '/metrics', '0.3.1', 'BACKEND_URL', 'DECISIONS_LOG_PATH', 'DENY', 'Orchesis Proxy', 'POLICY_PATH', 'agent', 'agents', 'allowed', 'content-type', 'context', 'cost', 'counters', 'default_trust_tier', 'events', 'examples', 'headers', 'healthy', 'host', 'http', 'http://backend', 'inline', 'method', 'params', 'path', 'policy.yaml', 'policy_version', 'query', 'reasons', 'retry_count', 'root', 'rules_checked', 'secret', 'session', 'status', 'text/plain', 'timeout_seconds', 'tool', 'total_decisions', 'uptime_seconds', 'url', 'version', 'webhooks', 'x-agent', 'x-cost', 'x-session']

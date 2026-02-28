@@ -1,4 +1,0 @@
-# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\replay.py
-# hypothesis_version: 6.151.9
-
-[0.0, ':', 'ALLOW', 'agent', 'context', 'cost', 'decision', 'event_id', 'file_access', 'legacy', 'name', 'params', 'reasons', 'regex_match', 'rules', 'rules_checked', 'signature', 'sql_restriction', 'timestamp', 'tool', 'tool_counts', 'type', 'utf-8']

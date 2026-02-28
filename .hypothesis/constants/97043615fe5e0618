@@ -1,4 +1,0 @@
-# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\webhooks.py
-# hypothesis_version: 6.151.9
-
-[5.0, 'ALL', 'ANOMALY', 'DENY', 'X-Orchesis-Signature', 'agent_id', 'anomaly:', 'decision', 'event_id', 'event_type', 'orchesis_signature', 'policy_version', 'reasons', 'timestamp', 'tool', 'utf-8']

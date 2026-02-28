@@ -1,4 +1,0 @@
-# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\engine.py
-# hypothesis_version: 6.151.9
-
-[b'null', 0.0, 256, 1000, 86400, '\x00', '*', ',', '.', '/', '/+', '/\\*.*?\\*/', ':', '<unnamed>', 'ALLOW', 'AND', 'DENY', 'NFKC', 'OR', '\\', '\\b', '\\s*', '__unknown__', '_apply_budget_limit', '_apply_composite', '_apply_context_rules', '_apply_file_access', '_apply_rate_limit', '_apply_regex_match', 'agent', 'agent_id', 'allowed_paths', 'budget_limit', 'composite', 'conditions', 'context', 'context_rules', 'cost', 'daily_budget', 'denied_operations', 'denied_paths', 'denied_tools', 'deny_patterns', 'error', 'field', 'file_access', 'max_cost_per_call', 'name', 'operator', 'params', 'path', 'query', 'rate_limit', 'regex_match', 'rule', 'rules', 'sql_restriction', 'state_unavailable', 'tool', 'tool_counts', 'type', 'utf-8', 'window_seconds']

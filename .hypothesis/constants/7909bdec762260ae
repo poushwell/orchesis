@@ -1,4 +1,0 @@
-# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\cli.py
-# hypothesis_version: 6.151.9
-
-[0.0, '  (none)', ', ', '--agent', '--limit', '--log', '--policy', '--sign', '--since', '--strict', '--verify', '.orchesis', 'ALLOW', 'DENY', 'Drift details:', 'OK', 'Registered agents:', 'Replay summary:', 'Timeline:', 'Top deny reasons:', 'agent_id', 'all', 'all time', 'cost', 'decision', 'decisions.jsonl', 'keys', 'log_path', 'policy.yaml', 'policy_path', 'private.pem', 'public.pem', 'reasons', 'request.json', 'request_path', 'rules_checked', 'should_sign', 'signature', 'state.jsonl', 'timestamp', 'tool', 'utf-8', 'verify_signatures']

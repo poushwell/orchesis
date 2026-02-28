@@ -1,4 +1,0 @@
-# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\engine.py
-# hypothesis_version: 6.151.9
-
-['allowed_paths', 'budget_limit', 'cost', 'denied_operations', 'denied_paths', 'file_access', 'max_cost_per_call', 'name', 'params', 'path', 'query', 'rate_limit', 'rules', 'sql_restriction']

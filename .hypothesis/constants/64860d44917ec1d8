@@ -1,4 +1,0 @@
-# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\identity.py
-# hypothesis_version: 6.151.9
-
-['admin', 'api_call', 'delete', 'delete_file', 'execute', 'read', 'read_file', 'run_sql', 'write', 'write_file']

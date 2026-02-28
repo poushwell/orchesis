@@ -1,4 +1,0 @@
-# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\agent\harness.py
-# hypothesis_version: 6.151.9
-
-[0.0, '1000', 'ALLOW', 'DENY', 'SELECT SUM', 'agent', 'api_call', 'completed', 'content', 'context', 'cost', 'cursor', 'decision', 'decisions.jsonl', 'delete_file', 'deleted', 'endpoint', 'executed', 'failed', 'message', 'ok', 'params', 'path', 'query', 'read_file', 'reasons', 'result', 'run_sql', 'running', 'status', 'step', 'task', 'tool', 'trust_tier', 'unknown', 'write_file', 'written']

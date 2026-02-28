@@ -1,4 +1,0 @@
-# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\config.py
-# hypothesis_version: 6.151.9
-
-['AND', 'OR', 'allowed_paths', 'budget_limit', 'composite', 'conditions', 'daily_budget', 'denied_operations', 'denied_paths', 'deny_patterns', 'field', 'file_access', 'max_cost_per_call', 'name', 'operator', 'r', 'rate_limit', 'regex_match', 'rule', 'rules', 'sql_restriction', 'type', 'utf-8']
