@@ -10,6 +10,7 @@ from typing import Any
 import click
 from yaml import YAMLError
 
+from orchesis.audit import AuditEngine, AuditQuery
 from orchesis.config import (
     load_agent_registry,
     load_policy,
@@ -236,11 +237,101 @@ def rollback(policy_path: str) -> None:
 
 
 @main.command()
-@click.option("--since", type=int, default=None)
+@click.option("--since", type=float, default=None)
 @click.option("--limit", type=int, default=20)
 @click.option("--verify", "verify_signatures", is_flag=True, default=False)
-def audit(since: int | None, limit: int, verify_signatures: bool) -> None:
+@click.option("--stats", "show_stats", is_flag=True, default=False)
+@click.option("--anomalies", "show_anomalies", is_flag=True, default=False)
+@click.option("--export", "export_path", type=click.Path(), default=None)
+@click.option("--query", "run_query", is_flag=True, default=False)
+@click.option("--agent", "agent_id", default=None)
+@click.option("--tool", "tool_name", default=None)
+@click.option("--decision", "decision_name", default=None)
+@click.option("--policy-version", "policy_version", default=None)
+@click.option("--session", "session_id", default=None)
+def audit(
+    since: float | None,
+    limit: int,
+    verify_signatures: bool,
+    show_stats: bool,
+    show_anomalies: bool,
+    export_path: str | None,
+    run_query: bool,
+    agent_id: str | None,
+    tool_name: str | None,
+    decision_name: str | None,
+    policy_version: str | None,
+    session_id: str | None,
+) -> None:
     """Audit decision log."""
+    engine = AuditEngine(str(DEFAULT_DECISIONS_PATH))
+    query = AuditQuery(
+        agent_id=agent_id,
+        tool=tool_name,
+        decision=decision_name,
+        since_hours=since,
+        policy_version=policy_version,
+        session_id=session_id,
+        limit=max(1, limit),
+    )
+
+    if show_stats:
+        stats = engine.stats(query)
+        period = f"last {since:g}h" if since is not None else "all time"
+        click.echo(f"Audit Statistics ({period}):")
+        click.echo(f"  Total decisions: {stats.total_events}")
+        allow_pct = (stats.allow_count / stats.total_events * 100.0) if stats.total_events else 0.0
+        deny_pct = (stats.deny_count / stats.total_events * 100.0) if stats.total_events else 0.0
+        click.echo(f"  Allowed: {stats.allow_count} ({allow_pct:.1f}%)")
+        click.echo(f"  Denied: {stats.deny_count} ({deny_pct:.1f}%)")
+        click.echo(f"  Unique agents: {stats.unique_agents}")
+        click.echo(f"  Unique tools: {stats.unique_tools}")
+        click.echo(f"  Unique sessions: {stats.unique_sessions}")
+        click.echo("")
+        click.echo("  Top denied tools:")
+        for tool, count in stats.top_denied_tools:
+            click.echo(f"    {tool:<14} {count}")
+        click.echo("")
+        click.echo("  Top denied agents:")
+        for agent, count in stats.top_denied_agents:
+            click.echo(f"    {agent:<14} {count}")
+        click.echo("")
+        click.echo("  Performance:")
+        click.echo(f"    Avg latency: {stats.avg_evaluation_us:.1f}us")
+        click.echo(f"    P95 latency: {stats.p95_evaluation_us:.1f}us")
+        click.echo(f"    Throughput: {stats.events_per_minute:.2f} events/min")
+        return
+
+    if show_anomalies:
+        anomalies = engine.anomalies()
+        if not anomalies:
+            click.echo("No anomalies detected.")
+            return
+        click.echo("Anomalies detected:")
+        for idx, anomaly in enumerate(anomalies, start=1):
+            click.echo(
+                f"  {idx}. [{anomaly['severity']}] {anomaly['rule']} "
+                f"agent={anomaly['agent_id']} - {anomaly['detail']}"
+            )
+        return
+
+    if export_path is not None:
+        events = engine.query(query)
+        engine.export_csv(events, export_path)
+        click.echo(f"Exported {len(events)} events to {export_path}")
+        return
+
+    if run_query:
+        events = engine.query(query)
+        for event in events:
+            click.echo(
+                f"{event.timestamp} agent={event.agent_id} session={event.state_snapshot.get('session_id', '__default__')} "
+                f"tool={event.tool} decision={event.decision} policy={event.policy_version}"
+            )
+            if event.reasons:
+                click.echo(f"  reasons={'; '.join(event.reasons)}")
+        return
+
     decisions = [_normalize_audit_entry(entry) for entry in read_decisions(DEFAULT_DECISIONS_PATH)]
     decisions = [entry for entry in decisions if entry is not None]
 
