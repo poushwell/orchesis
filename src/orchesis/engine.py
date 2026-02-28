@@ -593,6 +593,7 @@ def evaluate(
     emitter: EventEmitter | None = None,
     registry: AgentRegistry | None = None,
     now: datetime | None = None,
+    debug: bool = False,
 ) -> Decision:
     """Evaluate request against policy rules."""
     started_ns = time.perf_counter_ns()
@@ -603,15 +604,48 @@ def evaluate(
     agent_id = _resolve_agent_id(request)
     session_id = _resolve_session_id(request)
     identity = registry.get(agent_id) if registry is not None else None
-    policy_version = _policy_version_hash(policy) if emitter is not None else None
+    policy_version_hash = _policy_version_hash(policy) if (emitter is not None or debug) else ""
+    policy_version = policy_version_hash if emitter is not None else None
     decision: Decision
+    debug_rule_results: list[dict[str, Any]] = []
+    debug_identity_passed = identity is None
+
+    def _attach_debug_trace(target: Decision) -> None:
+        if not debug:
+            return
+        try:
+            snapshot = _build_state_snapshot(tracker, agent_id, session_id)
+        except Exception:
+            snapshot = {"error": "state_unavailable"}
+        total_duration_us = max(0, (time.perf_counter_ns() - started_ns) // 1000)
+        target.debug_trace = {
+            "evaluation_order": [name for name in RULE_EVALUATION_ORDER if name != "identity_check"],
+            "rule_results": list(debug_rule_results),
+            "agent_id": agent_id,
+            "agent_tier": identity.trust_tier.name.lower() if identity is not None else "unknown",
+            "identity_check_passed": bool(debug_identity_passed),
+            "total_duration_us": int(total_duration_us),
+            "policy_version": policy_version_hash,
+            "state_snapshot": snapshot,
+        }
 
     if identity is not None:
         identity_reasons, identity_checked, blocked_immediately = _apply_identity_check(request, identity)
         reasons.extend(identity_reasons)
         rules_checked.extend(identity_checked)
+        debug_identity_passed = len(identity_reasons) == 0
+        if debug:
+            debug_rule_results.append(
+                {
+                    "rule": "identity_check",
+                    "passed": debug_identity_passed,
+                    "duration_us": 0,
+                    "reason": identity_reasons[0] if identity_reasons else "",
+                }
+            )
         if blocked_immediately:
             decision = Decision(allowed=False, reasons=reasons, rules_checked=rules_checked)
+            _attach_debug_trace(decision)
             _emit_event(
                 emitter=emitter,
                 request=request,
@@ -627,6 +661,7 @@ def evaluate(
 
     if not policy:
         decision = Decision(allowed=len(reasons) == 0, reasons=reasons, rules_checked=rules_checked)
+        _attach_debug_trace(decision)
         _emit_event(
             emitter=emitter,
             request=request,
@@ -643,6 +678,7 @@ def evaluate(
     rules = policy.get("rules")
     if not isinstance(rules, list) or len(rules) == 0:
         decision = Decision(allowed=len(reasons) == 0, reasons=reasons, rules_checked=rules_checked)
+        _attach_debug_trace(decision)
         _emit_event(
             emitter=emitter,
             request=request,
@@ -693,6 +729,7 @@ def evaluate(
 
             rule_name = rule.get("name")
             safe_rule_name = rule_name if isinstance(rule_name, str) else rule_type
+            rule_started_ns = time.perf_counter_ns() if debug else 0
             try:
                 if rule_type == "budget_limit":
                     try:
@@ -751,6 +788,15 @@ def evaluate(
             except Exception as error:
                 rule_reasons = [f"internal_error: rule '{safe_rule_name}' raised {error}"]
                 checked = [rule_type]
+            if debug:
+                debug_rule_results.append(
+                    {
+                        "rule": rule_type,
+                        "passed": len(rule_reasons) == 0,
+                        "duration_us": max(0, (time.perf_counter_ns() - rule_started_ns) // 1000),
+                        "reason": rule_reasons[0] if rule_reasons else "",
+                    }
+                )
 
             reasons.extend(rule_reasons)
             rules_checked.extend(checked)
@@ -780,6 +826,7 @@ def evaluate(
                 allowed = False
 
     decision = Decision(allowed=allowed, reasons=reasons, rules_checked=rules_checked)
+    _attach_debug_trace(decision)
     _emit_event(
         emitter=emitter,
         request=request,
@@ -818,6 +865,14 @@ def _emit_event(
             state_snapshot = _build_state_snapshot(tracker, agent_id, session_id)
         except Exception:
             state_snapshot = {"error": "state_unavailable"}
+        context = request.get("context")
+        if isinstance(context, dict):
+            trace_id = context.get("trace_id")
+            parent_span_id = context.get("parent_span_id")
+            if isinstance(trace_id, str) and trace_id:
+                state_snapshot["trace_id"] = trace_id
+            if isinstance(parent_span_id, str) and parent_span_id:
+                state_snapshot["parent_span_id"] = parent_span_id
 
         elapsed_us = max(0, (time.perf_counter_ns() - started_ns) // 1000)
         tool = request.get("tool") if isinstance(request.get("tool"), str) else "__unknown__"

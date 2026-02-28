@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from orchesis.audit import AuditEngine, AuditQuery
@@ -19,9 +19,11 @@ from orchesis.corpus import RegressionCorpus
 from orchesis.engine import evaluate
 from orchesis.events import EventBus
 from orchesis.metrics import MetricsCollector
+from orchesis.otel import OTelEmitter, TraceContext
 from orchesis.policy_store import PolicyStore
 from orchesis.reliability import ReliabilityReportGenerator
 from orchesis.state import RateLimitTracker
+from orchesis.structured_log import StructuredLogger
 from orchesis.telemetry import JsonlEmitter
 
 
@@ -33,6 +35,7 @@ def create_api_app(
 ) -> FastAPI:
     """Create governance control-plane API."""
     app = FastAPI(title="Orchesis Control API")
+    logger = StructuredLogger("api")
     @app.exception_handler(HTTPException)
     async def _http_error_handler(request, exc: HTTPException):  # noqa: ANN001
         _ = request
@@ -54,6 +57,7 @@ def create_api_app(
     metrics = MetricsCollector()
     _ = event_bus.subscribe(JsonlEmitter(decisions_log))
     _ = event_bus.subscribe(metrics)
+    _ = event_bus.subscribe(OTelEmitter(".orchesis/traces.jsonl"))
     corpus = RegressionCorpus()
 
     app.state.store = store
@@ -93,6 +97,17 @@ def create_api_app(
     def _audit_engine() -> AuditEngine:
         return AuditEngine(app.state.decisions_log)
 
+    @app.middleware("http")
+    async def trace_headers_middleware(request: Request, call_next):
+        trace = TraceContext.from_headers(dict(request.headers))
+        request.state.trace_context = trace
+        response = await call_next(request)
+        response.headers["X-Orchesis-Trace-Id"] = trace.trace_id
+        decision_header = getattr(request.state, "orchesis_decision", None)
+        if isinstance(decision_header, str):
+            response.headers["X-Orchesis-Decision"] = decision_header
+        return response
+
     @app.post("/api/v1/policy")
     def post_policy(
         body: dict[str, Any],
@@ -112,6 +127,7 @@ def create_api_app(
             raise HTTPException(status_code=400, detail={"errors": errors})
         version = store.load(str(policy_file))
         _refresh_current_version()
+        logger.info("policy updated", version_id=version.version_id)
         return {"version_id": version.version_id, "loaded_at": version.loaded_at}
 
     @app.get("/api/v1/policy")
@@ -151,6 +167,7 @@ def create_api_app(
         if rolled is None:
             raise HTTPException(status_code=400, detail={"error": "rollback unavailable"})
         _refresh_current_version()
+        logger.warn("policy rolled back", previous=previous, rolled_back_to=rolled.version_id)
         # Materialize rolled version as active file content for local consumers.
         policy_file.write_text(
             yaml.safe_dump(rolled.policy, sort_keys=False, allow_unicode=True),
@@ -257,6 +274,13 @@ def create_api_app(
         policy_file.write_text(yaml.safe_dump(policy, sort_keys=False, allow_unicode=True), encoding="utf-8")
         version = store.load(str(policy_file))
         _refresh_current_version()
+        logger.warn(
+            "agent tier changed",
+            agent_id=agent_id,
+            previous_tier=previous_tier,
+            new_tier=tier_name,
+            policy_version=version.version_id,
+        )
         return {
             "agent_id": agent_id,
             "previous_tier": previous_tier,
@@ -350,25 +374,47 @@ def create_api_app(
     @app.post("/api/v1/evaluate")
     def evaluate_remote(
         body: dict[str, Any],
+        request: Request,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_auth(authorization)
         _refresh_current_version()
+        trace = getattr(request.state, "trace_context", TraceContext())
+        payload = dict(body)
+        context = payload.get("context")
+        payload_context = dict(context) if isinstance(context, dict) else {}
+        payload_context["trace_id"] = trace.trace_id
+        if trace.parent_span_id:
+            payload_context["parent_span_id"] = trace.parent_span_id
+        payload["context"] = payload_context
+        debug_mode = bool(payload.pop("debug", False))
         started_ns = time.perf_counter_ns()
         decision = evaluate(
-            body,
+            payload,
             app.state.current_version.policy,
             state=tracker,
             emitter=event_bus,
             registry=app.state.current_version.registry,
+            debug=debug_mode,
         )
         elapsed_us = max(0, (time.perf_counter_ns() - started_ns) // 1000)
-        return {
+        request.state.orchesis_decision = "ALLOW" if decision.allowed else "DENY"
+        response = {
             "allowed": decision.allowed,
             "reasons": decision.reasons,
             "rules_checked": decision.rules_checked,
             "evaluation_us": int(elapsed_us),
             "policy_version": app.state.current_version.version_id,
         }
+        if debug_mode:
+            response["debug_trace"] = decision.debug_trace
+        logger.debug(
+            "remote evaluation completed",
+            allowed=decision.allowed,
+            agent_id=payload_context.get("agent", "__global__"),
+            tool=payload.get("tool"),
+            debug=debug_mode,
+        )
+        return response
 
     return app

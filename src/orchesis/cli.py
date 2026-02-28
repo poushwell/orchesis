@@ -32,6 +32,7 @@ from orchesis.signing import generate_keypair, sign_entry, verify_entry
 from orchesis.state import RateLimitTracker
 from orchesis.telemetry import InMemoryEmitter, JsonlEmitter
 from orchesis.mutations import MutationEngine
+from orchesis.structured_log import StructuredLogger
 
 DEFAULT_KEYS_DIR = Path(".orchesis") / "keys"
 DEFAULT_PRIVATE_KEY_PATH = DEFAULT_KEYS_DIR / "private.pem"
@@ -41,6 +42,7 @@ DEFAULT_DECISIONS_PATH = Path("decisions.jsonl")
 DEFAULT_FUZZ_RUNS_PATH = Path(".orchesis") / "fuzz_runs.jsonl"
 DEFAULT_MUTATION_RUNS_PATH = Path(".orchesis") / "mutation_runs.jsonl"
 DEFAULT_REPLAY_RUNS_PATH = Path(".orchesis") / "replay_runs.jsonl"
+OPERATIONS_LOG = StructuredLogger("cli")
 
 
 @click.group()
@@ -108,7 +110,8 @@ def keygen() -> None:
 @click.argument("request_path", type=click.Path(exists=True))
 @click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
 @click.option("--sign", "should_sign", is_flag=True, default=False)
-def verify(request_path: str, policy_path: str, should_sign: bool) -> None:
+@click.option("--debug", "debug_mode", is_flag=True, default=False)
+def verify(request_path: str, policy_path: str, should_sign: bool, debug_mode: bool) -> None:
     """Verify a request against policy."""
     try:
         request = json.loads(Path(request_path).read_text(encoding="utf-8"))
@@ -134,6 +137,7 @@ def verify(request_path: str, policy_path: str, should_sign: bool) -> None:
                 state=state_tracker,
                 emitter=memory_emitter,
                 registry=registry,
+                debug=debug_mode,
             )
             if not DEFAULT_PRIVATE_KEY_PATH.exists():
                 raise click.ClickException(
@@ -156,6 +160,7 @@ def verify(request_path: str, policy_path: str, should_sign: bool) -> None:
                 state=state_tracker,
                 emitter=JsonlEmitter(DEFAULT_DECISIONS_PATH),
                 registry=registry,
+                debug=debug_mode,
             )
 
         click.echo(json.dumps(asdict(decision), ensure_ascii=False, indent=2))
@@ -266,6 +271,7 @@ def serve(port: int, policy_path: str) -> None:
         f"Agents: {len(registry.agents)} registered, default tier: {registry.default_tier.name.lower()}"
     )
     click.echo("Endpoints: /api/v1/policy, /api/v1/agents, /api/v1/evaluate, /api/v1/status")
+    OPERATIONS_LOG.info("starting api server", port=port, policy_path=policy_path)
     app = create_api_app(policy_path=policy_path)
     uvicorn.run(app, host="0.0.0.0", port=port)
 
@@ -309,6 +315,12 @@ def fuzz(policy_path: str, count: int, seed: int, save_bypasses: bool) -> None:
     update_fuzz_metadata(
         total_requests=report.total_requests,
         bypasses_found=len(report.bypasses),
+    )
+    OPERATIONS_LOG.info(
+        "fuzz run completed",
+        total_requests=report.total_requests,
+        bypasses=len(report.bypasses),
+        seed=seed,
     )
     click.echo("Fuzzer Report:")
     click.echo(f"  Total requests: {report.total_requests}")
@@ -406,6 +418,12 @@ def mutate(policy_path: str, count: int, seed: int) -> None:
         total_mutations=len(mutations),
         bypasses_found=bypasses,
     )
+    OPERATIONS_LOG.info(
+        "mutation run completed",
+        mutations_tested=len(mutations),
+        bypasses=bypasses,
+        seed=seed,
+    )
 
 
 @main.command()
@@ -427,6 +445,7 @@ def invariants(policy_path: str) -> None:
         invariant_checks=total,
         invariant_failures=failures,
     )
+    OPERATIONS_LOG.info("invariants checked", total=total, failures=failures)
     if not report.all_passed:
         raise SystemExit(1)
 

@@ -13,8 +13,10 @@ from orchesis.config import PolicyWatcher, load_policy
 from orchesis.engine import evaluate
 from orchesis.events import EventBus
 from orchesis.metrics import MetricsCollector
+from orchesis.otel import OTelEmitter, TraceContext
 from orchesis.policy_store import PolicyStore
 from orchesis.state import RateLimitTracker
+from orchesis.structured_log import StructuredLogger
 from orchesis.telemetry import JsonlEmitter
 from orchesis.webhooks import WebhookConfig, WebhookEmitter
 
@@ -79,6 +81,7 @@ def create_proxy_app(
     backend_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     """Create a proxy app that evaluates rules before forwarding requests."""
+    logger = StructuredLogger("proxy")
     transport = backend_transport
     if transport is None and backend_app is not None:
         transport = httpx.ASGITransport(app=backend_app)
@@ -94,6 +97,7 @@ def create_proxy_app(
     decisions_log_path = os.getenv("DECISIONS_LOG_PATH", ".orchesis/decisions.jsonl")
     _ = event_bus.subscribe(JsonlEmitter(decisions_log_path))
     _ = event_bus.subscribe(metrics)
+    _ = event_bus.subscribe(OTelEmitter(".orchesis/traces.jsonl"))
     webhook_subscriber_ids: list[int] = []
 
     def _sync_webhooks(candidate_policy: dict[str, Any]) -> None:
@@ -165,13 +169,16 @@ def create_proxy_app(
     @app.middleware("http")
     async def decision_middleware(request: Request, call_next: Any) -> Response:
         nonlocal current_policy_hash
+        trace = TraceContext.from_headers(dict(request.headers))
         if request.url.path in {"/metrics", "/health"}:
-            return await call_next(request)
+            response = await call_next(request)
+            response.headers["X-Orchesis-Trace-Id"] = trace.trace_id
+            return response
 
         if watcher is not None:
             old_hash = current_policy_hash
             if watcher.check():
-                print(f"Policy reloaded: {old_hash} -> {current_policy_hash}")
+                logger.info("policy reloaded", old_version=old_hash, new_version=current_policy_hash)
 
         raw_body = await request.body()
         body_json: dict[str, Any] | None = None
@@ -183,11 +190,15 @@ def create_proxy_app(
             except ValueError:
                 body_json = None
 
+        context = _extract_context(request, body_json)
+        context["trace_id"] = trace.trace_id
+        if trace.parent_span_id:
+            context["parent_span_id"] = trace.parent_span_id
         eval_request = {
             "tool": _extract_tool(request, body_json),
             "params": _extract_params(request, body_json),
             "cost": _extract_cost(request, body_json),
-            "context": _extract_context(request, body_json),
+            "context": context,
         }
         decision = evaluate(
             eval_request,
@@ -198,7 +209,7 @@ def create_proxy_app(
         )
 
         if not decision.allowed:
-            return JSONResponse(
+            response = JSONResponse(
                 status_code=403,
                 content={
                     "allowed": False,
@@ -206,6 +217,9 @@ def create_proxy_app(
                     "rules_checked": decision.rules_checked,
                 },
             )
+            response.headers["X-Orchesis-Trace-Id"] = trace.trace_id
+            response.headers["X-Orchesis-Decision"] = "DENY"
+            return response
 
         target_path = request.url.path
         if request.url.query:
@@ -227,11 +241,14 @@ def create_proxy_app(
                 headers=forwarded_headers,
             )
 
-        return Response(
+        response = Response(
             content=forwarded.content,
             status_code=forwarded.status_code,
             media_type=forwarded.headers.get("content-type"),
         )
+        response.headers["X-Orchesis-Trace-Id"] = trace.trace_id
+        response.headers["X-Orchesis-Decision"] = "ALLOW"
+        return response
 
     @app.get("/metrics")
     def metrics_endpoint() -> Response:

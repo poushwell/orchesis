@@ -258,6 +258,9 @@ async def test_evaluate_via_api(tmp_path: Path) -> None:
         )
     assert allow.status_code == 200 and allow.json()["allowed"] is True
     assert deny.status_code == 200 and deny.json()["allowed"] is False
+    assert allow.headers.get("X-Orchesis-Decision") == "ALLOW"
+    assert deny.headers.get("X-Orchesis-Decision") == "DENY"
+    assert allow.headers.get("X-Orchesis-Trace-Id")
 
 
 @pytest.mark.asyncio

@@ -46,6 +46,8 @@ def test_proxy_allows_and_forwards_get_data() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"items": ["report.csv", "data.json"]}
+    assert response.headers.get("X-Orchesis-Decision") == "ALLOW"
+    assert response.headers.get("X-Orchesis-Trace-Id")
 
 
 def test_proxy_denies_and_does_not_forward_delete_when_path_blocked() -> None:
@@ -71,6 +73,8 @@ def test_proxy_denies_and_does_not_forward_delete_when_path_blocked() -> None:
 
     assert response.status_code == 403
     assert response.json()["allowed"] is False
+    assert response.headers.get("X-Orchesis-Decision") == "DENY"
+    assert response.headers.get("X-Orchesis-Trace-Id")
     assert state["delete_calls"] == 0
 
 
