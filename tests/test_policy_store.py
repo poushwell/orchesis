@@ -14,7 +14,7 @@ def _write_policy(path: Path, content: str) -> None:
 def test_load_creates_version(tmp_path: Path) -> None:
     path = tmp_path / "policy.yaml"
     _write_policy(path, "rules:\n  - name: budget_limit\n    max_cost_per_call: 1.0")
-    store = PolicyStore()
+    store = PolicyStore(history_path=tmp_path / "policy_versions.jsonl")
     version = store.load(str(path))
     expected = hashlib.sha256(path.read_bytes()).hexdigest()
     assert version.version_id == expected
@@ -24,7 +24,7 @@ def test_load_creates_version(tmp_path: Path) -> None:
 
 def test_multiple_loads_create_history(tmp_path: Path) -> None:
     path = tmp_path / "policy.yaml"
-    store = PolicyStore()
+    store = PolicyStore(history_path=tmp_path / "policy_versions.jsonl")
     _write_policy(path, "rules:\n  - name: budget_limit\n    max_cost_per_call: 1.0")
     v1 = store.load(str(path))
     _write_policy(path, "rules:\n  - name: budget_limit\n    max_cost_per_call: 2.0")
@@ -40,7 +40,7 @@ def test_multiple_loads_create_history(tmp_path: Path) -> None:
 
 def test_rollback_to_previous(tmp_path: Path) -> None:
     path = tmp_path / "policy.yaml"
-    store = PolicyStore()
+    store = PolicyStore(history_path=tmp_path / "policy_versions.jsonl")
     _write_policy(path, "rules:\n  - name: budget_limit\n    max_cost_per_call: 1.0")
     a = store.load(str(path))
     _write_policy(path, "rules:\n  - name: budget_limit\n    max_cost_per_call: 2.0")
@@ -56,7 +56,7 @@ def test_rollback_to_previous(tmp_path: Path) -> None:
 
 def test_rollback_at_first_version_returns_none(tmp_path: Path) -> None:
     path = tmp_path / "policy.yaml"
-    store = PolicyStore()
+    store = PolicyStore(history_path=tmp_path / "policy_versions.jsonl")
     _write_policy(path, "rules:\n  - name: budget_limit\n    max_cost_per_call: 1.0")
     _ = store.load(str(path))
     assert store.rollback() is None
@@ -64,7 +64,7 @@ def test_rollback_at_first_version_returns_none(tmp_path: Path) -> None:
 
 def test_max_versions_limit(tmp_path: Path) -> None:
     path = tmp_path / "policy.yaml"
-    store = PolicyStore(max_versions=3)
+    store = PolicyStore(max_versions=3, history_path=tmp_path / "policy_versions.jsonl")
     for idx in range(5):
         _write_policy(path, f"rules:\n  - name: budget_limit\n    max_cost_per_call: {idx + 1}.0")
         store.load(str(path))
@@ -74,7 +74,7 @@ def test_max_versions_limit(tmp_path: Path) -> None:
 
 def test_get_version_by_hash(tmp_path: Path) -> None:
     path = tmp_path / "policy.yaml"
-    store = PolicyStore()
+    store = PolicyStore(history_path=tmp_path / "policy_versions.jsonl")
     _write_policy(path, "rules:\n  - name: budget_limit\n    max_cost_per_call: 1.0")
     version = store.load(str(path))
     found = store.get_version(version.version_id)
@@ -95,7 +95,7 @@ agents:
 rules: []
 """,
     )
-    store = PolicyStore()
+    store = PolicyStore(history_path=tmp_path / "policy_versions.jsonl")
     version = store.load(str(path))
     identity = version.registry.get("cursor")
     assert identity.agent_id == "cursor"

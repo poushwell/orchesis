@@ -1,3 +1,29 @@
+## [0.3.0] - 2026-02-28
+
+### Added
+- Agent Identity Model with trust tiers (BLOCKED->PRINCIPAL)
+- Capability-based tool access enforcement
+- AgentRegistry loaded from policy YAML
+- Per-agent overrides (cost, budget, rate limit)
+- Policy versioning with rollback support
+- Persistent policy history across runs
+- Session-scoped state isolation
+- CLI: `orchesis agents`, `policy-history`, `rollback`
+- Structured telemetry with `DecisionEvent`
+- Deterministic replay engine with forensic CLI
+- Policy hot-reload without restart
+- Buffered persistence for high-throughput
+
+### Changed
+- Evaluation order: `identity_check` runs before all policy rules
+- State keys now include `session_id` for finer isolation
+- Engine uses dispatch table instead of monolithic `if/elif` rule chain
+
+### Security
+- 14 adversarial vulnerabilities fixed (see `docs/THREAT_MODEL.md`)
+- Path traversal, SQL bypass, and cost manipulation hardened
+- Fail-closed guarantees formalized
+
 ## [0.2.0] - 2026-02-28
 
 ### Added

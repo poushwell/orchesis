@@ -205,7 +205,77 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
             errors.append("circular composite reference detected")
             break
 
+    agents = policy.get("agents")
+    valid_tiers = {tier.name.lower() for tier in TrustTier}
+    if agents is not None and not isinstance(agents, list):
+        errors.append("policy.agents must be a list")
+    if isinstance(agents, list):
+        seen_ids: set[str] = set()
+        for index, agent in enumerate(agents):
+            if not isinstance(agent, dict):
+                errors.append(f"agents[{index}] must be a mapping")
+                continue
+
+            agent_id = agent.get("id")
+            name = agent.get("name")
+            trust_tier = agent.get("trust_tier")
+            if not isinstance(agent_id, str) or not agent_id.strip():
+                errors.append(f"agents[{index}].id must be a non-empty string")
+            elif agent_id.strip() in seen_ids:
+                errors.append(f"agents[{index}].id '{agent_id.strip()}' is duplicated")
+            else:
+                seen_ids.add(agent_id.strip())
+
+            if not isinstance(name, str) or not name.strip():
+                errors.append(f"agents[{index}].name must be a non-empty string")
+
+            if not isinstance(trust_tier, str) or trust_tier.strip().lower() not in valid_tiers:
+                errors.append(
+                    f"agents[{index}].trust_tier must be one of {sorted(valid_tiers)}"
+                )
+
+            allowed_tools = agent.get("allowed_tools")
+            if allowed_tools is not None:
+                if not isinstance(allowed_tools, list) or any(
+                    not isinstance(item, str) for item in allowed_tools
+                ):
+                    errors.append(f"agents[{index}].allowed_tools must be a list of strings")
+
+            denied_tools = agent.get("denied_tools")
+            if denied_tools is not None:
+                if not isinstance(denied_tools, list) or any(
+                    not isinstance(item, str) for item in denied_tools
+                ):
+                    errors.append(f"agents[{index}].denied_tools must be a list of strings")
+
+            if agent.get("max_cost_per_call") is not None and not _is_number(
+                agent.get("max_cost_per_call")
+            ):
+                errors.append(f"agents[{index}].max_cost_per_call must be numeric if provided")
+            if agent.get("daily_budget") is not None and not _is_number(agent.get("daily_budget")):
+                errors.append(f"agents[{index}].daily_budget must be numeric if provided")
+            rate_limit = agent.get("rate_limit_per_minute")
+            if rate_limit is not None:
+                if not isinstance(rate_limit, int) or rate_limit <= 0:
+                    errors.append(
+                        f"agents[{index}].rate_limit_per_minute must be a positive integer"
+                    )
+
+    default_tier = policy.get("default_trust_tier")
+    if default_tier is not None:
+        if not isinstance(default_tier, str) or default_tier.strip().lower() not in valid_tiers:
+            errors.append(f"default_trust_tier must be one of {sorted(valid_tiers)}")
+
     return errors
+
+
+def validate_policy_warnings(policy: dict[str, Any]) -> list[str]:
+    """Return non-fatal policy recommendations."""
+    warnings: list[str] = []
+    version = policy.get("version")
+    if not isinstance(version, str) or not version.strip():
+        warnings.append("policy.version is recommended for version tracking")
+    return warnings
 
 
 class PolicyWatcher:

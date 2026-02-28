@@ -18,6 +18,8 @@ All decisions are logged with cryptographic signatures for audit.
 pip install orchesis
 orchesis init
 orchesis verify request.json --policy policy.yaml
+orchesis agents --policy policy.yaml
+orchesis policy-history --policy policy.yaml
 orchesis audit
 ```
 
@@ -28,11 +30,36 @@ Agent demo (condensed real output):
 - `rate_limited_spam`: 100 ALLOW then 100 DENY (`rate_limit`)
 - `untrusted_agent_attempt`: 2 DENY (`context_rules`)
 
+## Agent Identity
+
+Every request can carry `context.agent` and `context.session`. Orchesis resolves the
+agent identity from policy and enforces trust-tier capabilities before normal rules.
+
+| Tier | Description | Default capabilities |
+|---|---|---|
+| `blocked` | no execution | none |
+| `intern` | read-only | read |
+| `assistant` | safe writes in scope | read, write |
+| `operator` | full operational tooling | read, write, delete, execute |
+| `principal` | admin/system | read, write, delete, execute, admin |
+
+## Policy Versioning
+
+`PolicyStore` assigns each loaded policy a SHA256 version id and keeps history with rollback:
+
+- In-memory history for hot reload
+- Persistent history at `.orchesis/policy_versions.jsonl`
+- CLI visibility via `orchesis policy-history`
+- Rollback via `orchesis rollback`
+
 ## Architecture
 
 ```text
-Agent -> Orchesis evaluate() -> ALLOW -> Tool executes
-                           -> DENY  -> Agent receives block + reason
+Agent -> Orchesis identity_check -> policy rules -> ALLOW -> Tool executes
+                                 -> DENY  -> Agent receives block + reason
+         |
+         +-> PolicyStore (version hash + history + rollback)
+         +-> Session-aware state (agent_id + session_id + tool)
 ```
 
 ## Policy Rules

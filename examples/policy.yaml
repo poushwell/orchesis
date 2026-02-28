@@ -1,3 +1,5 @@
+version: "0.3.0"
+
 agents:
   - id: "cursor"
     name: "Cursor IDE Agent"
@@ -19,6 +21,10 @@ agents:
   - id: "admin_agent"
     name: "System Admin"
     trust_tier: principal
+
+  - id: "blocked_agent"
+    name: "Blocked Agent"
+    trust_tier: blocked
 
 default_trust_tier: intern
 

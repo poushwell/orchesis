@@ -452,3 +452,32 @@ tasks:
       - tool: read_file
         params: {path: "/data/safe.txt"}
         context: {agent: "untrusted_bot"}
+
+  - name: "unknown_agent_attempt"
+    description: "Unknown agent defaults to intern restrictions"
+    context: {agent: "unknown_agent"}
+    steps:
+      - tool: write_file
+        params: {path: "/data/unknown.txt", content: "blocked write"}
+      - tool: read_file
+        params: {path: "/data/safe.txt"}
+
+  - name: "admin_agent_attempt"
+    description: "Admin agent executes unrestricted tool set"
+    context: {agent: "admin_agent"}
+    steps:
+      - tool: delete_file
+        params: {path: "/data/admin-cleanup.txt"}
+      - tool: run_sql
+        params: {query: "DROP TABLE scratch_data"}
+      - tool: write_file
+        params: {path: "/data/admin-log.txt", content: "done"}
+
+  - name: "blocked_agent_attempt"
+    description: "Blocked agent is denied for all operations"
+    context: {agent: "blocked_agent"}
+    steps:
+      - tool: read_file
+        params: {path: "/data/safe.txt"}
+      - tool: api_call
+        params: {endpoint: "health"}

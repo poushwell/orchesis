@@ -10,7 +10,12 @@ from typing import Any
 import click
 from yaml import YAMLError
 
-from orchesis.config import load_agent_registry, load_policy, validate_policy
+from orchesis.config import (
+    load_agent_registry,
+    load_policy,
+    validate_policy,
+    validate_policy_warnings,
+)
 from orchesis.engine import evaluate
 from orchesis.logger import read_decisions
 from orchesis.policy_store import PolicyStore
@@ -157,6 +162,9 @@ def validate(policy_path: str) -> None:
         raise click.ClickException(f"Failed to load policy: {error}") from error
 
     errors = validate_policy(policy)
+    warnings = validate_policy_warnings(policy)
+    for warning in warnings:
+        click.echo(f"! warning: {warning}")
     if not errors:
         click.echo("OK")
         return
@@ -195,10 +203,11 @@ def policy_history(policy_path: str) -> None:
     """Show policy version history."""
     store = PolicyStore()
     try:
-        current = store.load(policy_path)
+        loaded = store.load(policy_path)
     except (ValueError, YAMLError, OSError) as error:
         raise click.ClickException(f"Failed to load policy: {error}") from error
 
+    current = store.current or loaded
     click.echo("Policy versions:")
     for index, version in enumerate(store.history()):
         marker = " (current)" if version.version_id == current.version_id else ""
@@ -209,12 +218,12 @@ def policy_history(policy_path: str) -> None:
 @main.command()
 @click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
 def rollback(policy_path: str) -> None:
-    """Rollback to previous in-memory policy version."""
+    """Rollback to previous policy version."""
     store = PolicyStore()
     try:
-        first = store.load(policy_path)
-        # Load current policy twice to allow one-step rollback in CLI call.
-        second = store.load(policy_path)
+        current = store.current
+        if current is None:
+            current = store.load(policy_path)
     except (ValueError, YAMLError, OSError) as error:
         raise click.ClickException(f"Failed to load policy: {error}") from error
 
@@ -222,9 +231,8 @@ def rollback(policy_path: str) -> None:
     if rolled is None:
         click.echo("Rollback unavailable: no previous policy version.")
         return
-    click.echo(f"Rolled back: {second.version_id[:12]} -> {rolled.version_id[:12]}")
+    click.echo(f"Rolled back: {current.version_id[:12]} -> {rolled.version_id[:12]}")
     click.echo(f"Current policy version: {rolled.version_id[:12]}")
-    _ = first
 
 
 @main.command()
