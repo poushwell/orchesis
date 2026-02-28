@@ -11,6 +11,7 @@ from typing import Any
 from weakref import WeakSet
 
 GLOBAL_AGENT_ID = "__global__"
+DEFAULT_SESSION_ID = "__default__"
 
 
 def _to_datetime_utc(timestamp: datetime | str | None) -> datetime:
@@ -37,9 +38,9 @@ class RateLimitTracker:
         # using a dict[str, threading.Lock] with lazy initialization.
         # Current benchmarks show <1ms p99 with single lock at 500 concurrent.
         self._lock = threading.Lock()
-        self._events: dict[tuple[str, str], list[datetime]] = defaultdict(list)
-        self._spend_events: dict[str, list[tuple[datetime, float]]] = defaultdict(list)
-        self._spend_totals: dict[str, float] = defaultdict(float)
+        self._events: dict[tuple[str, str, str], list[datetime]] = defaultdict(list)
+        self._spend_events: dict[tuple[str, str], list[tuple[datetime, float]]] = defaultdict(list)
+        self._spend_totals: dict[tuple[str, str], float] = defaultdict(float)
         self._write_buffer: list[str] = []
         self._buffer_limit: int = 50
         if self.persist_path is not None:
@@ -65,14 +66,19 @@ class RateLimitTracker:
             tool = payload.get("tool")
             ts = payload.get("timestamp")
             agent = payload.get("agent_id", GLOBAL_AGENT_ID)
+            session = payload.get("session_id", DEFAULT_SESSION_ID)
             cost = payload.get("cost", 0.0)
             if event == "spend" and isinstance(ts, str):
                 try:
                     dt = _to_datetime_utc(ts)
                     agent_id = agent if isinstance(agent, str) and agent else GLOBAL_AGENT_ID
+                    session_id = (
+                        session if isinstance(session, str) and session else DEFAULT_SESSION_ID
+                    )
                     numeric_cost = float(cost) if isinstance(cost, int | float) else 0.0
-                    self._spend_events[agent_id].append((dt, numeric_cost))
-                    self._spend_totals[agent_id] += numeric_cost
+                    spend_key = (agent_id, session_id)
+                    self._spend_events[spend_key].append((dt, numeric_cost))
+                    self._spend_totals[spend_key] += numeric_cost
                 except ValueError:
                     continue
                 continue
@@ -80,12 +86,16 @@ class RateLimitTracker:
                 try:
                     dt = _to_datetime_utc(ts)
                     agent_id = agent if isinstance(agent, str) and agent else GLOBAL_AGENT_ID
-                    self._events[(agent_id, tool)].append(dt)
+                    session_id = (
+                        session if isinstance(session, str) and session else DEFAULT_SESSION_ID
+                    )
+                    self._events[(agent_id, session_id, tool)].append(dt)
                     # Backward compatibility for legacy state entries carrying cost.
                     numeric_cost = float(cost) if isinstance(cost, int | float) else 0.0
                     if numeric_cost != 0.0:
-                        self._spend_events[agent_id].append((dt, numeric_cost))
-                        self._spend_totals[agent_id] += numeric_cost
+                        spend_key = (agent_id, session_id)
+                        self._spend_events[spend_key].append((dt, numeric_cost))
+                        self._spend_totals[spend_key] += numeric_cost
                 except ValueError:
                     continue
 
@@ -104,27 +114,29 @@ class RateLimitTracker:
             file.write("\n".join(self._write_buffer) + "\n")
         self._write_buffer.clear()
 
-    def _prune(self, key: tuple[str, str], now: datetime, window_seconds: int) -> None:
+    def _prune(self, key: tuple[str, str, str], now: datetime, window_seconds: int) -> None:
         threshold = now - timedelta(seconds=window_seconds)
         self._events[key] = [x for x in self._events[key] if x >= threshold]
 
-    def _prune_spend(self, agent_id: str, now: datetime, window_seconds: int) -> None:
+    def _prune_spend(self, key: tuple[str, str], now: datetime, window_seconds: int) -> None:
         threshold = now - timedelta(seconds=window_seconds)
-        self._spend_events[agent_id] = [
-            (ts, cost) for ts, cost in self._spend_events[agent_id] if ts >= threshold
-        ]
-        self._spend_totals[agent_id] = sum(cost for _, cost in self._spend_events[agent_id])
+        self._spend_events[key] = [(ts, cost) for ts, cost in self._spend_events[key] if ts >= threshold]
+        self._spend_totals[key] = sum(cost for _, cost in self._spend_events[key])
 
     def record(
         self,
         tool_name: str,
         timestamp: datetime | str | None = None,
         agent_id: str = GLOBAL_AGENT_ID,
+        session_id: str = DEFAULT_SESSION_ID,
     ) -> None:
         ts = _to_datetime_utc(timestamp)
         safe_agent_id = agent_id if isinstance(agent_id, str) and agent_id else GLOBAL_AGENT_ID
+        safe_session_id = (
+            session_id if isinstance(session_id, str) and session_id else DEFAULT_SESSION_ID
+        )
         with self._lock:
-            key = (safe_agent_id, tool_name)
+            key = (safe_agent_id, safe_session_id, tool_name)
             self._events[key].append(ts)
             self._buffer_write(
                 {
@@ -132,6 +144,7 @@ class RateLimitTracker:
                     "tool": tool_name,
                     "timestamp": ts.isoformat(),
                     "agent_id": safe_agent_id,
+                    "session_id": safe_session_id,
                 }
             )
 
@@ -140,17 +153,23 @@ class RateLimitTracker:
         agent_id: str,
         cost: float,
         timestamp: datetime | str | None = None,
+        session_id: str = DEFAULT_SESSION_ID,
     ) -> None:
         ts = _to_datetime_utc(timestamp)
         safe_agent_id = agent_id if isinstance(agent_id, str) and agent_id else GLOBAL_AGENT_ID
+        safe_session_id = (
+            session_id if isinstance(session_id, str) and session_id else DEFAULT_SESSION_ID
+        )
         safe_cost = float(cost) if isinstance(cost, int | float) else 0.0
         with self._lock:
-            self._spend_events[safe_agent_id].append((ts, safe_cost))
-            self._spend_totals[safe_agent_id] += safe_cost
+            spend_key = (safe_agent_id, safe_session_id)
+            self._spend_events[spend_key].append((ts, safe_cost))
+            self._spend_totals[spend_key] += safe_cost
             self._buffer_write(
                 {
                     "event": "spend",
                     "agent_id": safe_agent_id,
+                    "session_id": safe_session_id,
                     "timestamp": ts.isoformat(),
                     "cost": safe_cost,
                 }
@@ -162,12 +181,16 @@ class RateLimitTracker:
         window_seconds: int,
         *,
         agent_id: str = GLOBAL_AGENT_ID,
+        session_id: str = DEFAULT_SESSION_ID,
         now: datetime | str | None = None,
     ) -> int:
         current = _to_datetime_utc(now)
         safe_agent_id = agent_id if isinstance(agent_id, str) and agent_id else GLOBAL_AGENT_ID
+        safe_session_id = (
+            session_id if isinstance(session_id, str) and session_id else DEFAULT_SESSION_ID
+        )
         with self._lock:
-            key = (safe_agent_id, tool_name)
+            key = (safe_agent_id, safe_session_id, tool_name)
             events = self._events[key]
             threshold = current - timedelta(seconds=window_seconds)
             if events and events[0] >= threshold:
@@ -184,10 +207,17 @@ class RateLimitTracker:
         window_seconds: int,
         *,
         agent_id: str = GLOBAL_AGENT_ID,
+        session_id: str = DEFAULT_SESSION_ID,
         now: datetime | str | None = None,
     ) -> bool:
         return (
-            self.get_count(tool_name, window_seconds, now=now, agent_id=agent_id)
+            self.get_count(
+                tool_name,
+                window_seconds,
+                now=now,
+                agent_id=agent_id,
+                session_id=session_id,
+            )
             >= max_requests
         )
 
@@ -198,12 +228,16 @@ class RateLimitTracker:
         window_seconds: int,
         *,
         agent_id: str = GLOBAL_AGENT_ID,
+        session_id: str = DEFAULT_SESSION_ID,
         timestamp: datetime | str | None = None,
     ) -> bool:
         current = _to_datetime_utc(timestamp)
         safe_agent_id = agent_id if isinstance(agent_id, str) and agent_id else GLOBAL_AGENT_ID
+        safe_session_id = (
+            session_id if isinstance(session_id, str) and session_id else DEFAULT_SESSION_ID
+        )
         with self._lock:
-            key = (safe_agent_id, tool_name)
+            key = (safe_agent_id, safe_session_id, tool_name)
             threshold = current - timedelta(seconds=window_seconds)
             events = self._events[key]
             if events and events[0] >= threshold:
@@ -220,6 +254,7 @@ class RateLimitTracker:
                     "tool": tool_name,
                     "timestamp": current.isoformat(),
                     "agent_id": safe_agent_id,
+                    "session_id": safe_session_id,
                 }
             )
             return over_limit
@@ -229,41 +264,55 @@ class RateLimitTracker:
         agent_id: str,
         window_seconds: int = 86400,
         *,
+        session_id: str = DEFAULT_SESSION_ID,
         now: datetime | str | None = None,
     ) -> float:
         current = _to_datetime_utc(now)
         safe_agent_id = agent_id if isinstance(agent_id, str) and agent_id else GLOBAL_AGENT_ID
+        safe_session_id = (
+            session_id if isinstance(session_id, str) and session_id else DEFAULT_SESSION_ID
+        )
+        spend_key = (safe_agent_id, safe_session_id)
         with self._lock:
-            events = self._spend_events[safe_agent_id]
+            events = self._spend_events[spend_key]
             if not events:
                 return 0.0
 
             threshold = current - timedelta(seconds=window_seconds)
             if events[0][0] >= threshold:
-                return self._spend_totals[safe_agent_id]
+                return self._spend_totals[spend_key]
 
             if len(events) > window_seconds * 2:
-                self._prune_spend(safe_agent_id, current, window_seconds)
-                return self._spend_totals[safe_agent_id]
+                self._prune_spend(spend_key, current, window_seconds)
+                return self._spend_totals[spend_key]
 
             return sum(cost for ts, cost in events if ts >= threshold)
 
     def get_tools(self) -> list[str]:
         with self._lock:
-            return sorted({tool for (_, tool) in self._events.keys()})
+            return sorted({tool for (_, _, tool) in self._events.keys()})
 
     def get_agents(self) -> list[str]:
         with self._lock:
-            return sorted({agent for (agent, _) in self._events.keys()})
+            return sorted({agent for (agent, _, _) in self._events.keys()})
 
     def flush(self) -> None:
         """Force buffered state writes to disk."""
         with self._lock:
             self._flush_buffer()
 
-    def load_agent_snapshot(self, agent_id: str, tool_counts: dict[str, int]) -> None:
+    def load_agent_snapshot(
+        self,
+        agent_id: str,
+        tool_counts: dict[str, int],
+        *,
+        session_id: str = DEFAULT_SESSION_ID,
+    ) -> None:
         """Load precomputed tool counts for an agent (replay support)."""
         safe_agent_id = agent_id if isinstance(agent_id, str) and agent_id else GLOBAL_AGENT_ID
+        safe_session_id = (
+            session_id if isinstance(session_id, str) and session_id else DEFAULT_SESSION_ID
+        )
         now = datetime.now(timezone.utc)
         with self._lock:
             for tool_name, count in tool_counts.items():
@@ -271,5 +320,5 @@ class RateLimitTracker:
                     continue
                 if count <= 0:
                     continue
-                key = (safe_agent_id, tool_name)
+                key = (safe_agent_id, safe_session_id, tool_name)
                 self._events[key] = [now for _ in range(count)]

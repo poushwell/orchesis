@@ -13,6 +13,7 @@ from yaml import YAMLError
 from orchesis.config import load_agent_registry, load_policy, validate_policy
 from orchesis.engine import evaluate
 from orchesis.logger import read_decisions
+from orchesis.policy_store import PolicyStore
 from orchesis.replay import ReplayEngine, read_events_from_jsonl
 from orchesis.signing import generate_keypair, sign_entry, verify_entry
 from orchesis.state import RateLimitTracker
@@ -189,6 +190,44 @@ def agents(policy_path: str) -> None:
 
 
 @main.command()
+@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
+def policy_history(policy_path: str) -> None:
+    """Show policy version history."""
+    store = PolicyStore()
+    try:
+        current = store.load(policy_path)
+    except (ValueError, YAMLError, OSError) as error:
+        raise click.ClickException(f"Failed to load policy: {error}") from error
+
+    click.echo("Policy versions:")
+    for index, version in enumerate(store.history()):
+        marker = " (current)" if version.version_id == current.version_id else ""
+        short_hash = version.version_id[:12]
+        click.echo(f"  v{index} {short_hash} loaded {version.loaded_at}{marker}")
+
+
+@main.command()
+@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
+def rollback(policy_path: str) -> None:
+    """Rollback to previous in-memory policy version."""
+    store = PolicyStore()
+    try:
+        first = store.load(policy_path)
+        # Load current policy twice to allow one-step rollback in CLI call.
+        second = store.load(policy_path)
+    except (ValueError, YAMLError, OSError) as error:
+        raise click.ClickException(f"Failed to load policy: {error}") from error
+
+    rolled = store.rollback()
+    if rolled is None:
+        click.echo("Rollback unavailable: no previous policy version.")
+        return
+    click.echo(f"Rolled back: {second.version_id[:12]} -> {rolled.version_id[:12]}")
+    click.echo(f"Current policy version: {rolled.version_id[:12]}")
+    _ = first
+
+
+@main.command()
 @click.option("--since", type=int, default=None)
 @click.option("--limit", type=int, default=20)
 @click.option("--verify", "verify_signatures", is_flag=True, default=False)
@@ -362,6 +401,9 @@ def forensic(agent_id: str, since: int | None, log_path: str) -> None:
     for event in filtered:
         ts = event.timestamp
         time_only = ts[11:19] if len(ts) >= 19 else ts
-        click.echo(f"  {time_only} {event.decision} {event.tool} params_hash={event.params_hash}")
+        click.echo(
+            f"  {time_only} {event.decision} {event.tool} "
+            f"policy={event.policy_version} params_hash={event.params_hash}"
+        )
         for reason in event.reasons:
             click.echo(f"    -> {reason}")

@@ -15,7 +15,7 @@ from urllib.parse import unquote
 import yaml
 from orchesis.identity import AgentIdentity, AgentRegistry, TrustTier, check_capability
 from orchesis.models import Decision
-from orchesis.state import GLOBAL_AGENT_ID, RateLimitTracker
+from orchesis.state import DEFAULT_SESSION_ID, GLOBAL_AGENT_ID, RateLimitTracker
 from orchesis.telemetry import DecisionEvent, EventEmitter
 
 RULE_EVALUATION_ORDER = [
@@ -74,11 +74,16 @@ def _rules_triggered(reasons: list[str]) -> list[str]:
     return triggered
 
 
-def _build_state_snapshot(state: RateLimitTracker, agent_id: str) -> dict[str, Any]:
-    snapshot: dict[str, Any] = {"agent_id": agent_id, "window_seconds": 60, "tool_counts": {}}
+def _build_state_snapshot(state: RateLimitTracker, agent_id: str, session_id: str) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "agent_id": agent_id,
+        "session_id": session_id,
+        "window_seconds": 60,
+        "tool_counts": {},
+    }
     for tool in state.get_tools():
         snapshot["tool_counts"][tool] = state.get_count(
-            tool, window_seconds=60, agent_id=agent_id
+            tool, window_seconds=60, agent_id=agent_id, session_id=session_id
         )
     return snapshot
 
@@ -126,6 +131,17 @@ def _resolve_agent_id(request: dict[str, Any]) -> str:
         return GLOBAL_AGENT_ID
     cleaned = _sanitize_text(agent)
     return cleaned if cleaned else GLOBAL_AGENT_ID
+
+
+def _resolve_session_id(request: dict[str, Any]) -> str:
+    context = request.get("context")
+    if not isinstance(context, dict):
+        return DEFAULT_SESSION_ID
+    session = context.get("session")
+    if not isinstance(session, str):
+        return DEFAULT_SESSION_ID
+    cleaned = _sanitize_text(session)
+    return cleaned if cleaned else DEFAULT_SESSION_ID
 
 
 def _is_modify_or_destructive_action(request: dict[str, Any]) -> bool:
@@ -242,6 +258,7 @@ def _apply_budget_limit(
     *,
     state: RateLimitTracker,
     agent_id: str,
+    session_id: str,
     agent_budget_spent: float | None = None,
 ) -> tuple[list[str], list[str]]:
     reasons: list[str] = []
@@ -260,7 +277,9 @@ def _apply_budget_limit(
         spent = (
             agent_budget_spent
             if isinstance(agent_budget_spent, int | float)
-            else state.get_agent_budget_spent(agent_id, window_seconds=86400)
+            else state.get_agent_budget_spent(
+                agent_id, window_seconds=86400, session_id=session_id
+            )
         )
         if cost is None:
             projected = spent
@@ -281,6 +300,7 @@ def _apply_rate_limit(
     *,
     state: RateLimitTracker,
     agent_id: str,
+    session_id: str,
     now: datetime,
     dry_run: bool = False,
 ) -> tuple[list[str], list[str]]:
@@ -293,7 +313,9 @@ def _apply_rate_limit(
     tool_name = request.get("tool")
     tool = tool_name if isinstance(tool_name, str) else "__unknown__"
     if dry_run:
-        over_limit = state.is_over_limit(tool, max_per_minute, 60, now=now, agent_id=agent_id)
+        over_limit = state.is_over_limit(
+            tool, max_per_minute, 60, now=now, agent_id=agent_id, session_id=session_id
+        )
     else:
         over_limit = state.check_and_record(
             tool,
@@ -301,6 +323,7 @@ def _apply_rate_limit(
             window_seconds=60,
             timestamp=now,
             agent_id=agent_id,
+            session_id=session_id,
         )
     if over_limit:
         reasons.append(f"rate_limit: tool '{tool}' exceeded max_requests_per_minute {max_per_minute}")
@@ -438,6 +461,7 @@ def _apply_composite(
     *,
     state: RateLimitTracker,
     agent_id: str,
+    session_id: str,
     now: datetime,
     all_rules_by_name: dict[str, dict[str, Any]],
     visited: set[str],
@@ -486,14 +510,24 @@ def _apply_composite(
             if daily_budget_override is not None:
                 effective_ref_rule["daily_budget"] = daily_budget_override
             ref_reasons, _ = _apply_budget_limit(
-                effective_ref_rule, request, state=state, agent_id=agent_id
+                effective_ref_rule,
+                request,
+                state=state,
+                agent_id=agent_id,
+                session_id=session_id,
             )
         elif ref_type == "rate_limit":
             effective_ref_rule = dict(ref_rule)
             if rate_limit_per_minute_override is not None:
                 effective_ref_rule["max_requests_per_minute"] = rate_limit_per_minute_override
             ref_reasons, _ = _apply_rate_limit(
-                effective_ref_rule, request, state=state, agent_id=agent_id, now=now, dry_run=True
+                effective_ref_rule,
+                request,
+                state=state,
+                agent_id=agent_id,
+                session_id=session_id,
+                now=now,
+                dry_run=True,
             )
         elif ref_type == "file_access":
             ref_reasons, _ = _apply_file_access(ref_rule, request)
@@ -509,6 +543,7 @@ def _apply_composite(
                 request,
                 state=state,
                 agent_id=agent_id,
+                session_id=session_id,
                 now=now,
                 all_rules_by_name=all_rules_by_name,
                 visited=next_visited,
@@ -566,6 +601,7 @@ def evaluate(
     tracker = state or RateLimitTracker(persist_path=None)
     evaluation_now = now if now is not None else datetime.now(timezone.utc)
     agent_id = _resolve_agent_id(request)
+    session_id = _resolve_session_id(request)
     identity = registry.get(agent_id) if registry is not None else None
     policy_version = _policy_version_hash(policy) if emitter is not None else None
     decision: Decision
@@ -582,6 +618,7 @@ def evaluate(
                 policy=policy,
                 agent_id=agent_id,
                 tracker=tracker,
+                session_id=session_id,
                 decision=decision,
                 started_ns=started_ns,
                 policy_version=policy_version,
@@ -596,6 +633,7 @@ def evaluate(
             policy=policy,
             agent_id=agent_id,
             tracker=tracker,
+            session_id=session_id,
             decision=decision,
             started_ns=started_ns,
             policy_version=policy_version,
@@ -611,6 +649,7 @@ def evaluate(
             policy=policy,
             agent_id=agent_id,
             tracker=tracker,
+            session_id=session_id,
             decision=decision,
             started_ns=started_ns,
             policy_version=policy_version,
@@ -660,13 +699,17 @@ def evaluate(
                         has_daily_budget = isinstance(rule_for_eval.get("daily_budget"), int | float)
                         if has_daily_budget and cached_agent_spent is None:
                             cached_agent_spent = tracker.get_agent_budget_spent(
-                                agent_id, window_seconds=86400, now=evaluation_now
+                                agent_id,
+                                window_seconds=86400,
+                                session_id=session_id,
+                                now=evaluation_now,
                             )
                         rule_reasons, checked = handler(
                             rule_for_eval,
                             request,
                             state=tracker,
                             agent_id=agent_id,
+                            session_id=session_id,
                             agent_budget_spent=cached_agent_spent if has_daily_budget else None,
                         )
                     except Exception:
@@ -681,6 +724,7 @@ def evaluate(
                             request,
                             state=tracker,
                             agent_id=agent_id,
+                            session_id=session_id,
                             now=evaluation_now,
                         )
                     except Exception:
@@ -694,6 +738,7 @@ def evaluate(
                         request,
                         state=tracker,
                         agent_id=agent_id,
+                        session_id=session_id,
                         now=evaluation_now,
                         all_rules_by_name=all_rules_by_name,
                         visited=set(),
@@ -724,7 +769,12 @@ def evaluate(
         cost = _coerce_cost(request.get("cost"))
         if cost is not None and cost > 0:
             try:
-                tracker.record_spend(agent_id, cost, timestamp=evaluation_now)
+                tracker.record_spend(
+                    agent_id,
+                    cost,
+                    timestamp=evaluation_now,
+                    session_id=session_id,
+                )
             except Exception:
                 reasons.append("state_error: rate limit state unavailable, denying for safety")
                 allowed = False
@@ -736,6 +786,7 @@ def evaluate(
         policy=policy,
         agent_id=agent_id,
         tracker=tracker,
+        session_id=session_id,
         decision=decision,
         started_ns=started_ns,
         policy_version=policy_version,
@@ -750,6 +801,7 @@ def _emit_event(
     policy: dict[str, Any] | None,
     agent_id: str,
     tracker: RateLimitTracker,
+    session_id: str,
     decision: Decision,
     started_ns: int,
     policy_version: str | None,
@@ -763,7 +815,7 @@ def _emit_event(
         safe_cost = cost if cost is not None else 0.0
 
         try:
-            state_snapshot = _build_state_snapshot(tracker, agent_id)
+            state_snapshot = _build_state_snapshot(tracker, agent_id, session_id)
         except Exception:
             state_snapshot = {"error": "state_unavailable"}
 

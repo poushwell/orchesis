@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, Response
 
 from orchesis.config import PolicyWatcher, load_policy
 from orchesis.engine import evaluate
+from orchesis.policy_store import PolicyStore
 from orchesis.state import RateLimitTracker
 
 
@@ -51,6 +52,19 @@ def _extract_cost(request: Request, body_json: dict[str, Any] | None) -> float:
     return 0.0
 
 
+def _extract_context(request: Request, body_json: dict[str, Any] | None) -> dict[str, Any]:
+    context: dict[str, Any] = {"method": request.method, "path": request.url.path}
+    if body_json and isinstance(body_json.get("context"), dict):
+        context.update(body_json["context"])
+    agent_header = request.headers.get("x-agent")
+    if isinstance(agent_header, str) and agent_header.strip():
+        context["agent"] = agent_header.strip()
+    session_header = request.headers.get("x-session")
+    if isinstance(session_header, str) and session_header.strip():
+        context["session"] = session_header.strip()
+    return context
+
+
 def create_proxy_app(
     policy: dict[str, Any],
     *,
@@ -64,18 +78,31 @@ def create_proxy_app(
     if transport is None and backend_app is not None:
         transport = httpx.ASGITransport(app=backend_app)
     state_tracker = RateLimitTracker(persist_path=None)
+    store = PolicyStore()
     current_policy = policy
+    current_registry = None
     watcher: PolicyWatcher | None = None
     current_policy_hash = ""
+
+    def _resolve_registry_for_policy(candidate_policy: dict[str, Any], store_version: Any) -> Any:
+        has_identity_config = "agents" in candidate_policy or "default_trust_tier" in candidate_policy
+        return store_version.registry if has_identity_config else None
+
     if policy_path is not None:
-        current_policy_hash = PolicyWatcher(policy_path, lambda _policy: None).current_hash()
+        current_version = store.load(policy_path)
+        current_policy = current_version.policy
+        current_registry = _resolve_registry_for_policy(current_policy, current_version)
+        current_policy_hash = current_version.version_id
 
         def _on_reload(new_policy: dict[str, Any]) -> None:
-            nonlocal current_policy
-            current_policy = new_policy
+            _ = new_policy
+            nonlocal current_policy, current_registry
+            version = store.load(policy_path)
+            current_policy = version.policy
+            current_registry = _resolve_registry_for_policy(current_policy, version)
 
         watcher = PolicyWatcher(policy_path, _on_reload)
-        watcher._last_hash = current_policy_hash
+        watcher._last_hash = PolicyWatcher(policy_path, lambda _policy: None).current_hash()
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
@@ -111,9 +138,14 @@ def create_proxy_app(
             "tool": _extract_tool(request, body_json),
             "params": _extract_params(request, body_json),
             "cost": _extract_cost(request, body_json),
-            "context": {"method": request.method, "path": request.url.path},
+            "context": _extract_context(request, body_json),
         }
-        decision = evaluate(eval_request, current_policy, state=state_tracker)
+        decision = evaluate(
+            eval_request,
+            current_policy,
+            state=state_tracker,
+            registry=current_registry,
+        )
 
         if not decision.allowed:
             return JSONResponse(
