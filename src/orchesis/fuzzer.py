@@ -5,12 +5,14 @@ from __future__ import annotations
 import random
 import string
 import time
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any
 
+from orchesis.coverage import CoverageReport, CoverageTracker
 from orchesis.engine import evaluate
 from orchesis.state import RateLimitTracker
 
@@ -35,15 +37,25 @@ class FuzzReport:
     bypass_rate: float
     categories_tested: list[str]
     duration_seconds: float
+    coverage: CoverageReport | None = None
 
 
 class SyntheticFuzzer:
     """Generates adversarial requests to find policy bypasses."""
 
-    def __init__(self, policy: dict[str, Any], registry=None, seed: int = 42):
+    def __init__(
+        self,
+        policy: dict[str, Any],
+        registry=None,
+        seed: int = 42,
+        coverage: CoverageTracker | None = None,
+    ):
         self._policy = policy
         self._registry = registry
+        self._seed = seed
         self._rng = random.Random(seed)
+        self._provided_coverage = coverage
+        self._coverage = coverage or CoverageTracker()
         self._max_cost_hint, self._daily_budget_hint, self._rate_limit_hint = self._extract_limits(policy)
         self._rate_limit_probe_seen = 0
         self._category_counts: dict[str, int] = {}
@@ -61,18 +73,31 @@ class SyntheticFuzzer:
     def category_counts(self) -> dict[str, int]:
         return dict(self._category_counts)
 
+    @property
+    def categories(self) -> list[str]:
+        return [name for name, _ in self._generators]
+
+    def coverage_suggestions(self, report: CoverageReport) -> list[str]:
+        return self._coverage.suggestions(report)
+
     def run(self, num_requests: int = 1000) -> FuzzReport:
         """Generate and evaluate adversarial requests."""
         started = time.perf_counter()
+        self._reset_run_state()
         bypasses: list[FuzzResult] = []
         denied_correctly = 0
         allowed_correctly = 0
-        self._category_counts = {}
         tracker = RateLimitTracker(persist_path=None)
 
         for _ in range(max(0, num_requests)):
             request, expected_deny, category, mutation = self._generate_request()
             decision = evaluate(request, self._policy, registry=self._registry, state=tracker)
+            self._coverage.record(
+                decision,
+                category=category,
+                agent_tier=self._resolve_agent_tier(request),
+                request=request,
+            )
             is_bypass = expected_deny and decision.allowed
             result = FuzzResult(
                 request=request,
@@ -93,6 +118,11 @@ class SyntheticFuzzer:
         total = max(0, num_requests)
         bypass_rate = (len(bypasses) / total) if total else 0.0
         duration = max(0.0, time.perf_counter() - started)
+        coverage = self._coverage.report(
+            all_rules=self._all_policy_rules(),
+            all_categories=[name for name, _ in self._generators],
+            all_tiers=["BLOCKED", "INTERN", "ASSISTANT", "OPERATOR", "PRINCIPAL"],
+        )
         return FuzzReport(
             total_requests=total,
             bypasses=bypasses,
@@ -101,7 +131,132 @@ class SyntheticFuzzer:
             bypass_rate=bypass_rate,
             categories_tested=sorted(self._category_counts.keys()),
             duration_seconds=duration,
+            coverage=coverage,
         )
+
+    def run_adaptive(self, num_requests: int = 1000) -> FuzzReport:
+        """Adaptive fuzzing that prioritizes under-covered categories."""
+        started = time.perf_counter()
+        self._reset_run_state()
+        total = max(0, num_requests)
+        categories = [name for name, _ in self._generators]
+        bootstrap = min(total, max(len(categories), int(total * 0.2))) if total else 0
+        tracker = RateLimitTracker(persist_path=None)
+        bypasses: list[FuzzResult] = []
+        denied_correctly = 0
+        allowed_correctly = 0
+        generators = dict(self._generators)
+
+        def _evaluate_one(request: dict[str, Any], expected_deny: bool, category: str, mutation: str) -> None:
+            nonlocal denied_correctly, allowed_correctly
+            decision = evaluate(request, self._policy, registry=self._registry, state=tracker)
+            self._coverage.record(
+                decision,
+                category=category,
+                agent_tier=self._resolve_agent_tier(request),
+                request=request,
+            )
+            is_bypass = expected_deny and decision.allowed
+            result = FuzzResult(
+                request=request,
+                decision_allowed=decision.allowed,
+                decision_reasons=list(decision.reasons),
+                expected_deny=expected_deny,
+                is_bypass=is_bypass,
+                category=category,
+                mutation=mutation,
+            )
+            if is_bypass:
+                bypasses.append(result)
+            elif expected_deny and not decision.allowed:
+                denied_correctly += 1
+            else:
+                allowed_correctly += 1
+
+        for idx in range(bootstrap):
+            category = categories[idx % len(categories)]
+            request, mutation = generators[category]()
+            expected_deny = self._expected_deny(category, request, mutation)
+            self._category_counts[category] = self._category_counts.get(category, 0) + 1
+            _evaluate_one(request, expected_deny, category, mutation)
+
+        first_report = self._coverage.report(
+            all_rules=self._all_policy_rules(),
+            all_categories=categories,
+            all_tiers=["BLOCKED", "INTERN", "ASSISTANT", "OPERATOR", "PRINCIPAL"],
+        )
+        remaining = max(0, total - bootstrap)
+        if remaining:
+            current_counts = Counter(self._category_counts)
+            weights: list[float] = []
+            for category in categories:
+                count = current_counts.get(category, 0)
+                weight = 1.0 / (1.0 + float(count))
+                if category in first_report.categories_missing:
+                    weight *= 4.0
+                weights.append(weight)
+
+            for _ in range(remaining):
+                category = self._rng.choices(categories, weights=weights, k=1)[0]
+                request, mutation = generators[category]()
+                expected_deny = self._expected_deny(category, request, mutation)
+                self._category_counts[category] = self._category_counts.get(category, 0) + 1
+                _evaluate_one(request, expected_deny, category, mutation)
+
+        bypass_rate = (len(bypasses) / total) if total else 0.0
+        duration = max(0.0, time.perf_counter() - started)
+        coverage = self._coverage.report(
+            all_rules=self._all_policy_rules(),
+            all_categories=categories,
+            all_tiers=["BLOCKED", "INTERN", "ASSISTANT", "OPERATOR", "PRINCIPAL"],
+        )
+        return FuzzReport(
+            total_requests=total,
+            bypasses=bypasses,
+            denied_correctly=denied_correctly,
+            allowed_correctly=allowed_correctly,
+            bypass_rate=bypass_rate,
+            categories_tested=sorted(self._category_counts.keys()),
+            duration_seconds=duration,
+            coverage=coverage,
+        )
+
+    def _reset_run_state(self) -> None:
+        self._rng = random.Random(self._seed)
+        self._coverage = self._provided_coverage or CoverageTracker()
+        self._rate_limit_probe_seen = 0
+        self._category_counts = {}
+
+    def _all_policy_rules(self) -> list[str]:
+        names: list[str] = []
+        rules = self._policy.get("rules")
+        if not isinstance(rules, list):
+            return names
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            rule_type = rule.get("type")
+            rule_name = rule.get("name")
+            if isinstance(rule_type, str) and rule_type:
+                names.append(rule_type)
+            elif isinstance(rule_name, str) and rule_name:
+                names.append(rule_name)
+        return sorted(set(names))
+
+    def _resolve_agent_tier(self, request: dict[str, Any]) -> str:
+        if self._registry is None:
+            return ""
+        context = request.get("context")
+        if not isinstance(context, dict):
+            return ""
+        agent = context.get("agent")
+        if not isinstance(agent, str):
+            return ""
+        try:
+            identity = self._registry.get(agent)
+            return identity.trust_tier.name
+        except Exception:
+            return ""
 
     def _extract_limits(self, policy: dict[str, Any]) -> tuple[float | None, float | None, int | None]:
         max_cost: float | None = None

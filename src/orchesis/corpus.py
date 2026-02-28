@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import math
 from pathlib import Path
 from typing import Any
 
@@ -141,4 +142,78 @@ def test_corpus_regression(entry):
             "fixed": fixed,
             "unfixed": len(entries) - fixed,
             "by_category": by_category,
+        }
+
+    def quality_report(self) -> dict[str, Any]:
+        """Analyze corpus quality and identify coverage gaps."""
+        entries = self.load_all()
+        total = len(entries)
+        fixed = sum(1 for entry in entries if entry.fixed)
+        categories: dict[str, int] = {}
+        for entry in entries:
+            categories[entry.category] = categories.get(entry.category, 0) + 1
+
+        expected_categories = [
+            "path_traversal",
+            "sql_injection",
+            "cost_manipulation",
+            "identity_spoofing",
+            "regex_evasion",
+            "rate_limit",
+            "composite",
+        ]
+        gaps = [name for name in expected_categories if categories.get(name, 0) == 0]
+
+        if total == 0:
+            balance = 0.0
+        else:
+            ideal = 1.0 / len(expected_categories)
+            distance = 0.0
+            for name in expected_categories:
+                observed = categories.get(name, 0) / total
+                distance += abs(observed - ideal)
+            balance = max(0.0, 1.0 - (distance / 2.0))
+
+        newest: datetime | None = None
+        for entry in entries:
+            raw = entry.discovered_at
+            if not isinstance(raw, str):
+                continue
+            try:
+                dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            newest = dt if newest is None else max(newest, dt)
+        if newest is None:
+            staleness_days = 0
+        else:
+            staleness_days = max(0, (datetime.now(timezone.utc) - newest).days)
+
+        total_mutations = 0
+        for entry in entries:
+            request = entry.request if isinstance(entry.request, dict) else {}
+            mutations = request.get("mutations")
+            if isinstance(mutations, list):
+                total_mutations += len(mutations)
+        avg_mutations = (total_mutations / total) if total else 0.0
+
+        suggestions: list[str] = []
+        for gap in gaps:
+            suggestions.append(f"Add {gap} bypass entries")
+        if categories:
+            threshold = max(1, math.ceil(total / (len(expected_categories) * 2)))
+            for category, count in sorted(categories.items()):
+                if count < threshold:
+                    suggestions.append(f"{category} underrepresented ({count} entry)")
+
+        return {
+            "total_entries": total,
+            "fixed": fixed,
+            "unfixed": total - fixed,
+            "categories": categories,
+            "category_balance": round(balance, 2),
+            "gaps": gaps,
+            "staleness_days": staleness_days,
+            "avg_mutations_per_entry": round(avg_mutations, 2),
+            "suggestions": suggestions,
         }

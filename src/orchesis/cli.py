@@ -29,6 +29,7 @@ from orchesis.fuzzer import SyntheticFuzzer, update_fuzz_metadata
 from orchesis.invariants import InvariantChecker
 from orchesis.logger import read_decisions
 from orchesis.corpus import RegressionCorpus
+from orchesis.coverage import CoverageReport
 from orchesis.policy_store import PolicyStore
 from orchesis.plugins import load_plugins_for_policy
 from orchesis.replay import ReplayEngine, read_events_from_jsonl
@@ -433,6 +434,44 @@ def _normalize_plugin_modules(raw_modules: tuple[str, ...]) -> list[str]:
     return normalized
 
 
+def _print_coverage_report(click_module, coverage: CoverageReport, fuzzer: SyntheticFuzzer) -> None:  # noqa: ANN001
+    click_module.echo("")
+    click_module.echo("Coverage Report:")
+    total_rules = len(coverage.rules_triggered) + len(coverage.rules_never_triggered)
+    triggered = total_rules - len(coverage.rules_never_triggered)
+    click_module.echo(
+        f"  Rules: {triggered}/{total_rules} triggered ({coverage.rule_coverage_pct:.1f}%)"
+    )
+    for rule in sorted(coverage.rules_triggered):
+        click_module.echo(f"    ✓ {rule} ({coverage.rules_triggered[rule]} hits)")
+    for rule in coverage.rules_never_triggered:
+        click_module.echo(f"    ✗ {rule} (0 hits)")
+
+    all_categories = fuzzer.categories
+    tested_categories = len([cat for cat in all_categories if coverage.categories_tested.get(cat, 0) > 0])
+    click_module.echo(
+        f"  Categories: {tested_categories}/{len(all_categories)} tested "
+        f"({coverage.category_coverage_pct:.1f}%)"
+    )
+    total_category_samples = max(1, sum(coverage.categories_tested.values()))
+    for category in all_categories:
+        count = coverage.categories_tested.get(category, 0)
+        pct = (count / total_category_samples) * 100.0
+        suffix = " <- gap" if count == 0 else ""
+        click_module.echo(f"    {category}: {pct:.0f}%{suffix}")
+
+    tested_tiers = len([tier for tier in coverage.tier_coverage if coverage.tier_coverage[tier] > 0])
+    click_module.echo(f"  Trust tiers: {tested_tiers}/5 tested")
+    for tier in coverage.tiers_never_tested:
+        click_module.echo(f"    ✗ {tier} never tested")
+
+    suggestions = fuzzer.coverage_suggestions(coverage)
+    if suggestions:
+        click_module.echo("  Suggestions:")
+        for idx, suggestion in enumerate(suggestions[:5], start=1):
+            click_module.echo(f"    {idx}. {suggestion}")
+
+
 @main.command("plugins")
 @click.option("--policy", "policy_path", type=click.Path(exists=True), default=None)
 @click.option("--plugins", "plugin_modules", multiple=True)
@@ -466,7 +505,16 @@ def plugins_command(policy_path: str | None, plugin_modules: tuple[str, ...]) ->
 @click.option("--count", "count", type=int, default=1000)
 @click.option("--seed", "seed", type=int, default=42)
 @click.option("--save-bypasses", "save_bypasses", is_flag=True, default=False)
-def fuzz(policy_path: str, count: int, seed: int, save_bypasses: bool) -> None:
+@click.option("--coverage", "show_coverage", is_flag=True, default=False)
+@click.option("--adaptive", "adaptive_mode", is_flag=True, default=False)
+def fuzz(
+    policy_path: str,
+    count: int,
+    seed: int,
+    save_bypasses: bool,
+    show_coverage: bool,
+    adaptive_mode: bool,
+) -> None:
     """Run synthetic adversarial fuzzing against policy."""
     try:
         policy = load_policy(policy_path)
@@ -476,7 +524,11 @@ def fuzz(policy_path: str, count: int, seed: int, save_bypasses: bool) -> None:
     has_identity_config = "agents" in policy or "default_trust_tier" in policy
     registry = load_agent_registry(policy) if has_identity_config else None
     fuzzer = SyntheticFuzzer(policy, registry=registry, seed=seed)
-    report = fuzzer.run(num_requests=max(1, count))
+    report = (
+        fuzzer.run_adaptive(num_requests=max(1, count))
+        if adaptive_mode
+        else fuzzer.run(num_requests=max(1, count))
+    )
     DEFAULT_FUZZ_RUNS_PATH.parent.mkdir(parents=True, exist_ok=True)
     DEFAULT_FUZZ_RUNS_PATH.write_text(
         (
@@ -523,6 +575,8 @@ def fuzz(policy_path: str, count: int, seed: int, save_bypasses: bool) -> None:
     click.echo("  Categories tested:")
     for category in sorted(fuzzer.category_counts):
         click.echo(f"    {category}: {fuzzer.category_counts[category]}")
+    if show_coverage and report.coverage is not None:
+        _print_coverage_report(click, report.coverage, fuzzer)
     if save_bypasses and report.bypasses:
         corpus = RegressionCorpus()
         created = [corpus.add_bypass(item) for item in report.bypasses]
@@ -782,10 +836,11 @@ def torture(policy_path: str, duration: int, agents: int) -> None:
 @main.command()
 @click.option("--stats", "show_stats", is_flag=True, default=False)
 @click.option("--generate-tests", "generate_tests", is_flag=True, default=False)
-def corpus(show_stats: bool, generate_tests: bool) -> None:
+@click.option("--quality", "show_quality", is_flag=True, default=False)
+def corpus(show_stats: bool, generate_tests: bool, show_quality: bool) -> None:
     """Manage regression corpus entries and generated tests."""
     manager = RegressionCorpus()
-    if not show_stats and not generate_tests:
+    if not show_stats and not generate_tests and not show_quality:
         show_stats = True
 
     if show_stats:
@@ -804,6 +859,18 @@ def corpus(show_stats: bool, generate_tests: bool) -> None:
         total = manager.stats()["total"]
         click.echo(f"Generated {target}")
         click.echo(f"{total} regression test cases from corpus")
+    if show_quality:
+        quality = manager.quality_report()
+        click.echo("Corpus Quality:")
+        click.echo(f"  Entries: {quality['total_entries']} ({quality['fixed']} fixed)")
+        click.echo(f"  Balance: {quality['category_balance']}")
+        gaps = quality["gaps"]
+        click.echo(f"  Gaps: {', '.join(gaps) if gaps else 'none'}")
+        suggestions = quality["suggestions"]
+        if suggestions:
+            click.echo("  Suggestions:")
+            for idx, item in enumerate(suggestions[:5], start=1):
+                click.echo(f"    {idx}. {item}")
 
 
 @main.command()
