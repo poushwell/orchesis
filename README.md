@@ -1,5 +1,10 @@
 # Orchesis — Agent Runtime Governance Layer
 
+![Tests](https://github.com/YOUR_USERNAME/orchesis/actions/workflows/ci.yml/badge.svg)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+![Version](https://img.shields.io/badge/version-0.5.0-orange)
+
 > Policy-based verification for AI agent tool calls.  
 > Deterministic. Fail-closed. Framework-agnostic.
 
@@ -13,6 +18,19 @@ AI agents can execute powerful tools, but most systems still lack runtime guardr
 pip install orchesis
 orchesis init
 orchesis verify examples/request.json --policy examples/policy.yaml
+```
+
+## Docker
+
+```bash
+# Clone and start
+git clone https://github.com/YOUR_USERNAME/orchesis.git
+cd orchesis
+cp .env.example .env
+docker compose up -d
+
+# API available at http://localhost:8080
+# MCP proxy at http://localhost:9000
 ```
 
 ## 30-Second Demo
@@ -98,12 +116,6 @@ Ready-to-use MCP proxy examples:
 - Claude Code config: `examples/claude_code_mcp_config.json`
 - Production policy baseline: `examples/production_policy.yaml`
 
-## Docker
-
-```bash
-docker compose up -d
-```
-
 ## CLI Reference
 
 | Command | Description |
@@ -128,11 +140,35 @@ docker compose up -d
 ## Testing
 
 ```bash
-pytest                                    # 310 tests
+pytest                                    # 364 tests
 orchesis fuzz --policy policy.yaml        # synthetic fuzzer
 orchesis invariants --policy policy.yaml  # formal invariants
 orchesis scenarios --policy policy.yaml   # adversarial scenarios
 ```
+
+## Project Status
+
+Orchesis is in active development. Current: v0.5.0 (Beta).
+
+| Metric | Value |
+|--------|-------|
+| Tests | 364 |
+| Attack corpus | 14 entries |
+| Formal invariants | 9 |
+| Rule types | 7 built-in + plugin system |
+| Trust tiers | 5 (BLOCKED -> PRINCIPAL) |
+| API endpoints | 14 |
+| CLI commands | 18 |
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Security
+
+See [docs/SECURITY.md](docs/SECURITY.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+
+To report a vulnerability, see SECURITY.md.
 
 ## License
 

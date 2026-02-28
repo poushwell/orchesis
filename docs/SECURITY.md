@@ -36,7 +36,35 @@ Runtime invariants cover:
 - Auto-generated regression tests ensure fixed issues stay fixed
 - Corpus stats are included in reliability reporting
 
-## Reporting vulnerabilities
+## Reporting Vulnerabilities
 
-Please open a private security report through your organization channel or repository security contact.  
-Include reproduction steps, policy snippet, request payload, and observed vs expected decision.
+If you find a security vulnerability in Orchesis:
+
+1. **DO NOT** open a public GitHub issue
+2. Email: security@orchesis.dev (or create a private advisory)
+3. Include:
+   - Description of the vulnerability
+   - Steps to reproduce
+   - Expected vs actual behavior
+   - Orchesis version
+4. We will respond within 48 hours
+5. Fix will be released with credit (unless you prefer anonymity)
+
+## Security Testing
+
+We encourage security research on Orchesis:
+```bash
+# Run the fuzzer
+orchesis fuzz --policy your_policy.yaml --count 10000 --save-bypasses
+
+# Run mutation engine
+orchesis mutate --policy your_policy.yaml --count 5000
+
+# Check invariants
+orchesis invariants --policy your_policy.yaml
+
+# Run adversarial scenarios
+orchesis scenarios --policy your_policy.yaml
+```
+
+Any bypass found through these tools is a valid report.
