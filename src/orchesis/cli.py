@@ -3,7 +3,7 @@
 import json
 from collections import Counter
 from dataclasses import asdict, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -25,16 +25,21 @@ from orchesis.logger import read_decisions
 from orchesis.corpus import RegressionCorpus
 from orchesis.policy_store import PolicyStore
 from orchesis.replay import ReplayEngine, read_events_from_jsonl
+from orchesis.reliability import ReliabilityReportGenerator
 from orchesis.scenarios import AdversarialScenarios
 from orchesis.signing import generate_keypair, sign_entry, verify_entry
 from orchesis.state import RateLimitTracker
 from orchesis.telemetry import InMemoryEmitter, JsonlEmitter
+from orchesis.mutations import MutationEngine
 
 DEFAULT_KEYS_DIR = Path(".orchesis") / "keys"
 DEFAULT_PRIVATE_KEY_PATH = DEFAULT_KEYS_DIR / "private.pem"
 DEFAULT_PUBLIC_KEY_PATH = DEFAULT_KEYS_DIR / "public.pem"
 DEFAULT_STATE_PATH = Path(".orchesis") / "state.jsonl"
 DEFAULT_DECISIONS_PATH = Path("decisions.jsonl")
+DEFAULT_FUZZ_RUNS_PATH = Path(".orchesis") / "fuzz_runs.jsonl"
+DEFAULT_MUTATION_RUNS_PATH = Path(".orchesis") / "mutation_runs.jsonl"
+DEFAULT_REPLAY_RUNS_PATH = Path(".orchesis") / "replay_runs.jsonl"
 
 
 @click.group()
@@ -280,6 +285,26 @@ def fuzz(policy_path: str, count: int, seed: int, save_bypasses: bool) -> None:
     registry = load_agent_registry(policy) if has_identity_config else None
     fuzzer = SyntheticFuzzer(policy, registry=registry, seed=seed)
     report = fuzzer.run(num_requests=max(1, count))
+    DEFAULT_FUZZ_RUNS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DEFAULT_FUZZ_RUNS_PATH.write_text(
+        (
+            DEFAULT_FUZZ_RUNS_PATH.read_text(encoding="utf-8")
+            if DEFAULT_FUZZ_RUNS_PATH.exists()
+            else ""
+        )
+        + json.dumps(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "total_requests": report.total_requests,
+                "bypasses_found": len(report.bypasses),
+                "bypass_rate": report.bypass_rate,
+                "seed": seed,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     click.echo("Fuzzer Report:")
     click.echo(f"  Total requests: {report.total_requests}")
     click.echo(f"  Correctly denied: {report.denied_correctly}")
@@ -327,6 +352,51 @@ def scenarios(policy_path: str) -> None:
         click.echo(
             f"  {marker} {result.name:<24} — {result.steps_total} steps, {suffix}"
         )
+
+
+@main.command()
+@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
+@click.option("--count", "count", type=int, default=1000)
+@click.option("--seed", "seed", type=int, default=42)
+def mutate(policy_path: str, count: int, seed: int) -> None:
+    """Run mutation engine against policy."""
+    try:
+        policy = load_policy(policy_path)
+    except (ValueError, YAMLError, OSError) as error:
+        raise click.ClickException(f"Failed to load policy: {error}") from error
+
+    corpus = RegressionCorpus()
+    engine = MutationEngine(corpus, seed=seed)
+    mutations = engine.generate(count=max(1, count))
+    bypasses = 0
+    for mutation in mutations:
+        decision = evaluate(mutation.request, policy)
+        if decision.allowed:
+            bypasses += 1
+            click.echo(
+                f"BYPASS: {mutation.category} - {mutation.mutation_type}: {mutation.description}"
+            )
+
+    click.echo(f"Mutation results: {len(mutations)} tested, {bypasses} bypasses")
+    DEFAULT_MUTATION_RUNS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DEFAULT_MUTATION_RUNS_PATH.write_text(
+        (
+            DEFAULT_MUTATION_RUNS_PATH.read_text(encoding="utf-8")
+            if DEFAULT_MUTATION_RUNS_PATH.exists()
+            else ""
+        )
+        + json.dumps(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "mutations_tested": len(mutations),
+                "bypasses_found": bypasses,
+                "seed": seed,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 @main.command()
@@ -584,6 +654,25 @@ def replay(log_path: str, policy_path: str, strict: bool) -> None:
             )
             for reason in drift.drift_reasons:
                 click.echo(f"    - {reason}")
+    DEFAULT_REPLAY_RUNS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DEFAULT_REPLAY_RUNS_PATH.write_text(
+        (
+            DEFAULT_REPLAY_RUNS_PATH.read_text(encoding="utf-8")
+            if DEFAULT_REPLAY_RUNS_PATH.exists()
+            else ""
+        )
+        + json.dumps(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "total": report.total,
+                "matches": report.matches,
+                "drifts": report.drifts,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 @main.command()
@@ -626,3 +715,15 @@ def forensic(agent_id: str, since: int | None, log_path: str) -> None:
         )
         for reason in event.reasons:
             click.echo(f"    -> {reason}")
+
+
+@main.command("reliability-report")
+@click.option("--format", "output_format", type=click.Choice(["md", "json"]), default="md")
+def reliability_report(output_format: str) -> None:
+    """Generate reliability report."""
+    generator = ReliabilityReportGenerator()
+    report = generator.generate()
+    if output_format == "json":
+        click.echo(generator.to_json(report))
+        return
+    click.echo(generator.to_markdown(report))

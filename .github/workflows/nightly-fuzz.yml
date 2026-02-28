@@ -1,0 +1,67 @@
+name: Nightly Fuzzer
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e .[dev]
+
+      - name: Prime decision log
+        run: |
+          orchesis init
+          orchesis verify request.json --policy policy.yaml || true
+
+      - name: Run fuzzer (10,000 requests)
+        run: |
+          orchesis fuzz --policy examples/production_policy.yaml \
+            --count 10000 --seed ${{ github.run_number }} \
+            --save-bypasses 2>&1 | tee fuzz_report.txt
+
+      - name: Run mutation engine
+        run: |
+          orchesis mutate --policy examples/production_policy.yaml \
+            --count 1000 --seed ${{ github.run_number }} 2>&1 | tee mutation_report.txt
+
+      - name: Run replay verification
+        run: |
+          orchesis replay --log decisions.jsonl --policy examples/production_policy.yaml --strict \
+            2>&1 | tee replay_report.txt
+
+      - name: Run full test suite
+        run: pytest --tb=short -q
+
+      - name: Generate corpus regression tests
+        run: orchesis corpus --generate-tests
+
+      - name: Run corpus regression
+        run: pytest tests/test_corpus_regression.py -v
+
+      - name: Corpus stats
+        run: orchesis corpus --stats | tee corpus_stats.txt
+
+      - name: Reliability report
+        run: orchesis reliability-report --format md | tee reliability_report.md
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-fuzz-${{ github.run_number }}
+          path: |
+            fuzz_report.txt
+            mutation_report.txt
+            replay_report.txt
+            corpus_stats.txt
+            reliability_report.md

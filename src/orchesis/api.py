@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -19,6 +20,7 @@ from orchesis.engine import evaluate
 from orchesis.events import EventBus
 from orchesis.metrics import MetricsCollector
 from orchesis.policy_store import PolicyStore
+from orchesis.reliability import ReliabilityReportGenerator
 from orchesis.state import RateLimitTracker
 from orchesis.telemetry import JsonlEmitter
 
@@ -279,7 +281,7 @@ def create_api_app(
         )
         corpus_stats = corpus.stats()
         return {
-            "version": "0.3.1",
+            "version": "0.4.0",
             "uptime_seconds": int(max(0.0, time.perf_counter() - started_at)),
             "policy_version": app.state.current_version.version_id,
             "total_decisions": total_decisions,
@@ -335,6 +337,15 @@ def create_api_app(
         audit = _audit_engine()
         events = [event.__dict__ for event in audit.timeline(agent_id, hours=hours)]
         return {"agent_id": agent_id, "events": events}
+
+    @app.get("/api/v1/reliability")
+    def reliability(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        generator = ReliabilityReportGenerator(
+            corpus_path="tests/corpus",
+            decisions_log=app.state.decisions_log,
+        )
+        return json.loads(generator.to_json(generator.generate()))
 
     @app.post("/api/v1/evaluate")
     def evaluate_remote(

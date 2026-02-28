@@ -16,7 +16,7 @@ def test_health_endpoint() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "healthy"
-    assert payload["version"] == "0.3.1"
+    assert payload["version"] == "0.4.0"
     assert "policy_version" in payload
     assert "uptime_seconds" in payload
     assert "total_decisions" in payload

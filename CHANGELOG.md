@@ -1,3 +1,16 @@
+## [0.4.0] - 2026-02-28
+
+### Added
+- Mutation engine with 7 mutation strategies
+- Nightly CI fuzzer pipeline (GitHub Actions)
+- Reliability Report generator (markdown + JSON)
+- HTTP Control API with token auth
+- Event bus with pub/sub
+- Webhook notifications with HMAC signing
+- Prometheus-compatible metrics endpoint
+- `/health` and `/status` endpoints
+- CLI: `orchesis serve`, `orchesis reliability-report`
+
 ## [0.3.1] - 2026-02-28
 
 ### Added
