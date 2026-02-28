@@ -11,10 +11,14 @@
 - 9 formal runtime invariants
 - Comprehensive documentation suite
 - PyPI-ready package metadata with release classifiers
+- Policy template pack (`minimal`, `strict`, `mcp_development`, `multi_agent`)
+- `orchesis new` project scaffolding command
+- `orchesis doctor` environment and policy diagnostics command
 
 ### Changed
 - Proxy/API operational logging now uses structured JSON format
 - Debug trace is available via CLI `--debug` and API `debug: true`
+- Release docs and CLI onboarding flow finalized for v0.5.0
 
 ## [0.4.0] - 2026-02-28
 

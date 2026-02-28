@@ -34,6 +34,7 @@ from orchesis.state import RateLimitTracker
 from orchesis.telemetry import InMemoryEmitter, JsonlEmitter
 from orchesis.mutations import MutationEngine
 from orchesis.structured_log import StructuredLogger
+from orchesis.templates import TEMPLATE_NAMES, load_template_text
 
 DEFAULT_KEYS_DIR = Path(".orchesis") / "keys"
 DEFAULT_PRIVATE_KEY_PATH = DEFAULT_KEYS_DIR / "private.pem"
@@ -49,6 +50,110 @@ OPERATIONS_LOG = StructuredLogger("cli")
 @click.group()
 def main() -> None:
     """Orchesis command line interface."""
+
+
+@main.command("new")
+@click.argument("target", type=click.Path(), default=".")
+@click.option("--template", "template_name", type=click.Choice(TEMPLATE_NAMES), default="minimal")
+@click.option("--force", is_flag=True, default=False)
+def new_project(target: str, template_name: str, force: bool) -> None:
+    """Scaffold a new Orchesis project from template."""
+    root = Path(target)
+    root.mkdir(parents=True, exist_ok=True)
+    policy_file = root / "policy.yaml"
+    request_file = root / "request.json"
+    readme_file = root / "README.md"
+    if not force:
+        existing = [str(path.name) for path in (policy_file, request_file, readme_file) if path.exists()]
+        if existing:
+            raise click.ClickException(
+                f"Refusing to overwrite existing files: {', '.join(existing)}. Use --force to overwrite."
+            )
+    policy_file.write_text(load_template_text(template_name), encoding="utf-8")
+    request_file.write_text(
+        json.dumps(
+            {
+                "tool": "read_file",
+                "params": {"path": "/data/example.txt"},
+                "cost": 0.1,
+                "context": {"agent": "cursor", "session": "new-project"},
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    readme_file.write_text(
+        (
+            "# New Orchesis Project\n\n"
+            f"- Template: `{template_name}`\n"
+            "- Validate: `orchesis validate --policy policy.yaml`\n"
+            "- Verify: `orchesis verify request.json --policy policy.yaml`\n"
+            "- Fuzz: `orchesis fuzz --policy policy.yaml`\n"
+        ),
+        encoding="utf-8",
+    )
+    click.echo(f"Created Orchesis project in {root}")
+    click.echo(f"- policy.yaml ({template_name})")
+    click.echo("- request.json")
+    click.echo("- README.md")
+
+
+@main.command("doctor")
+@click.option("--policy", "policy_path", type=click.Path(), default="policy.yaml")
+def doctor(policy_path: str) -> None:
+    """Run environment and project diagnostics."""
+    checks: list[tuple[str, bool, str]] = []
+    import importlib.util
+    import sys
+
+    py_ok = (sys.version_info.major, sys.version_info.minor) >= (3, 11)
+    checks.append(("python_version", py_ok, f"{sys.version_info.major}.{sys.version_info.minor}"))
+
+    for module_name in ("yaml", "click", "fastapi", "httpx", "mcp"):
+        checks.append(
+            (
+                f"module:{module_name}",
+                importlib.util.find_spec(module_name) is not None,
+                "importable",
+            )
+        )
+
+    policy_file = Path(policy_path)
+    if policy_file.exists():
+        try:
+            policy = load_policy(policy_file)
+            errors = validate_policy(policy)
+            checks.append(("policy_load", True, str(policy_file)))
+            checks.append(("policy_validate", len(errors) == 0, "OK" if not errors else "; ".join(errors[:2])))
+        except Exception as error:  # noqa: BLE001
+            checks.append(("policy_load", False, str(error)))
+            checks.append(("policy_validate", False, "invalid policy"))
+    else:
+        checks.append(("policy_load", False, f"missing: {policy_file}"))
+        checks.append(("policy_validate", False, "policy file not found"))
+
+    template_ok = all((Path(__file__).resolve().parent / "templates" / f"{name}.yaml").exists() for name in TEMPLATE_NAMES)
+    checks.append(("templates", template_ok, ", ".join(TEMPLATE_NAMES)))
+
+    runtime_dir = Path(".orchesis")
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    writable_probe = runtime_dir / ".doctor_probe"
+    try:
+        writable_probe.write_text("ok", encoding="utf-8")
+        writable_probe.unlink()
+        checks.append(("runtime_writable", True, str(runtime_dir)))
+    except OSError as error:
+        checks.append(("runtime_writable", False, str(error)))
+
+    click.echo("Doctor checks:")
+    all_ok = True
+    for name, ok, detail in checks:
+        marker = "✓" if ok else "✗"
+        click.echo(f"  {marker} {name}: {detail}")
+        all_ok = all_ok and ok
+    raise SystemExit(0 if all_ok else 1)
 
 
 @main.command()

@@ -1,0 +1,29 @@
+# Strict security policy — recommended for production
+version: "1.0"
+default_trust_tier: intern
+agents:
+  - id: "default_agent"
+    name: "Default Agent"
+    trust_tier: assistant
+    max_cost_per_call: 2.0
+    daily_budget: 50.0
+    rate_limit_per_minute: 30
+rules:
+  - name: file_access
+    allowed_paths: ["/data", "/tmp"]
+    denied_paths: ["/etc", "/root", "/var", "/home", "/usr"]
+  - name: sql_restriction
+    denied_operations: ["DROP", "DELETE", "TRUNCATE", "ALTER", "GRANT", "INSERT", "UPDATE"]
+  - name: budget_limit
+    max_cost_per_call: 2.0
+    daily_budget: 50.0
+  - name: rate_limit
+    max_requests_per_minute: 30
+  - name: regex_match
+    type: regex_match
+    field: params.command
+    deny_patterns:
+      - "rm\\s+-rf"
+      - "chmod\\s+777"
+      - "curl.*\\|.*bash"
+      - "wget.*\\|.*sh"
