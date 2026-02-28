@@ -1,22 +1,40 @@
-FROM python:3.11-slim AS builder
+# Multi-stage build for minimal image
+FROM python:3.12-slim AS builder
 
-WORKDIR /app
-
+WORKDIR /build
 COPY pyproject.toml README.md ./
-COPY src ./src
-COPY examples ./examples
+COPY src/ src/
+RUN pip install --no-cache-dir build && python -m build --wheel
 
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir --prefix=/install .
+FROM python:3.12-slim AS runtime
 
+LABEL maintainer="Orchesis Project"
+LABEL description="Agent Runtime Governance Layer"
 
-FROM python:3.11-slim AS runtime
+# Security: non-root user
+RUN groupadd -r orchesis && useradd -r -g orchesis orchesis
 
 WORKDIR /app
 
-COPY --from=builder /install /usr/local
-COPY examples ./examples
+# Install from wheel
+COPY --from=builder /build/dist/*.whl /tmp/
+RUN pip install --no-cache-dir /tmp/*.whl && rm /tmp/*.whl
 
-ENV PYTHONUNBUFFERED=1
+# Create runtime directories
+RUN mkdir -p /app/.orchesis/keys /app/data && \
+    chown -R orchesis:orchesis /app
 
-CMD ["orchesis", "--help"]
+# Copy defaults
+COPY examples/production_policy.yaml /app/policy.yaml
+COPY examples/ /app/examples/
+
+USER orchesis
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD python -c "import httpx; r=httpx.get('http://localhost:8080/api/v1/status'); assert r.status_code==200"
+
+EXPOSE 8080 9000
+
+# Default: run control API
+CMD ["orchesis", "serve", "--port", "8080", "--policy", "/app/policy.yaml"]

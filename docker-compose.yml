@@ -1,23 +1,54 @@
-services:
-  backend:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command: uvicorn orchesis.demo_backend:app --host 0.0.0.0 --port 8081
-    ports:
-      - "8081:8081"
+version: "3.9"
 
-  proxy:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command: uvicorn orchesis.proxy:app --host 0.0.0.0 --port 8080
+services:
+  orchesis-api:
+    build: .
+    container_name: orchesis-api
     ports:
       - "8080:8080"
-    depends_on:
-      - backend
-    environment:
-      POLICY_PATH: /app/policy.yaml
-      BACKEND_URL: http://backend:8081
     volumes:
-      - ./examples/policy.yaml:/app/policy.yaml:ro
+      - ./policy.yaml:/app/policy.yaml:ro
+      - orchesis-data:/app/.orchesis
+    environment:
+      - API_TOKEN=${ORCHESIS_API_TOKEN:-orch_sk_dev_token}
+      - LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; r=httpx.get('http://localhost:8080/api/v1/status'); exit(0 if r.status_code==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  orchesis-proxy:
+    build: .
+    container_name: orchesis-proxy
+    command: ["orchesis", "mcp-proxy", "--port", "9000", "--policy", "/app/policy.yaml"]
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./policy.yaml:/app/policy.yaml:ro
+      - orchesis-data:/app/.orchesis
+    environment:
+      - LOG_LEVEL=INFO
+    depends_on:
+      orchesis-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  orchesis-fuzzer:
+    build: .
+    container_name: orchesis-fuzzer
+    command: >
+      sh -c "orchesis fuzz --policy /app/policy.yaml --count 5000 --save-bypasses &&
+             orchesis mutate --policy /app/policy.yaml --count 1000 &&
+             orchesis invariants --policy /app/policy.yaml &&
+             orchesis reliability-report --format json"
+    volumes:
+      - ./policy.yaml:/app/policy.yaml:ro
+      - orchesis-data:/app/.orchesis
+      - ./tests/corpus:/app/tests/corpus
+    profiles:
+      - testing
+
+volumes:
+  orchesis-data:
