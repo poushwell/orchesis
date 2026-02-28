@@ -8,9 +8,11 @@ from pathlib import Path
 from typing import Any
 
 import click
+import uvicorn
 from yaml import YAMLError
 
 from orchesis.audit import AuditEngine, AuditQuery
+from orchesis.api import create_api_app
 from orchesis.config import (
     load_agent_registry,
     load_policy,
@@ -237,6 +239,29 @@ def rollback(policy_path: str) -> None:
         return
     click.echo(f"Rolled back: {current.version_id[:12]} -> {rolled.version_id[:12]}")
     click.echo(f"Current policy version: {rolled.version_id[:12]}")
+
+
+@main.command()
+@click.option("--port", type=int, default=8080)
+@click.option("--policy", "policy_path", type=click.Path(exists=True), default="policy.yaml")
+def serve(port: int, policy_path: str) -> None:
+    """Run Orchesis control API server."""
+    try:
+        policy = load_policy(policy_path)
+    except (ValueError, YAMLError, OSError) as error:
+        raise click.ClickException(f"Failed to load policy: {error}") from error
+
+    store = PolicyStore()
+    version = store.load(policy_path)
+    registry = load_agent_registry(policy)
+    click.echo(f"Orchesis Control API running on http://0.0.0.0:{port}")
+    click.echo(f"Policy: {policy_path} (version {version.version_id[:12]})")
+    click.echo(
+        f"Agents: {len(registry.agents)} registered, default tier: {registry.default_tier.name.lower()}"
+    )
+    click.echo("Endpoints: /api/v1/policy, /api/v1/agents, /api/v1/evaluate, /api/v1/status")
+    app = create_api_app(policy_path=policy_path)
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 @main.command()
