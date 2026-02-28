@@ -175,6 +175,49 @@ class RateLimitTracker:
                 }
             )
 
+    def check_budget_and_record(
+        self,
+        agent_id: str,
+        cost: float,
+        daily_budget: float,
+        *,
+        window_seconds: int = 86400,
+        timestamp: datetime | str | None = None,
+        session_id: str = DEFAULT_SESSION_ID,
+    ) -> bool:
+        """Atomically check budget and record spend when within limit."""
+        current = _to_datetime_utc(timestamp)
+        safe_agent_id = agent_id if isinstance(agent_id, str) and agent_id else GLOBAL_AGENT_ID
+        safe_session_id = (
+            session_id if isinstance(session_id, str) and session_id else DEFAULT_SESSION_ID
+        )
+        safe_cost = float(cost) if isinstance(cost, int | float) else 0.0
+        safe_budget = float(daily_budget) if isinstance(daily_budget, int | float) else 0.0
+        if safe_cost <= 0:
+            return False
+        with self._lock:
+            spend_key = (safe_agent_id, safe_session_id)
+            events = self._spend_events[spend_key]
+            threshold = current - timedelta(seconds=window_seconds)
+            if events and events[0][0] < threshold:
+                self._prune_spend(spend_key, current, window_seconds)
+            spent = self._spend_totals[spend_key]
+            projected = spent + safe_cost
+            if projected > safe_budget:
+                return True
+            self._spend_events[spend_key].append((current, safe_cost))
+            self._spend_totals[spend_key] = projected
+            self._buffer_write(
+                {
+                    "event": "spend",
+                    "agent_id": safe_agent_id,
+                    "session_id": safe_session_id,
+                    "timestamp": current.isoformat(),
+                    "cost": safe_cost,
+                }
+            )
+            return False
+
     def get_count(
         self,
         tool_name: str,

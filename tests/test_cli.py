@@ -267,4 +267,4 @@ rules:
         result = runner.invoke(main, ["invariants", "--policy", str(policy)])
         assert result.exit_code == 0
         assert "Invariant Checks:" in result.output
-        assert "9/9 passed" in result.output
+        assert "10/10 passed" in result.output

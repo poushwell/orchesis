@@ -1,10 +1,14 @@
 """CLI entrypoint for Orchesis."""
 
 import json
+import time
+import tracemalloc
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from dataclasses import asdict, replace
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from random import Random
 from typing import Any
 
 import click
@@ -20,6 +24,7 @@ from orchesis.config import (
     validate_policy_warnings,
 )
 from orchesis.engine import evaluate
+from orchesis.drift import DriftDetector
 from orchesis.fuzzer import SyntheticFuzzer, update_fuzz_metadata
 from orchesis.invariants import InvariantChecker
 from orchesis.logger import read_decisions
@@ -50,6 +55,18 @@ OPERATIONS_LOG = StructuredLogger("cli")
 @click.group()
 def main() -> None:
     """Orchesis command line interface."""
+
+
+def _percentile_us(values: list[int], percentile: float) -> int:
+    if not values:
+        return 0
+    if percentile <= 0:
+        return values[0]
+    if percentile >= 100:
+        return values[-1]
+    rank = int(round((percentile / 100.0) * (len(values) - 1)))
+    rank = max(0, min(rank, len(values) - 1))
+    return values[rank]
 
 
 @main.command("new")
@@ -616,6 +633,150 @@ def invariants(policy_path: str) -> None:
     OPERATIONS_LOG.info("invariants checked", total=total, failures=failures)
     if not report.all_passed:
         raise SystemExit(1)
+
+
+@main.command("drift")
+@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
+@click.option("--log", "log_path", type=click.Path(), default=str(DEFAULT_DECISIONS_PATH))
+def drift(policy_path: str, log_path: str) -> None:
+    """Run state drift detection over current state and decision log."""
+    try:
+        policy = load_policy(policy_path)
+    except (ValueError, YAMLError, OSError) as error:
+        raise click.ClickException(f"Failed to load policy: {error}") from error
+
+    has_identity_config = "agents" in policy or "default_trust_tier" in policy
+    registry = load_agent_registry(policy) if has_identity_config else None
+    detector = DriftDetector()
+    tracker = RateLimitTracker(persist_path=DEFAULT_STATE_PATH)
+    events = detector.run_all_checks(
+        tracker=tracker,
+        policy=policy,
+        decisions_log=log_path,
+        registry=registry,
+    )
+    counts = Counter(item.drift_type for item in events)
+    click.echo("Drift Detection:")
+    click.echo(f"  Counter integrity: {'✗' if counts.get('counter_mismatch') else '✓'}")
+    click.echo(f"  Budget integrity: {'✗' if counts.get('budget_mismatch') else '✓'}")
+    click.echo(
+        "  Replay consistency: "
+        f"{'✗' if counts.get('replay_divergence') else '✓'} "
+        f"(sampled {detector.replay_sample_size} events)"
+    )
+    baseline = detector.baseline_latency_us
+    if baseline is not None:
+        click.echo(f"  Latency baseline: {baseline:.0f}us")
+    else:
+        click.echo("  Latency baseline: n/a")
+    click.echo(f"  Latency anomalies: {counts.get('latency_spike', 0)}")
+    click.echo("")
+    if events:
+        click.echo(f"{len(events)} drift events detected")
+        if detector.has_critical_drift:
+            raise SystemExit(1)
+    else:
+        click.echo("0 drift events detected ✓")
+    tracker.flush()
+
+
+@main.command("torture")
+@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
+@click.option("--duration", type=int, default=60)
+@click.option("--agents", type=int, default=100)
+def torture(policy_path: str, duration: int, agents: int) -> None:
+    """Run sustained concurrent stress test and report throughput/latency."""
+    try:
+        policy = load_policy(policy_path)
+    except (ValueError, YAMLError, OSError) as error:
+        raise click.ClickException(f"Failed to load policy: {error}") from error
+    duration_seconds = max(1, int(duration))
+    total_agents = max(1, int(agents))
+    has_identity_config = "agents" in policy or "default_trust_tier" in policy
+    registry = load_agent_registry(policy) if has_identity_config else None
+    tracker = RateLimitTracker(persist_path=None)
+    rng = Random(42)
+    latencies_us: list[int] = []
+    fail_open_events = 0
+    total = 0
+
+    tracemalloc.start()
+    start_mem, _ = tracemalloc.get_traced_memory()
+    started = time.perf_counter()
+    worker_count = min(200, max(8, total_agents * 2))
+    safe_request = {"tool": "read_file", "params": {"path": "/data/safe.txt"}, "cost": 0.1}
+    denied_path_request = {"tool": "read_file", "params": {"path": "/etc/passwd"}, "cost": 0.1}
+    denied_sql_request = {"tool": "run_sql", "params": {"query": "DROP TABLE users"}, "cost": 0.1}
+
+    def _call(idx: int) -> tuple[bool, bool, int]:
+        roll = rng.random()
+        if roll < 0.60:
+            template = safe_request
+            should_allow = True
+        elif roll < 0.80:
+            template = denied_path_request
+            should_allow = False
+        else:
+            template = denied_sql_request
+            should_allow = False
+        request = {
+            "tool": template["tool"],
+            "params": dict(template["params"]),
+            "cost": template["cost"],
+            "context": {"agent": f"torture_{idx % total_agents}", "session": f"s{idx % 25}"},
+        }
+        before = time.perf_counter_ns()
+        decision = evaluate(request, policy, state=tracker, registry=registry)
+        elapsed = max(0, (time.perf_counter_ns() - before) // 1000)
+        return decision.allowed, should_allow, int(elapsed)
+
+    while time.perf_counter() - started < duration_seconds:
+        batch = list(range(1000))
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            for allowed, should_allow, elapsed in pool.map(_call, batch):
+                total += 1
+                latencies_us.append(elapsed)
+                if should_allow and not allowed:
+                    fail_open_events += 1
+                if (not should_allow) and allowed:
+                    fail_open_events += 1
+
+    end_mem, peak_mem = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    memory_growth_mb = max(0.0, float(end_mem - start_mem) / (1024.0 * 1024.0))
+    sorted_lat = sorted(latencies_us)
+    elapsed_total = max(0.001, time.perf_counter() - started)
+    throughput = total / elapsed_total
+    avg_us = (sum(sorted_lat) / len(sorted_lat)) if sorted_lat else 0.0
+    p95_us = _percentile_us(sorted_lat, 95.0) if sorted_lat else 0
+    p99_us = _percentile_us(sorted_lat, 99.0) if sorted_lat else 0
+    max_us = sorted_lat[-1] if sorted_lat else 0
+
+    detector = DriftDetector()
+    drift_events = detector.run_all_checks(
+        tracker=tracker,
+        policy=policy,
+        decisions_log=DEFAULT_DECISIONS_PATH,
+        registry=registry,
+    )
+    click.echo(f"Torture Test Results ({duration_seconds}s):")
+    click.echo(f"  Total evaluations: {total:,}")
+    click.echo(f"  Throughput: {throughput:.0f} evals/sec")
+    click.echo(
+        "  Latency: "
+        f"avg={avg_us:.0f}us p95={p95_us}us p99={p99_us}us max={max_us}us"
+    )
+    click.echo(f"  Memory growth: {memory_growth_mb:.1f}MB (peak={peak_mem / (1024 * 1024):.1f}MB)")
+    click.echo(f"  Fail-open events: {fail_open_events}")
+    click.echo(f"  State drift events: {len(drift_events)}")
+    click.echo(f"  Rate limit accuracy: {'100%' if fail_open_events == 0 else 'degraded'}")
+    click.echo("  Budget accuracy: best-effort")
+    click.echo("")
+    if fail_open_events == 0 and not detector.has_critical_drift:
+        click.echo("PASSED ✓")
+        return
+    click.echo("FAILED ✗")
+    raise SystemExit(1)
 
 
 @main.command()

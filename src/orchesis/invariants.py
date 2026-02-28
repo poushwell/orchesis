@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from orchesis.config import load_policy
+from orchesis.drift import DriftDetector
 from orchesis.engine import RULE_EVALUATION_ORDER, evaluate
 from orchesis.identity import AgentIdentity, AgentRegistry, TrustTier
 from orchesis.replay import ReplayEngine, read_events_from_jsonl
@@ -56,6 +57,7 @@ class InvariantChecker:
             self.check_identity_enforcement,
             self.check_cost_never_negative_allow,
             self.check_rate_limit_atomic,
+            self.check_no_state_drift,
         ]
         results = [check() for check in checks]
         return InvariantReport(
@@ -214,3 +216,15 @@ class InvariantChecker:
         passed = allowed == 20
         detail = "atomic boundary respected" if passed else f"expected 20 allow, got {allowed}"
         return InvariantResult("rate_limit_atomic", passed, detail, _now_iso())
+
+    def check_no_state_drift(self) -> InvariantResult:
+        detector = DriftDetector()
+        tracker = RateLimitTracker(persist_path=None)
+        events = detector.run_all_checks(
+            tracker=tracker,
+            policy=self._policy,
+            decisions_log=self._decisions_log,
+        )
+        passed = not detector.has_critical_drift
+        detail = "no critical drift events" if passed else f"{len(events)} drift events detected"
+        return InvariantResult("no_state_drift", passed, detail, _now_iso())

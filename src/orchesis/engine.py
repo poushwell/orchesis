@@ -32,6 +32,7 @@ RULE_EVALUATION_ORDER = [
 
 KNOWN_RULE_TYPES = set(RULE_EVALUATION_ORDER) - {"identity_check"}
 _POLICY_PLAN_CACHE: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
+_POLICY_HASH_CACHE: dict[int, tuple[dict[str, Any], str]] = {}
 
 
 class EvaluationGuarantees:
@@ -53,8 +54,16 @@ def _stable_sha256(payload: Any) -> str:
 def _policy_version_hash(policy: dict[str, Any] | None) -> str:
     if policy is None:
         return hashlib.sha256(b"null").hexdigest()
+    cache_key = id(policy)
+    cached = _POLICY_HASH_CACHE.get(cache_key)
+    if cached is not None and cached[0] is policy:
+        return cached[1]
     dumped = yaml.dump(policy, sort_keys=True)
-    return _policy_version_hash_cached(dumped)
+    digest = _policy_version_hash_cached(dumped)
+    if len(_POLICY_HASH_CACHE) >= 32:
+        _POLICY_HASH_CACHE.pop(next(iter(_POLICY_HASH_CACHE)))
+    _POLICY_HASH_CACHE[cache_key] = (policy, digest)
+    return digest
 
 
 @lru_cache(maxsize=16)
@@ -707,6 +716,7 @@ def evaluate(
     effective_rate_limit_per_minute = (
         identity.rate_limit_per_minute if identity is not None else None
     )
+    effective_daily_budget_limit: float | None = None
 
     for rule_type in RULE_EVALUATION_ORDER:
         if rule_type == "identity_check":
@@ -728,6 +738,14 @@ def evaluate(
             elif rule_type == "rate_limit" and effective_rate_limit_per_minute is not None:
                 rule_for_eval = dict(rule)
                 rule_for_eval["max_requests_per_minute"] = effective_rate_limit_per_minute
+            if rule_type == "budget_limit":
+                candidate_budget = rule_for_eval.get("daily_budget")
+                if isinstance(candidate_budget, int | float):
+                    if (
+                        effective_daily_budget_limit is None
+                        or float(candidate_budget) < effective_daily_budget_limit
+                    ):
+                        effective_daily_budget_limit = float(candidate_budget)
 
             rule_name = rule.get("name")
             safe_rule_name = rule_name if isinstance(rule_name, str) else rule_type
@@ -843,12 +861,28 @@ def evaluate(
         cost = _coerce_cost(request.get("cost"))
         if cost is not None and cost > 0:
             try:
-                tracker.record_spend(
-                    agent_id,
-                    cost,
-                    timestamp=evaluation_now,
-                    session_id=session_id,
-                )
+                if isinstance(effective_daily_budget_limit, int | float):
+                    over_budget = tracker.check_budget_and_record(
+                        agent_id=agent_id,
+                        cost=cost,
+                        daily_budget=float(effective_daily_budget_limit),
+                        window_seconds=86400,
+                        timestamp=evaluation_now,
+                        session_id=session_id,
+                    )
+                    if over_budget:
+                        reasons.append(
+                            "budget_limit: agent "
+                            f"'{agent_id}' daily budget exceeded"
+                        )
+                        allowed = False
+                else:
+                    tracker.record_spend(
+                        agent_id,
+                        cost,
+                        timestamp=evaluation_now,
+                        session_id=session_id,
+                    )
             except Exception:
                 reasons.append("state_error: rate limit state unavailable, denying for safety")
                 allowed = False
@@ -888,9 +922,22 @@ def _emit_event(
         params_payload = params if isinstance(params, dict) else {}
         cost = _coerce_cost(request.get("cost"))
         safe_cost = cost if cost is not None else 0.0
+        tool = request.get("tool") if isinstance(request.get("tool"), str) else "__unknown__"
 
         try:
-            state_snapshot = _build_state_snapshot(tracker, agent_id, session_id)
+            state_snapshot = {
+                "agent_id": agent_id,
+                "session_id": session_id,
+                "window_seconds": 60,
+                "tool_counts": {
+                    tool: tracker.get_count(
+                        tool,
+                        window_seconds=60,
+                        agent_id=agent_id,
+                        session_id=session_id,
+                    )
+                },
+            }
         except Exception:
             state_snapshot = {"error": "state_unavailable"}
         context = request.get("context")
@@ -903,7 +950,6 @@ def _emit_event(
                 state_snapshot["parent_span_id"] = parent_span_id
 
         elapsed_us = max(0, (time.perf_counter_ns() - started_ns) // 1000)
-        tool = request.get("tool") if isinstance(request.get("tool"), str) else "__unknown__"
         event = DecisionEvent(
             event_id=str(uuid.uuid4()),
             timestamp=decision.timestamp,

@@ -84,7 +84,7 @@ def test_rate_limit_atomic_invariant(tmp_path: Path) -> None:
 def test_all_invariants_pass(tmp_path: Path) -> None:
     report = _checker(tmp_path).check_all()
     assert report.all_passed is True
-    assert len(report.results) == 9
+    assert len(report.results) == 10
 
 
 def test_invariant_report_format(tmp_path: Path) -> None:
