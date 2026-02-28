@@ -246,3 +246,25 @@ rules: []
         assert "cursor" in result.output
         assert "operator" in result.output
         assert "Default tier: intern" in result.output
+
+
+def test_invariants_command_runs() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        policy = Path("policy.yaml")
+        policy.write_text(
+            """
+rules:
+  - name: budget_limit
+    max_cost_per_call: 2.0
+  - name: file_access
+    denied_paths: ["/etc", "/root", "/var"]
+  - name: sql_restriction
+    denied_operations: ["DROP", "DELETE", "TRUNCATE", "ALTER", "GRANT"]
+""".strip(),
+            encoding="utf-8",
+        )
+        result = runner.invoke(main, ["invariants", "--policy", str(policy)])
+        assert result.exit_code == 0
+        assert "Invariant Checks:" in result.output
+        assert "9/9 passed" in result.output

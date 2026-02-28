@@ -6,6 +6,9 @@ import random
 import string
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import json
+from pathlib import Path
 from typing import Any
 
 from orchesis.engine import evaluate
@@ -308,3 +311,59 @@ class SyntheticFuzzer:
         return "".join(
             char.upper() if self._rng.random() > 0.5 else char.lower() for char in text
         )
+
+
+def update_fuzz_metadata(
+    *,
+    total_requests: int = 0,
+    total_mutations: int = 0,
+    bypasses_found: int = 0,
+    invariant_checks: int = 0,
+    invariant_failures: int = 0,
+    meta_path: str | Path = ".orchesis/fuzz_meta.json",
+) -> dict[str, Any]:
+    """Update cumulative fuzzer metadata."""
+    path = Path(meta_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+    else:
+        payload = {}
+
+    data = {
+        "total_runs": int(payload.get("total_runs", 0)),
+        "total_requests_lifetime": int(payload.get("total_requests_lifetime", 0)),
+        "total_mutations_lifetime": int(payload.get("total_mutations_lifetime", 0)),
+        "total_bypasses_lifetime": int(payload.get("total_bypasses_lifetime", 0)),
+        "total_invariant_checks": int(payload.get("total_invariant_checks", 0)),
+        "invariant_failures": int(payload.get("invariant_failures", 0)),
+        "first_run": payload.get("first_run") or now,
+        "last_run": now,
+        "consecutive_clean_runs": int(payload.get("consecutive_clean_runs", 0)),
+        "days_without_bypass": int(payload.get("days_without_bypass", 0)),
+    }
+
+    if total_requests > 0 or total_mutations > 0:
+        data["total_runs"] += 1
+    data["total_requests_lifetime"] += max(0, int(total_requests))
+    data["total_mutations_lifetime"] += max(0, int(total_mutations))
+    data["total_bypasses_lifetime"] += max(0, int(bypasses_found))
+    data["total_invariant_checks"] += max(0, int(invariant_checks))
+    data["invariant_failures"] += max(0, int(invariant_failures))
+
+    clean_run = (bypasses_found == 0) and (invariant_failures == 0) and (
+        total_requests > 0 or total_mutations > 0
+    )
+    if clean_run:
+        data["consecutive_clean_runs"] += 1
+        data["days_without_bypass"] += 1
+    elif bypasses_found > 0:
+        data["consecutive_clean_runs"] = 0
+        data["days_without_bypass"] = 0
+
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return data

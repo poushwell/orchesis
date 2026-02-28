@@ -49,6 +49,42 @@ def test_reliability_json_format(tmp_path: Path) -> None:
     assert "total_tests" in parsed
 
 
+def test_reliability_prefers_fuzz_meta(tmp_path: Path) -> None:
+    fuzz_meta = tmp_path / "fuzz_meta.json"
+    fuzz_meta.write_text(
+        json.dumps(
+            {
+                "total_runs": 14,
+                "total_requests_lifetime": 140000,
+                "total_mutations_lifetime": 14000,
+                "total_bypasses_lifetime": 0,
+                "total_invariant_checks": 126,
+                "invariant_failures": 0,
+                "first_run": "2026-02-28T03:00:00Z",
+                "last_run": "2026-03-14T03:00:00Z",
+                "consecutive_clean_runs": 14,
+                "days_without_bypass": 14,
+            }
+        ),
+        encoding="utf-8",
+    )
+    generator = ReliabilityReportGenerator(
+        corpus_path=str(Path(__file__).parent / "corpus"),
+        decisions_log=str(tmp_path / "decisions.jsonl"),
+        fuzz_log=str(tmp_path / "fuzz_runs.jsonl"),
+        mutation_log=str(tmp_path / "mutation_runs.jsonl"),
+        replay_log=str(tmp_path / "replay_runs.jsonl"),
+        fuzz_meta_path=str(fuzz_meta),
+    )
+    report = generator.generate()
+    assert report.total_fuzz_requests == 140000
+    assert report.total_mutations_tested == 14000
+    assert report.total_invariant_checks == 126
+    assert report.invariant_failures == 0
+    assert report.consecutive_clean_runs == 14
+    assert report.days_without_bypass == 14
+
+
 @pytest.mark.asyncio
 async def test_reliability_api_endpoint(tmp_path: Path) -> None:
     policy_path = tmp_path / "policy.yaml"

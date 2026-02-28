@@ -32,5 +32,8 @@ jobs:
       - name: Pytest
         run: pytest --tb=short -q
 
+      - name: Verify invariants
+        run: orchesis invariants --policy examples/production_policy.yaml
+
       - name: Engine hardening benchmark
         run: pytest tests/test_engine_hardening.py -q -s

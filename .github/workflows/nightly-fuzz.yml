@@ -5,6 +5,10 @@ on:
     - cron: "0 3 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   fuzz:
     runs-on: ubuntu-latest
@@ -35,6 +39,10 @@ jobs:
           orchesis mutate --policy examples/production_policy.yaml \
             --count 1000 --seed ${{ github.run_number }} 2>&1 | tee mutation_report.txt
 
+      - name: Verify invariants
+        run: |
+          orchesis invariants --policy examples/production_policy.yaml 2>&1 | tee invariants_report.txt
+
       - name: Run replay verification
         run: |
           orchesis replay --log decisions.jsonl --policy examples/production_policy.yaml --strict \
@@ -62,6 +70,40 @@ jobs:
           path: |
             fuzz_report.txt
             mutation_report.txt
+            invariants_report.txt
             replay_report.txt
             corpus_stats.txt
             reliability_report.md
+
+      - name: Detect issues
+        id: detect_issues
+        run: |
+          ISSUE=false
+          if grep -Eq "BYPASSES FOUND: [1-9]" fuzz_report.txt; then ISSUE=true; fi
+          if grep -q "BYPASS:" mutation_report.txt; then ISSUE=true; fi
+          if grep -q "✗" invariants_report.txt; then ISSUE=true; fi
+          echo "issue_detected=$ISSUE" >> "$GITHUB_OUTPUT"
+
+      - name: Build issue body
+        if: steps.detect_issues.outputs.issue_detected == 'true'
+        run: |
+          echo "# Nightly fuzz incident" > nightly_issue.md
+          echo "" >> nightly_issue.md
+          echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> nightly_issue.md
+          echo "" >> nightly_issue.md
+          echo "## Fuzzer report (tail)" >> nightly_issue.md
+          tail -n 40 fuzz_report.txt >> nightly_issue.md
+          echo "" >> nightly_issue.md
+          echo "## Mutation report (tail)" >> nightly_issue.md
+          tail -n 40 mutation_report.txt >> nightly_issue.md
+          echo "" >> nightly_issue.md
+          echo "## Invariants report" >> nightly_issue.md
+          cat invariants_report.txt >> nightly_issue.md
+
+      - name: Create issue on incident
+        if: steps.detect_issues.outputs.issue_detected == 'true'
+        uses: peter-evans/create-issue-from-file@v5
+        with:
+          title: "[Nightly] Bypass or invariant failure detected (#${{ github.run_number }})"
+          content-filepath: nightly_issue.md
+          labels: security,nightly-fuzz

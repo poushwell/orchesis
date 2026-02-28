@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from orchesis.config import load_policy
-from orchesis.fuzzer import FuzzReport, SyntheticFuzzer
+from orchesis.fuzzer import FuzzReport, SyntheticFuzzer, update_fuzz_metadata
 from orchesis.scenarios import AdversarialScenarios
 
 
@@ -109,3 +109,30 @@ def test_scenario_run_all() -> None:
     scenarios = AdversarialScenarios(_production_policy())
     results = scenarios.run_all()
     assert len(results) == 6
+
+
+def test_update_fuzz_metadata_accumulates(tmp_path: Path) -> None:
+    meta_path = tmp_path / "fuzz_meta.json"
+    first = update_fuzz_metadata(
+        total_requests=1000,
+        total_mutations=100,
+        bypasses_found=0,
+        invariant_checks=9,
+        invariant_failures=0,
+        meta_path=meta_path,
+    )
+    second = update_fuzz_metadata(
+        total_requests=2000,
+        total_mutations=200,
+        bypasses_found=1,
+        invariant_checks=9,
+        invariant_failures=1,
+        meta_path=meta_path,
+    )
+    assert first["total_runs"] == 1
+    assert second["total_runs"] == 2
+    assert second["total_requests_lifetime"] == 3000
+    assert second["total_mutations_lifetime"] == 300
+    assert second["total_bypasses_lifetime"] == 1
+    assert second["total_invariant_checks"] == 18
+    assert second["invariant_failures"] == 1

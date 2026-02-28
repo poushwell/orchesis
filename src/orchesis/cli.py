@@ -20,7 +20,8 @@ from orchesis.config import (
     validate_policy_warnings,
 )
 from orchesis.engine import evaluate
-from orchesis.fuzzer import SyntheticFuzzer
+from orchesis.fuzzer import SyntheticFuzzer, update_fuzz_metadata
+from orchesis.invariants import InvariantChecker
 from orchesis.logger import read_decisions
 from orchesis.corpus import RegressionCorpus
 from orchesis.policy_store import PolicyStore
@@ -305,6 +306,10 @@ def fuzz(policy_path: str, count: int, seed: int, save_bypasses: bool) -> None:
         + "\n",
         encoding="utf-8",
     )
+    update_fuzz_metadata(
+        total_requests=report.total_requests,
+        bypasses_found=len(report.bypasses),
+    )
     click.echo("Fuzzer Report:")
     click.echo(f"  Total requests: {report.total_requests}")
     click.echo(f"  Correctly denied: {report.denied_correctly}")
@@ -397,6 +402,33 @@ def mutate(policy_path: str, count: int, seed: int) -> None:
         + "\n",
         encoding="utf-8",
     )
+    update_fuzz_metadata(
+        total_mutations=len(mutations),
+        bypasses_found=bypasses,
+    )
+
+
+@main.command()
+@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
+def invariants(policy_path: str) -> None:
+    """Run formal invariant checks."""
+    checker = InvariantChecker(policy_path=policy_path)
+    report = checker.check_all()
+    click.echo("Invariant Checks:")
+    for result in report.results:
+        marker = "✓" if result.passed else "✗"
+        click.echo(f"  {marker} {result.name}")
+    passed = sum(1 for result in report.results if result.passed)
+    total = len(report.results)
+    click.echo("")
+    click.echo(f"{passed}/{total} passed ({report.duration_seconds:.2f}s)")
+    failures = total - passed
+    update_fuzz_metadata(
+        invariant_checks=total,
+        invariant_failures=failures,
+    )
+    if not report.all_passed:
+        raise SystemExit(1)
 
 
 @main.command()

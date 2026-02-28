@@ -27,6 +27,10 @@ class ReliabilityReport:
     bypasses_found_lifetime: int
     bypasses_fixed: int
     current_bypass_rate: float
+    total_invariant_checks: int
+    invariant_failures: int
+    consecutive_clean_runs: int
+    days_without_bypass: int
     replay_verifications: int
     replay_drift_count: int
     deterministic: bool
@@ -46,12 +50,14 @@ class ReliabilityReportGenerator:
         fuzz_log: str = ".orchesis/fuzz_runs.jsonl",
         mutation_log: str = ".orchesis/mutation_runs.jsonl",
         replay_log: str = ".orchesis/replay_runs.jsonl",
+        fuzz_meta_path: str = ".orchesis/fuzz_meta.json",
     ):
         self._corpus = RegressionCorpus(corpus_path)
         self._decisions_log = Path(decisions_log)
         self._fuzz_log = Path(fuzz_log)
         self._mutation_log = Path(mutation_log)
         self._replay_log = Path(replay_log)
+        self._fuzz_meta_path = Path(fuzz_meta_path)
 
     def _read_jsonl(self, path: Path) -> list[dict[str, Any]]:
         if not path.exists():
@@ -97,6 +103,12 @@ class ReliabilityReportGenerator:
         fuzz_rows = self._read_jsonl(self._fuzz_log)
         mutation_rows = self._read_jsonl(self._mutation_log)
         replay_rows = self._read_jsonl(self._replay_log)
+        meta = {}
+        if self._fuzz_meta_path.exists():
+            try:
+                meta = json.loads(self._fuzz_meta_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                meta = {}
 
         total_fuzz_requests = sum(
             int(row.get("total_requests", 0))
@@ -115,12 +127,35 @@ class ReliabilityReportGenerator:
         )
         if bypasses_found_lifetime == 0:
             bypasses_found_lifetime = int(corpus_stats["total"])
+        if isinstance(meta.get("total_bypasses_lifetime"), int | float):
+            bypasses_found_lifetime = int(meta["total_bypasses_lifetime"])
         bypasses_fixed = int(corpus_stats["fixed"])
         current_bypass_rate = 0.0
         if fuzz_rows:
             latest = fuzz_rows[-1]
             if isinstance(latest.get("bypass_rate"), int | float):
                 current_bypass_rate = float(latest["bypass_rate"])
+
+        total_invariant_checks = (
+            int(meta["total_invariant_checks"])
+            if isinstance(meta.get("total_invariant_checks"), int | float)
+            else 0
+        )
+        invariant_failures = (
+            int(meta["invariant_failures"])
+            if isinstance(meta.get("invariant_failures"), int | float)
+            else 0
+        )
+        consecutive_clean_runs = (
+            int(meta["consecutive_clean_runs"])
+            if isinstance(meta.get("consecutive_clean_runs"), int | float)
+            else 0
+        )
+        days_without_bypass = (
+            int(meta["days_without_bypass"])
+            if isinstance(meta.get("days_without_bypass"), int | float)
+            else 0
+        )
 
         replay_verifications = len(replay_rows)
         replay_drift_count = sum(
@@ -137,11 +172,23 @@ class ReliabilityReportGenerator:
             corpus_entries=int(corpus_stats["total"]),
             corpus_fixed=int(corpus_stats["fixed"]),
             total_fuzz_runs=len(fuzz_rows),
-            total_fuzz_requests=total_fuzz_requests,
-            total_mutations_tested=total_mutations_tested,
+            total_fuzz_requests=(
+                int(meta["total_requests_lifetime"])
+                if isinstance(meta.get("total_requests_lifetime"), int | float)
+                else total_fuzz_requests
+            ),
+            total_mutations_tested=(
+                int(meta["total_mutations_lifetime"])
+                if isinstance(meta.get("total_mutations_lifetime"), int | float)
+                else total_mutations_tested
+            ),
             bypasses_found_lifetime=bypasses_found_lifetime,
             bypasses_fixed=bypasses_fixed,
             current_bypass_rate=current_bypass_rate,
+            total_invariant_checks=total_invariant_checks,
+            invariant_failures=invariant_failures,
+            consecutive_clean_runs=consecutive_clean_runs,
+            days_without_bypass=days_without_bypass,
             replay_verifications=replay_verifications,
             replay_drift_count=replay_drift_count,
             deterministic=replay_drift_count == 0,
@@ -177,6 +224,10 @@ Version: {report.orchesis_version}
 | Mutations tested | {report.total_mutations_tested} |
 | Bypasses found | {report.bypasses_found_lifetime} |
 | Current bypass rate | {report.current_bypass_rate*100:.2f}% |
+| Invariant checks | {report.total_invariant_checks} |
+| Invariant failures | {report.invariant_failures} |
+| Consecutive clean runs | {report.consecutive_clean_runs} |
+| Days without bypass | {report.days_without_bypass} |
 
 ## Runtime Guarantees
 | Guarantee | Status |
