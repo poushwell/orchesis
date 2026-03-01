@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, Response
 from orchesis.config import PolicyWatcher, load_policy
 from orchesis.engine import evaluate
 from orchesis.events import EventBus
+from orchesis.integrations import SlackEmitter, SlackNotifier, TelegramEmitter, TelegramNotifier
 from orchesis.metrics import MetricsCollector
 from orchesis.otel import OTelEmitter, TraceContext
 from orchesis.policy_store import PolicyStore
@@ -99,6 +100,7 @@ def create_proxy_app(
     _ = event_bus.subscribe(metrics)
     _ = event_bus.subscribe(OTelEmitter(".orchesis/traces.jsonl"))
     webhook_subscriber_ids: list[int] = []
+    alert_subscriber_ids: list[int] = []
 
     def _sync_webhooks(candidate_policy: dict[str, Any]) -> None:
         nonlocal webhook_subscriber_ids
@@ -136,12 +138,52 @@ def create_proxy_app(
         )
         return store_version.registry if has_identity_config else None
 
+    def _sync_alerts(candidate_policy: dict[str, Any]) -> None:
+        nonlocal alert_subscriber_ids
+        for sub_id in alert_subscriber_ids:
+            event_bus.unsubscribe(sub_id)
+        alert_subscriber_ids = []
+        alerts = candidate_policy.get("alerts")
+        if not isinstance(alerts, dict):
+            return
+        slack_cfg = alerts.get("slack")
+        if isinstance(slack_cfg, dict):
+            webhook_url = slack_cfg.get("webhook_url")
+            if isinstance(webhook_url, str) and webhook_url.strip():
+                notifier = SlackNotifier(
+                    webhook_url=webhook_url.strip(),
+                    channel=slack_cfg.get("channel") if isinstance(slack_cfg.get("channel"), str) else None,
+                    notify_on=slack_cfg.get("notify_on")
+                    if isinstance(slack_cfg.get("notify_on"), list)
+                    else None,
+                )
+                alert_subscriber_ids.append(event_bus.subscribe(SlackEmitter(notifier)))
+        telegram_cfg = alerts.get("telegram")
+        if isinstance(telegram_cfg, dict):
+            bot_token = telegram_cfg.get("bot_token")
+            chat_id = telegram_cfg.get("chat_id")
+            if (
+                isinstance(bot_token, str)
+                and bot_token.strip()
+                and isinstance(chat_id, str)
+                and chat_id.strip()
+            ):
+                notifier = TelegramNotifier(
+                    bot_token=bot_token.strip(),
+                    chat_id=chat_id.strip(),
+                    notify_on=telegram_cfg.get("notify_on")
+                    if isinstance(telegram_cfg.get("notify_on"), list)
+                    else None,
+                )
+                alert_subscriber_ids.append(event_bus.subscribe(TelegramEmitter(notifier)))
+
     if policy_path is not None:
         current_version = store.load(policy_path)
         current_policy = current_version.policy
         current_registry = _resolve_registry_for_policy(current_policy, current_version)
         current_policy_hash = current_version.version_id
         _sync_webhooks(current_policy)
+        _sync_alerts(current_policy)
 
         def _on_reload(new_policy: dict[str, Any]) -> None:
             _ = new_policy
@@ -151,11 +193,13 @@ def create_proxy_app(
             current_registry = _resolve_registry_for_policy(current_policy, version)
             current_policy_hash = version.version_id
             _sync_webhooks(current_policy)
+            _sync_alerts(current_policy)
 
         watcher = PolicyWatcher(policy_path, _on_reload)
         watcher._last_hash = PolicyWatcher(policy_path, lambda _policy: None).current_hash()
     else:
         _sync_webhooks(current_policy)
+        _sync_alerts(current_policy)
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):

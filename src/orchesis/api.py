@@ -17,6 +17,7 @@ from orchesis.config import load_policy, validate_policy, validate_policy_warnin
 from orchesis.corpus import RegressionCorpus
 from orchesis.engine import evaluate
 from orchesis.events import EventBus
+from orchesis.integrations import SlackEmitter, SlackNotifier, TelegramEmitter, TelegramNotifier
 from orchesis.metrics import MetricsCollector
 from orchesis.otel import OTelEmitter, TraceContext
 from orchesis.policy_store import PolicyStore
@@ -62,6 +63,7 @@ def create_api_app(
     _ = event_bus.subscribe(metrics)
     _ = event_bus.subscribe(OTelEmitter(".orchesis/traces.jsonl"))
     corpus = RegressionCorpus()
+    alert_subscriber_ids: list[int] = []
 
     app.state.store = store
     app.state.tracker = tracker
@@ -76,6 +78,42 @@ def create_api_app(
     app.state.sync_server = PolicySyncServer()
     app.state.sync_server.set_current_version(current_version.version_id)
 
+    def _sync_alerts(candidate_policy: dict[str, Any]) -> None:
+        for sub_id in alert_subscriber_ids:
+            event_bus.unsubscribe(sub_id)
+        alert_subscriber_ids.clear()
+        alerts = candidate_policy.get("alerts")
+        if not isinstance(alerts, dict):
+            return
+        slack_cfg = alerts.get("slack")
+        if isinstance(slack_cfg, dict):
+            webhook_url = slack_cfg.get("webhook_url")
+            if isinstance(webhook_url, str) and webhook_url.strip():
+                notifier = SlackNotifier(
+                    webhook_url=webhook_url.strip(),
+                    channel=slack_cfg.get("channel") if isinstance(slack_cfg.get("channel"), str) else None,
+                    notify_on=slack_cfg.get("notify_on") if isinstance(slack_cfg.get("notify_on"), list) else None,
+                )
+                alert_subscriber_ids.append(event_bus.subscribe(SlackEmitter(notifier)))
+        telegram_cfg = alerts.get("telegram")
+        if isinstance(telegram_cfg, dict):
+            bot_token = telegram_cfg.get("bot_token")
+            chat_id = telegram_cfg.get("chat_id")
+            if (
+                isinstance(bot_token, str)
+                and bot_token.strip()
+                and isinstance(chat_id, str)
+                and chat_id.strip()
+            ):
+                notifier = TelegramNotifier(
+                    bot_token=bot_token.strip(),
+                    chat_id=chat_id.strip(),
+                    notify_on=telegram_cfg.get("notify_on")
+                    if isinstance(telegram_cfg.get("notify_on"), list)
+                    else None,
+                )
+                alert_subscriber_ids.append(event_bus.subscribe(TelegramEmitter(notifier)))
+
     def _refresh_current_version() -> None:
         app.state.current_version = store.current or store.load(str(policy_file))
         app.state.plugins = load_plugins_for_policy(
@@ -83,6 +121,9 @@ def create_api_app(
             app.state.plugin_modules,
         )
         app.state.sync_server.set_current_version(app.state.current_version.version_id)
+        _sync_alerts(app.state.current_version.policy)
+
+    _sync_alerts(current_version.policy)
 
     def _auth_token_from_policy() -> str | None:
         policy = app.state.current_version.policy

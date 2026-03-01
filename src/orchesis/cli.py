@@ -45,6 +45,7 @@ from orchesis.telemetry import InMemoryEmitter, JsonlEmitter
 from orchesis.mutations import MutationEngine
 from orchesis.mcp_config import McpProxySettings
 from orchesis.mcp_proxy import run_stdio_proxy
+from orchesis.marketplace import PolicyMarketplace
 from orchesis.structured_log import StructuredLogger
 from orchesis.sync import PolicySyncClient
 from orchesis.templates import TEMPLATE_NAMES, load_template_text
@@ -622,6 +623,62 @@ def plugins_command(policy_path: str | None, plugin_modules: tuple[str, ...]) ->
         return
     for item in items:
         click.echo(f"  {item.rule_type:<13} v{item.version:<4} {item.description}")
+
+
+@main.group("marketplace", invoke_without_command=True)
+@click.pass_context
+def marketplace_group(ctx: click.Context) -> None:
+    """Browse and install built-in policy packs."""
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(marketplace_list)
+
+
+@marketplace_group.command("list")
+def marketplace_list() -> None:
+    """List available policy packs."""
+    marketplace = PolicyMarketplace()
+    packs = marketplace.list_available()
+    click.echo("Available Policy Packs:")
+    for item in packs:
+        tags = ", ".join(item.tags)
+        click.echo(f"  {item.name:<16} v{item.version:<4} {item.description:<36} [{tags}]")
+
+
+@marketplace_group.command("info")
+@click.argument("name")
+def marketplace_info(name: str) -> None:
+    """Show metadata for one policy pack."""
+    marketplace = PolicyMarketplace()
+    pack = marketplace.get(name)
+    if pack is None:
+        raise click.ClickException(f"Unknown policy pack: {name}")
+    click.echo(f"Name: {pack.name}")
+    click.echo(f"Version: {pack.version}")
+    click.echo(f"Description: {pack.description}")
+    click.echo(f"Author: {pack.author}")
+    click.echo(f"Tags: {', '.join(pack.tags)}")
+    click.echo(f"Rules: {len(pack.rules)}")
+    plugins = ", ".join(pack.plugins_required) if pack.plugins_required else "none"
+    click.echo(f"Required plugins: {plugins}")
+
+
+@marketplace_group.command("install")
+@click.argument("name")
+@click.option("--merge", is_flag=True, default=False)
+@click.option("--target", "target_path", default="policy.yaml")
+def marketplace_install(name: str, merge: bool, target_path: str) -> None:
+    """Install a policy pack to a local file."""
+    marketplace = PolicyMarketplace()
+    pack = marketplace.get(name)
+    if pack is None:
+        raise click.ClickException(f"Unknown policy pack: {name}")
+    click.echo(f"Installing policy pack: {pack.name} v{pack.version}")
+    plugins = ", ".join(pack.plugins_required) if pack.plugins_required else "none"
+    click.echo(f"Required plugins: {plugins}")
+    written = marketplace.install(name, target_path=target_path, merge=merge)
+    click.echo(f"Written to {written}")
+    click.echo("")
+    click.echo(f"Run: orchesis validate --policy {written}")
 
 
 @main.command()
