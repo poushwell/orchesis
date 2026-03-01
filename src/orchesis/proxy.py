@@ -12,7 +12,9 @@ from fastapi.responses import JSONResponse, Response
 from orchesis.config import PolicyWatcher, load_policy
 from orchesis.engine import evaluate
 from orchesis.events import EventBus
+from orchesis.forensics import Incident
 from orchesis.integrations import SlackEmitter, SlackNotifier, TelegramEmitter, TelegramNotifier
+from orchesis.integrations.forensics_emitter import ForensicsEmitter
 from orchesis.metrics import MetricsCollector
 from orchesis.otel import OTelEmitter, TraceContext
 from orchesis.policy_store import PolicyStore
@@ -101,6 +103,33 @@ def create_proxy_app(
     _ = event_bus.subscribe(OTelEmitter(".orchesis/traces.jsonl"))
     webhook_subscriber_ids: list[int] = []
     alert_subscriber_ids: list[int] = []
+    alert_notifiers: list[Any] = []
+    _ = event_bus.subscribe(
+        ForensicsEmitter(
+            incidents_path=".orchesis/incidents.jsonl",
+            alert_callback=lambda incident: _dispatch_incident_alert(incident),
+        )
+    )
+
+    def _dispatch_incident_alert(incident: Incident) -> None:
+        for notifier in list(alert_notifiers):
+            try:
+                if isinstance(notifier, SlackNotifier):
+                    notifier.send(
+                        notifier.format_anomaly(
+                            {
+                                "severity": incident.severity,
+                                "detail": f"{incident.title} (agent={incident.agent_id}, tool={incident.tool})",
+                            }
+                        )
+                    )
+                elif isinstance(notifier, TelegramNotifier):
+                    notifier.send(
+                        f"Incident [{incident.severity.upper()}]: {incident.title} "
+                        f"(agent={incident.agent_id}, tool={incident.tool})"
+                    )
+            except Exception:
+                continue
 
     def _sync_webhooks(candidate_policy: dict[str, Any]) -> None:
         nonlocal webhook_subscriber_ids
@@ -140,6 +169,7 @@ def create_proxy_app(
 
     def _sync_alerts(candidate_policy: dict[str, Any]) -> None:
         nonlocal alert_subscriber_ids
+        alert_notifiers.clear()
         for sub_id in alert_subscriber_ids:
             event_bus.unsubscribe(sub_id)
         alert_subscriber_ids = []
@@ -157,6 +187,7 @@ def create_proxy_app(
                     if isinstance(slack_cfg.get("notify_on"), list)
                     else None,
                 )
+                alert_notifiers.append(notifier)
                 alert_subscriber_ids.append(event_bus.subscribe(SlackEmitter(notifier)))
         telegram_cfg = alerts.get("telegram")
         if isinstance(telegram_cfg, dict):
@@ -175,6 +206,7 @@ def create_proxy_app(
                     if isinstance(telegram_cfg.get("notify_on"), list)
                     else None,
                 )
+                alert_notifiers.append(notifier)
                 alert_subscriber_ids.append(event_bus.subscribe(TelegramEmitter(notifier)))
 
     if policy_path is not None:

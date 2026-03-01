@@ -28,6 +28,7 @@ from orchesis.config import (
     validate_policy_warnings,
 )
 from orchesis.engine import evaluate
+from orchesis.forensics import ForensicsEngine
 from orchesis.drift import DriftDetector
 from orchesis.fuzzer import SyntheticFuzzer, update_fuzz_metadata
 from orchesis.invariants import InvariantChecker
@@ -1253,6 +1254,89 @@ def _normalize_audit_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
     if "signature" in entry:
         normalized["signature"] = entry.get("signature")
     return normalized
+
+
+@main.group("incidents", invoke_without_command=True)
+@click.option("--since", type=str, default=None)
+@click.option("--severity", type=str, default=None)
+@click.pass_context
+def incidents_group(ctx: click.Context, since: str | None, severity: str | None) -> None:
+    """List and export incident forensics data."""
+    if ctx.invoked_subcommand is not None:
+        return
+    engine = ForensicsEngine(decisions_path=str(DEFAULT_DECISIONS_PATH))
+    incidents = engine.detect_incidents(since=since, severity_filter=severity)
+    click.echo("Incidents:")
+    for item in incidents[:50]:
+        ts = item.timestamp[11:16] if len(item.timestamp) >= 16 else item.timestamp
+        click.echo(
+            f"  [{item.severity.upper():<8}] {item.id.upper()}  {item.title:<32} "
+            f"{(item.agent_id or '-'): <12} {ts}"
+        )
+    counts = Counter(item.severity for item in incidents)
+    click.echo("")
+    click.echo(
+        "Total: "
+        f"{len(incidents)} incidents "
+        f"({counts.get('critical', 0)} critical, {counts.get('high', 0)} high, "
+        f"{counts.get('medium', 0)} medium, {counts.get('low', 0)} low)"
+    )
+
+
+@incidents_group.command("report")
+@click.option("--since", type=str, default=None)
+@click.option("--format", "output_format", type=click.Choice(["md", "json"]), default="md")
+@click.option("--output", "output_path", type=click.Path(), default=None)
+def incidents_report(since: str | None, output_format: str, output_path: str | None) -> None:
+    """Generate incident report."""
+    engine = ForensicsEngine(decisions_path=str(DEFAULT_DECISIONS_PATH))
+    report = engine.build_report(since=since)
+    content = engine.export_markdown(report) if output_format == "md" else engine.export_json(report)
+    if output_path is not None:
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        click.echo(f"Report written to {target}")
+        return
+    click.echo(content)
+
+
+@incidents_group.command("risk")
+@click.argument("agent_id")
+def incidents_risk(agent_id: str) -> None:
+    """Show risk profile for one agent."""
+    profile = ForensicsEngine(decisions_path=str(DEFAULT_DECISIONS_PATH)).agent_risk_profile(agent_id)
+    score = profile["risk_score"]
+    level = "low" if score < 0.34 else ("moderate" if score < 0.67 else "high")
+    click.echo(f"Agent Risk Profile: {agent_id}")
+    click.echo(f"  Requests: {profile['total_requests']:,}")
+    click.echo(f"  Denied: {profile['denied']:,} ({profile['deny_rate']*100:.1f}%)")
+    click.echo(f"  Risk Score: {score:.2f}/1.00 ({level})")
+    click.echo(f"  Trend: {profile['trend']}")
+    top_tools = ", ".join(f"{name} ({count})" for name, count in profile["top_denied_tools"][:2]) or "none"
+    click.echo(f"  Top denied tools: {top_tools}")
+    click.echo(f"  Incidents: {profile['incidents']}")
+
+
+@incidents_group.command("timeline")
+@click.option("--agent", "agent_id", default=None)
+@click.option("--incident", "incident_id", default=None)
+@click.option("--last", "last_n", type=int, default=50)
+def incidents_timeline(agent_id: str | None, incident_id: str | None, last_n: int) -> None:
+    """Show timeline of recent security-relevant events."""
+    events = ForensicsEngine(decisions_path=str(DEFAULT_DECISIONS_PATH)).attack_timeline(
+        incident_id=incident_id,
+        agent_id=agent_id,
+        last_n=max(1, int(last_n)),
+    )
+    click.echo(f"Timeline (last {len(events)} events):")
+    for event in events:
+        ts = event["ts"][11:19] if isinstance(event["ts"], str) and len(event["ts"]) >= 19 else event["ts"]
+        reason = event["reasons"][0] if event["reasons"] else "-"
+        click.echo(
+            f"  {ts}  {event['agent_id']:<10}  {event['tool']:<10}  "
+            f"{event['decision']:<5}  {reason}"
+        )
 
 
 @main.command()

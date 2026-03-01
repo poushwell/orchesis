@@ -17,7 +17,9 @@ from orchesis.config import load_policy, validate_policy, validate_policy_warnin
 from orchesis.corpus import RegressionCorpus
 from orchesis.engine import evaluate
 from orchesis.events import EventBus
+from orchesis.forensics import ForensicsEngine, Incident
 from orchesis.integrations import SlackEmitter, SlackNotifier, TelegramEmitter, TelegramNotifier
+from orchesis.integrations.forensics_emitter import ForensicsEmitter
 from orchesis.metrics import MetricsCollector
 from orchesis.otel import OTelEmitter, TraceContext
 from orchesis.policy_store import PolicyStore
@@ -64,6 +66,7 @@ def create_api_app(
     _ = event_bus.subscribe(OTelEmitter(".orchesis/traces.jsonl"))
     corpus = RegressionCorpus()
     alert_subscriber_ids: list[int] = []
+    alert_notifiers: list[Any] = []
 
     app.state.store = store
     app.state.tracker = tracker
@@ -72,13 +75,42 @@ def create_api_app(
     app.state.corpus = corpus
     app.state.policy_path = str(policy_file)
     app.state.decisions_log = decisions_log
+    app.state.incidents_log = ".orchesis/incidents.jsonl"
     app.state.current_version = current_version
     app.state.plugin_modules = list(plugin_modules or [])
     app.state.plugins = load_plugins_for_policy(current_version.policy, app.state.plugin_modules)
     app.state.sync_server = PolicySyncServer()
     app.state.sync_server.set_current_version(current_version.version_id)
 
+    def _incident_alert_callback(incident: Incident) -> None:
+        for notifier in list(alert_notifiers):
+            try:
+                if isinstance(notifier, SlackNotifier):
+                    notifier.send(
+                        notifier.format_anomaly(
+                            {
+                                "severity": incident.severity,
+                                "detail": f"{incident.title} (agent={incident.agent_id}, tool={incident.tool})",
+                            }
+                        )
+                    )
+                elif isinstance(notifier, TelegramNotifier):
+                    notifier.send(
+                        f"Incident [{incident.severity.upper()}]: {incident.title} "
+                        f"(agent={incident.agent_id}, tool={incident.tool})"
+                    )
+            except Exception:
+                continue
+
+    _ = event_bus.subscribe(
+        ForensicsEmitter(
+            incidents_path=app.state.incidents_log,
+            alert_callback=_incident_alert_callback,
+        )
+    )
+
     def _sync_alerts(candidate_policy: dict[str, Any]) -> None:
+        alert_notifiers.clear()
         for sub_id in alert_subscriber_ids:
             event_bus.unsubscribe(sub_id)
         alert_subscriber_ids.clear()
@@ -94,6 +126,7 @@ def create_api_app(
                     channel=slack_cfg.get("channel") if isinstance(slack_cfg.get("channel"), str) else None,
                     notify_on=slack_cfg.get("notify_on") if isinstance(slack_cfg.get("notify_on"), list) else None,
                 )
+                alert_notifiers.append(notifier)
                 alert_subscriber_ids.append(event_bus.subscribe(SlackEmitter(notifier)))
         telegram_cfg = alerts.get("telegram")
         if isinstance(telegram_cfg, dict):
@@ -112,6 +145,7 @@ def create_api_app(
                     if isinstance(telegram_cfg.get("notify_on"), list)
                     else None,
                 )
+                alert_notifiers.append(notifier)
                 alert_subscriber_ids.append(event_bus.subscribe(TelegramEmitter(notifier)))
 
     def _refresh_current_version() -> None:
@@ -535,5 +569,63 @@ def create_api_app(
             raise HTTPException(status_code=404, detail={"error": "node not found"})
         app.state.sync_server.request_force_sync(node_id)
         return {"message": f"sync requested for {node_id}"}
+
+    @app.get("/api/v1/incidents")
+    def incidents_list(
+        since: str | None = None,
+        severity: str | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        engine = ForensicsEngine(decisions_path=app.state.decisions_log)
+        incidents = engine.detect_incidents(since=since, severity_filter=severity)
+        return {"incidents": [incident.__dict__ for incident in incidents], "total": len(incidents)}
+
+    @app.get("/api/v1/incidents/report")
+    def incidents_report(
+        since: str | None = None,
+        format: str = "json",  # noqa: A002
+        authorization: str | None = Header(default=None),
+    ) -> Any:
+        _require_auth(authorization)
+        engine = ForensicsEngine(decisions_path=app.state.decisions_log)
+        report = engine.build_report(since=since)
+        if format.lower() == "markdown":
+            return {"markdown": engine.export_markdown(report)}
+        return json.loads(engine.export_json(report))
+
+    @app.get("/api/v1/agents/{agent_id}/risk")
+    def agent_risk(agent_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        engine = ForensicsEngine(decisions_path=app.state.decisions_log)
+        return engine.agent_risk_profile(agent_id)
+
+    @app.get("/api/v1/incidents/timeline")
+    def incidents_timeline(
+        agent_id: str | None = None,
+        incident_id: str | None = None,
+        last: int = 50,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        engine = ForensicsEngine(decisions_path=app.state.decisions_log)
+        events = engine.attack_timeline(
+            incident_id=incident_id,
+            agent_id=agent_id,
+            last_n=max(1, int(last)),
+        )
+        return {"events": events}
+
+    @app.get("/api/v1/incidents/{incident_id}")
+    def incident_detail(
+        incident_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        engine = ForensicsEngine(decisions_path=app.state.decisions_log)
+        incident = engine.get_incident(incident_id)
+        if incident is None:
+            raise HTTPException(status_code=404, detail={"error": "incident not found"})
+        return incident.__dict__
 
     return app
