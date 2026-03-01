@@ -82,6 +82,7 @@ def create_api_app(
     app.state.plugins = load_plugins_for_policy(current_version.policy, app.state.plugin_modules)
     app.state.sync_server = PolicySyncServer()
     app.state.sync_server.set_current_version(current_version.version_id)
+    app.state.proxy_stats = None
 
     def _build_audit_redactor(candidate_policy: dict[str, Any]) -> AuditRedactor | None:
         logging_cfg = candidate_policy.get("logging")
@@ -495,6 +496,72 @@ def create_api_app(
         )
         return json.loads(generator.to_json(generator.generate()))
 
+    def _evaluate_payload(body: dict[str, Any], trace: TraceContext) -> dict[str, Any]:
+        payload = dict(body)
+        tool_name = payload.get("tool_name")
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            tool_name = payload.get("tool")
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            raise HTTPException(status_code=400, detail={"error": "tool_name or tool is required"})
+        params = payload.get("params")
+        params = dict(params) if isinstance(params, dict) else {}
+        context = payload.get("context")
+        payload_context = dict(context) if isinstance(context, dict) else {}
+
+        agent_id = payload.get("agent_id")
+        if isinstance(agent_id, str) and agent_id.strip():
+            payload_context["agent"] = agent_id.strip()
+        elif not isinstance(payload_context.get("agent"), str):
+            payload_context["agent"] = "__global__"
+        session_type = payload.get("session_type")
+        session_type = session_type if isinstance(session_type, str) and session_type.strip() else "cli"
+
+        payload_context["trace_id"] = trace.trace_id
+        if trace.parent_span_id:
+            payload_context["parent_span_id"] = trace.parent_span_id
+
+        debug_mode = bool(payload.pop("debug", False))
+        eval_payload = {
+            "tool": tool_name.strip(),
+            "params": params,
+            "cost": payload.get("cost", 0.0),
+            "context": payload_context,
+        }
+        started_ns = time.perf_counter_ns()
+        decision = evaluate(
+            eval_payload,
+            app.state.current_version.policy,
+            state=tracker,
+            emitter=event_bus,
+            registry=app.state.current_version.registry,
+            plugins=app.state.plugins,
+            session_type=session_type,
+            debug=debug_mode,
+        )
+        elapsed_us = max(0, (time.perf_counter_ns() - started_ns) // 1000)
+        reason_text = decision.reasons[0] if decision.reasons else ""
+        reason, rule, severity = _parse_reason(reason_text)
+        response = {
+            "decision": "ALLOW" if decision.allowed else "DENY",
+            "allowed": decision.allowed,
+            "reason": reason,
+            "rule": rule,
+            "severity": severity,
+            "latency_us": int(elapsed_us),
+            "policy_version": app.state.current_version.version_id,
+            "recommendations": [] if decision.allowed else _recommendations_for_rule(rule),
+            # Backward-compatible fields for existing clients/tests.
+            "reasons": decision.reasons,
+            "rules_checked": decision.rules_checked,
+            "evaluation_us": int(elapsed_us),
+            "tool_name": tool_name.strip(),
+            "agent_id": payload_context.get("agent", "__global__"),
+            "debug": debug_mode,
+        }
+        if debug_mode:
+            response["debug_trace"] = decision.debug_trace
+        return response
+
     @app.post("/api/v1/evaluate")
     def evaluate_remote(
         body: dict[str, Any],
@@ -504,43 +571,63 @@ def create_api_app(
         _require_auth(authorization)
         _refresh_current_version()
         trace = getattr(request.state, "trace_context", TraceContext())
-        payload = dict(body)
-        context = payload.get("context")
-        payload_context = dict(context) if isinstance(context, dict) else {}
-        payload_context["trace_id"] = trace.trace_id
-        if trace.parent_span_id:
-            payload_context["parent_span_id"] = trace.parent_span_id
-        payload["context"] = payload_context
-        debug_mode = bool(payload.pop("debug", False))
-        started_ns = time.perf_counter_ns()
-        decision = evaluate(
-            payload,
-            app.state.current_version.policy,
-            state=tracker,
-            emitter=event_bus,
-            registry=app.state.current_version.registry,
-            plugins=app.state.plugins,
-            debug=debug_mode,
-        )
-        elapsed_us = max(0, (time.perf_counter_ns() - started_ns) // 1000)
-        request.state.orchesis_decision = "ALLOW" if decision.allowed else "DENY"
-        response = {
-            "allowed": decision.allowed,
-            "reasons": decision.reasons,
-            "rules_checked": decision.rules_checked,
-            "evaluation_us": int(elapsed_us),
-            "policy_version": app.state.current_version.version_id,
-        }
-        if debug_mode:
-            response["debug_trace"] = decision.debug_trace
+        response = _evaluate_payload(body=body, trace=trace)
+        request.state.orchesis_decision = "ALLOW" if response["allowed"] else "DENY"
         logger.debug(
             "remote evaluation completed",
-            allowed=decision.allowed,
-            agent_id=payload_context.get("agent", "__global__"),
-            tool=payload.get("tool"),
-            debug=debug_mode,
+            allowed=response["allowed"],
+            agent_id=response.get("agent_id", "__global__"),
+            tool=response.get("tool_name"),
+            debug=bool(response.get("debug", False)),
         )
         return response
+
+    @app.post("/api/v1/evaluate/batch")
+    def evaluate_batch(
+        body: dict[str, Any],
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        _refresh_current_version()
+        trace = getattr(request.state, "trace_context", TraceContext())
+        evaluations = body.get("evaluations")
+        if not isinstance(evaluations, list):
+            raise HTTPException(status_code=400, detail={"error": "evaluations must be a list"})
+        results: list[dict[str, Any]] = []
+        for item in evaluations:
+            if isinstance(item, dict):
+                results.append(_evaluate_payload(item, trace))
+        denied_count = sum(1 for item in results if item.get("allowed") is False)
+        request.state.orchesis_decision = "DENY" if denied_count > 0 else "ALLOW"
+        return {
+            "results": results,
+            "summary": {
+                "total": len(results),
+                "allowed": len(results) - denied_count,
+                "denied": denied_count,
+            },
+        }
+
+    @app.get("/api/v1/proxy/stats")
+    def proxy_stats() -> dict[str, Any]:
+        stats = getattr(app.state, "proxy_stats", None)
+        if hasattr(stats, "to_dict"):
+            payload = stats.to_dict()
+            if isinstance(payload, dict):
+                return payload
+        if isinstance(stats, dict):
+            return stats
+        return {
+            "requests_total": 0,
+            "requests_allowed": 0,
+            "requests_denied": 0,
+            "requests_passthrough": 0,
+            "requests_error": 0,
+            "bytes_proxied": 0,
+            "avg_latency_ms": 0.0,
+            "uptime_seconds": 0,
+        }
 
     @app.post("/api/v1/nodes/heartbeat")
     def nodes_heartbeat(
@@ -662,3 +749,27 @@ def create_api_app(
         return incident.__dict__
 
     return app
+
+
+def _recommendations_for_rule(rule: str) -> list[str]:
+    mapping = {
+        "file_access": ["Remove sensitive paths from agent workspace"],
+        "sql_restriction": ["Use read-only SQL operations for agent queries"],
+        "rate_limit": ["Reduce request rate or increase policy rate limit"],
+        "budget_limit": ["Reduce cost per request or raise budget threshold"],
+        "token_budget": ["Lower context size or split tool calls into smaller chunks"],
+    }
+    return mapping.get(rule, ["Review policy and request payload before retrying"])
+
+
+def _parse_reason(reason: str) -> tuple[str, str, str]:
+    text = reason.strip() if isinstance(reason, str) and reason.strip() else "blocked_by_policy"
+    rule = text.split(":", 1)[0].strip() if ":" in text else "policy"
+    lowered = text.lower()
+    if "daily token budget" in lowered:
+        severity = "high"
+    elif "denied" in lowered or "exceeded" in lowered:
+        severity = "medium"
+    else:
+        severity = "low"
+    return text, rule, severity

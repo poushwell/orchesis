@@ -59,6 +59,8 @@ from orchesis.mutations import MutationEngine
 from orchesis.mcp_config import McpProxySettings
 from orchesis.mcp_proxy import run_stdio_proxy
 from orchesis.marketplace import PolicyMarketplace
+from orchesis.proxy import OrchesisProxy, ProxyConfig
+from orchesis.interceptors import McpStdioProxy
 from orchesis.structured_log import StructuredLogger
 from orchesis.sync import PolicySyncClient
 from orchesis.templates import TEMPLATE_NAMES, load_template_text
@@ -456,21 +458,98 @@ def serve(port: int, policy_path: str, plugin_modules: tuple[str, ...]) -> None:
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 
+@main.command("proxy")
+@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
+@click.option("--port", type=int, default=8100)
+@click.option("--host", "listen_host", type=str, default="127.0.0.1")
+@click.option("--upstream", "upstream_url", type=str, required=True)
+@click.option(
+    "--mode",
+    "intercept_mode",
+    type=click.Choice(["tool_call", "all", "passthrough"]),
+    default="tool_call",
+)
+@click.option("--buffer-responses/--no-buffer-responses", default=True)
+def proxy_command(
+    policy_path: str,
+    port: int,
+    listen_host: str,
+    upstream_url: str,
+    intercept_mode: str,
+    buffer_responses: bool,
+) -> None:
+    """Run transparent HTTP proxy interceptor."""
+    policy = load_policy(policy_path)
+    tracker = RateLimitTracker(persist_path=None)
+    config = ProxyConfig(
+        listen_host=listen_host,
+        listen_port=max(1, int(port)),
+        upstream_url=upstream_url,
+        intercept_mode=intercept_mode,
+        buffer_responses=bool(buffer_responses),
+    )
+
+    def _engine(request_payload: dict[str, Any]):
+        return evaluate(request_payload, policy, state=tracker)
+
+    proxy = OrchesisProxy(engine=_engine, config=config)
+    click.echo("Orchesis Proxy starting...")
+    click.echo(f"Policy: {policy_path}")
+    click.echo(f"Mode: {intercept_mode}")
+    click.echo(f"Listening: http://{listen_host}:{port}")
+    click.echo(f"Upstream: {upstream_url}")
+    click.echo("")
+    click.echo("Press Ctrl+C to stop.")
+
+    async def _run() -> None:
+        await proxy.start()
+        try:
+            while True:
+                await asyncio.sleep(1.0)
+        finally:
+            await proxy.stop()
+
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        click.echo("\nProxy stopped.")
+
+
 @main.command("mcp-proxy")
+@click.pass_context
 @click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
 @click.option("--control-url", type=str, default=None)
 @click.option("--api-token", type=str, default=None)
 @click.option("--node-id", type=str, default=None)
 @click.option("--sync-poll", "sync_poll_interval", type=int, default=30)
+@click.argument("server_command", nargs=-1, type=str)
 def mcp_proxy_command(
+    ctx: click.Context,
     policy_path: str,
     control_url: str | None,
     api_token: str | None,
     node_id: str | None,
     sync_poll_interval: int,
+    server_command: tuple[str, ...],
 ) -> None:
     """Run MCP stdio proxy with optional control-plane policy sync."""
+    _ = ctx
     token = api_token or os.getenv("API_TOKEN")
+    if server_command:
+        policy = load_policy(policy_path)
+        tracker = RateLimitTracker(persist_path=None)
+
+        def _engine(request_payload: dict[str, Any], session_type: str = "cli"):
+            return evaluate(request_payload, policy, state=tracker, session_type=session_type)
+
+        proxy = McpStdioProxy(engine=_engine, server_command=list(server_command))
+        click.echo("Orchesis MCP Proxy starting...")
+        click.echo(f"Policy: {policy_path}")
+        click.echo(f"Server: {' '.join(server_command)}")
+        click.echo("Transport: stdio")
+        asyncio.run(proxy.start())
+        return
+
     base = McpProxySettings.from_env()
     settings = McpProxySettings(
         policy_path=policy_path,

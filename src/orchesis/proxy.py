@@ -1,14 +1,20 @@
 """FastAPI proxy layer using Orchesis rule engine."""
 
+import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+import json
 import os
+import threading
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
+from orchesis.contrib.secret_scanner import SecretScanner
 from orchesis.config import PolicyWatcher, load_policy
 from orchesis.engine import evaluate
 from orchesis.events import EventBus
@@ -22,6 +28,483 @@ from orchesis.state import RateLimitTracker
 from orchesis.structured_log import StructuredLogger
 from orchesis.telemetry import JsonlEmitter
 from orchesis.webhooks import WebhookConfig, WebhookEmitter
+
+
+@dataclass
+class ProxyConfig:
+    listen_host: str = "127.0.0.1"
+    listen_port: int = 8100
+    upstream_url: str | None = None
+    intercept_mode: str = "tool_call"
+    timeout_seconds: float = 30.0
+    max_body_size: int = 10_000_000
+    log_decisions: bool = True
+    buffer_responses: bool = True
+
+
+@dataclass
+class ProxyStats:
+    """Runtime statistics for asyncio proxy mode."""
+
+    requests_total: int = 0
+    requests_allowed: int = 0
+    requests_denied: int = 0
+    requests_passthrough: int = 0
+    requests_error: int = 0
+    bytes_proxied: int = 0
+    avg_latency_ms: float = 0.0
+    start_time: float = field(default_factory=time.time)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        with self._lock:
+            uptime = max(0.0, time.time() - self.start_time)
+            return {
+                "requests_total": self.requests_total,
+                "requests_allowed": self.requests_allowed,
+                "requests_denied": self.requests_denied,
+                "requests_passthrough": self.requests_passthrough,
+                "requests_error": self.requests_error,
+                "bytes_proxied": self.bytes_proxied,
+                "avg_latency_ms": self.avg_latency_ms,
+                "uptime_seconds": int(uptime),
+            }
+
+    def record_request(self, decision: str, latency_ms: float, bytes_count: int) -> None:
+        with self._lock:
+            self.requests_total += 1
+            label = (decision or "").upper()
+            if label == "ALLOW":
+                self.requests_allowed += 1
+            elif label == "DENY":
+                self.requests_denied += 1
+            elif label == "PASSTHROUGH":
+                self.requests_passthrough += 1
+            elif label == "ERROR":
+                self.requests_error += 1
+            self.bytes_proxied += max(0, int(bytes_count))
+            if self.requests_total == 1:
+                self.avg_latency_ms = max(0.0, float(latency_ms))
+            else:
+                prev = self.avg_latency_ms
+                n = float(self.requests_total)
+                self.avg_latency_ms = ((prev * (n - 1.0)) + max(0.0, float(latency_ms))) / n
+
+
+class OrchesisProxy:
+    """Asyncio HTTP proxy that can enforce Orchesis policy checks."""
+
+    def __init__(self, engine, config: ProxyConfig, event_bus=None, redactor=None):
+        self._engine = engine
+        self._config = config
+        self._event_bus = event_bus
+        self._redactor = redactor
+        self._stats = ProxyStats()
+        self._server: asyncio.base_events.Server | None = None
+        self._secret_scanner = SecretScanner()
+
+    @property
+    def stats(self) -> ProxyStats:
+        return self._stats
+
+    async def start(self):
+        self._server = await asyncio.start_server(
+            self.handle_request,
+            host=self._config.listen_host,
+            port=self._config.listen_port,
+        )
+        return self._server
+
+    async def stop(self):
+        if self._server is not None:
+            self._server.close()
+            await self._server.wait_closed()
+            self._server = None
+
+    async def handle_request(self, reader, writer):
+        started = time.perf_counter()
+        decision_label = "ERROR"
+        bytes_count = 0
+        try:
+            parsed = await self._read_http_request(reader)
+            if parsed is None:
+                writer.write(self._build_error_response(400, "bad_request", "Malformed HTTP request"))
+                await writer.drain()
+                decision_label = "ERROR"
+                return
+            method, path, headers, body = parsed
+            bytes_count = len(body)
+
+            if len(body) > self._config.max_body_size:
+                writer.write(self._build_error_response(413, "payload_too_large", "Request body too large"))
+                await writer.drain()
+                decision_label = "ERROR"
+                return
+
+            tool_call = self._extract_tool_call(method, path, headers, body)
+            allowed = True
+            deny_reason = "blocked_by_policy"
+            deny_rule = "policy"
+            deny_severity = "medium"
+            if self._config.intercept_mode != "passthrough":
+                if self._config.intercept_mode == "all":
+                    payload = {
+                        "tool": tool_call[0] if tool_call else f"http_{method.lower()}",
+                        "params": tool_call[1] if tool_call else {"path": path, "method": method},
+                        "context": {"path": path, "method": method, "agent": headers.get("x-agent", "proxy_agent")},
+                        "cost": 0.0,
+                    }
+                    decision = self._evaluate(payload)
+                    allowed = bool(getattr(decision, "allowed", True))
+                    if not allowed:
+                        reason, rule, severity = self._extract_reason_rule_severity(decision)
+                        deny_reason, deny_rule, deny_severity = reason, rule, severity
+                elif tool_call is not None:
+                    payload = {
+                        "tool": tool_call[0],
+                        "params": tool_call[1],
+                        "context": {"path": path, "method": method, "agent": headers.get("x-agent", "proxy_agent")},
+                        "cost": 0.0,
+                    }
+                    decision = self._evaluate(payload)
+                    allowed = bool(getattr(decision, "allowed", True))
+                    if not allowed:
+                        reason, rule, severity = self._extract_reason_rule_severity(decision)
+                        deny_reason, deny_rule, deny_severity = reason, rule, severity
+                else:
+                    decision_label = "PASSTHROUGH"
+
+            if self._config.intercept_mode == "passthrough":
+                decision_label = "PASSTHROUGH"
+
+            if not allowed and self._config.intercept_mode != "passthrough":
+                writer.write(self._build_deny_response(deny_reason, deny_rule, deny_severity))
+                await writer.drain()
+                decision_label = "DENY"
+                self._emit_event(
+                    {
+                        "event": "proxy_decision",
+                        "decision": "DENY",
+                        "rule": deny_rule,
+                        "reason": deny_reason,
+                        "path": path,
+                        "method": method,
+                    }
+                )
+                return
+
+            status, resp_headers, resp_body = await self._forward_request(method, path, headers, body)
+            if self._config.buffer_responses and tool_call is not None:
+                self._scan_response(tool_call[0], resp_body)
+
+            response_bytes = self._build_response_bytes(status, resp_headers, resp_body)
+            writer.write(response_bytes)
+            await writer.drain()
+            if decision_label not in {"PASSTHROUGH", "DENY"}:
+                decision_label = "ALLOW"
+            self._emit_event(
+                {
+                    "event": "proxy_decision",
+                    "decision": decision_label,
+                    "path": path,
+                    "method": method,
+                    "status": status,
+                }
+            )
+        except Exception:
+            try:
+                writer.write(self._build_error_response(400, "bad_request", "Malformed HTTP request"))
+                await writer.drain()
+            except Exception:
+                pass
+            decision_label = "ERROR"
+        finally:
+            latency_ms = (time.perf_counter() - started) * 1000.0
+            self._stats.record_request(decision_label, latency_ms, bytes_count)
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    def _extract_tool_call(
+        self, method: str, path: str, headers: dict[str, str], body: bytes
+    ) -> tuple[str, dict[str, Any]] | None:
+        if method.upper() != "POST":
+            return None
+        parsed: dict[str, Any] | None = None
+        content_type = headers.get("content-type", "").lower()
+        if body and ("json" in content_type or content_type == ""):
+            try:
+                loaded = json.loads(body.decode("utf-8"))
+                if isinstance(loaded, dict):
+                    parsed = loaded
+            except Exception:
+                parsed = None
+
+        if parsed is not None:
+            tool_name = parsed.get("tool_name")
+            params = parsed.get("params")
+            if isinstance(tool_name, str) and isinstance(params, dict):
+                return tool_name, params
+
+            function_name = parsed.get("function")
+            arguments = parsed.get("arguments")
+            if isinstance(function_name, str) and isinstance(arguments, dict):
+                return function_name, arguments
+
+            action = parsed.get("action")
+            input_params = parsed.get("input")
+            if isinstance(action, str) and isinstance(input_params, dict):
+                return action, input_params
+
+            if parsed.get("method") == "tools/call":
+                rpc_params = parsed.get("params")
+                if isinstance(rpc_params, dict):
+                    name = rpc_params.get("name")
+                    args = rpc_params.get("arguments")
+                    if isinstance(name, str):
+                        return name, args if isinstance(args, dict) else {}
+
+            jsonrpc_method = parsed.get("method")
+            if parsed.get("jsonrpc") == "2.0" and isinstance(jsonrpc_method, str):
+                rpc_params = parsed.get("params")
+                return jsonrpc_method, rpc_params if isinstance(rpc_params, dict) else {}
+
+        parts = [item for item in path.split("/") if item]
+        if len(parts) >= 2 and parts[0] == "tools":
+            tool_name = parts[1]
+            params: dict[str, Any] = {}
+            if body:
+                try:
+                    loaded = json.loads(body.decode("utf-8"))
+                    if isinstance(loaded, dict):
+                        params = loaded
+                except Exception:
+                    params = {}
+            return tool_name, params
+        return None
+
+    def _build_deny_response(self, reason: str, rule: str, severity: str = "medium") -> bytes:
+        payload = {
+            "error": "blocked_by_policy",
+            "reason": reason,
+            "rule": rule,
+            "severity": severity,
+            "documentation": "https://orchesis.dev/docs/policies",
+        }
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        lines = [
+            "HTTP/1.1 403 Forbidden",
+            "Content-Type: application/json",
+            f"Content-Length: {len(body)}",
+            "Connection: close",
+            "X-Orchesis-Decision: DENY",
+            f"X-Orchesis-Rule: {rule}",
+            "",
+            "",
+        ]
+        return "\r\n".join(lines).encode("utf-8") + body
+
+    async def _forward_request(
+        self, method: str, path: str, headers: dict[str, str], body: bytes
+    ) -> tuple[int, dict[str, str], bytes]:
+        upstream = self._config.upstream_url
+        if not isinstance(upstream, str) or not upstream.strip():
+            return 502, {"content-type": "application/json"}, b'{"error":"upstream_not_configured"}'
+
+        parsed = urlsplit(upstream)
+        if parsed.scheme not in {"http"}:
+            return 502, {"content-type": "application/json"}, b'{"error":"unsupported_upstream_scheme"}'
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 80
+        base_path = parsed.path or ""
+        target_path = path if path.startswith("/") else f"/{path}"
+        full_path = f"{base_path}{target_path}"
+
+        req_headers = dict(headers)
+        req_headers["host"] = f"{host}:{port}"
+        req_headers["connection"] = "close"
+        req_headers["content-length"] = str(len(body))
+
+        request_head = [f"{method} {full_path} HTTP/1.1"]
+        for key, value in req_headers.items():
+            if key.lower() in {"proxy-connection"}:
+                continue
+            request_head.append(f"{key}: {value}")
+        request_bytes = ("\r\n".join(request_head) + "\r\n\r\n").encode("utf-8") + body
+
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port),
+                timeout=self._config.timeout_seconds,
+            )
+        except Exception:
+            return 502, {"content-type": "application/json"}, b'{"error":"upstream_connection_failed"}'
+
+        try:
+            writer.write(request_bytes)
+            await asyncio.wait_for(writer.drain(), timeout=self._config.timeout_seconds)
+            response = await self._read_http_response(reader)
+            if response is None:
+                return 502, {"content-type": "application/json"}, b'{"error":"invalid_upstream_response"}'
+            return response
+        except Exception:
+            return 502, {"content-type": "application/json"}, b'{"error":"upstream_timeout"}'
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    def _scan_response(self, tool_name: str, response_body: bytes) -> list[dict[str, Any]]:
+        findings: list[dict[str, Any]] = []
+        try:
+            text = response_body.decode("utf-8", errors="ignore")
+            findings = self._secret_scanner.scan_text(text)
+            if findings:
+                self._emit_event(
+                    {
+                        "event": "proxy_response_scan",
+                        "tool": tool_name,
+                        "findings": findings[:10],
+                        "count": len(findings),
+                    }
+                )
+        except Exception:
+            return []
+        return findings
+
+    def _evaluate(self, payload: dict[str, Any]):
+        if hasattr(self._engine, "evaluate"):
+            return self._engine.evaluate(payload)
+        if callable(self._engine):
+            return self._engine(payload)
+        raise TypeError("Proxy engine must be callable or provide evaluate().")
+
+    def _emit_event(self, event: dict[str, Any]) -> None:
+        if self._event_bus is None:
+            return
+        try:
+            self._event_bus.emit(event)
+        except Exception:
+            pass
+
+    def _extract_reason_rule_severity(self, decision) -> tuple[str, str, str]:
+        reasons = getattr(decision, "reasons", [])
+        reason = reasons[0] if isinstance(reasons, list) and reasons else "blocked_by_policy"
+        rule = reason.split(":", 1)[0] if ":" in reason else "policy"
+        severity = "high" if "daily token budget" in reason.lower() else "medium"
+        return reason, rule, severity
+
+    async def _read_http_request(
+        self, reader
+    ) -> tuple[str, str, dict[str, str], bytes] | None:
+        header_bytes = await self._read_headers(reader)
+        if header_bytes is None:
+            return None
+        try:
+            header_text = header_bytes.decode("iso-8859-1")
+            lines = header_text.split("\r\n")
+            request_line = lines[0]
+            method, path, _http = request_line.split(" ", 2)
+            headers: dict[str, str] = {}
+            for line in lines[1:]:
+                if not line:
+                    continue
+                if ":" not in line:
+                    return None
+                key, value = line.split(":", 1)
+                headers[key.strip().lower()] = value.strip()
+            content_length = int(headers.get("content-length", "0") or "0")
+            if content_length < 0:
+                return None
+            if content_length > self._config.max_body_size:
+                return method, path, headers, b"x" * (self._config.max_body_size + 1)
+            body = b""
+            if content_length > 0:
+                body = await asyncio.wait_for(
+                    reader.readexactly(content_length),
+                    timeout=self._config.timeout_seconds,
+                )
+            return method, path, headers, body
+        except Exception:
+            return None
+
+    async def _read_http_response(
+        self, reader
+    ) -> tuple[int, dict[str, str], bytes] | None:
+        header_bytes = await self._read_headers(reader)
+        if header_bytes is None:
+            return None
+        try:
+            header_text = header_bytes.decode("iso-8859-1")
+            lines = header_text.split("\r\n")
+            status_line = lines[0]
+            _http, status_code, _rest = status_line.split(" ", 2)
+            headers: dict[str, str] = {}
+            for line in lines[1:]:
+                if not line:
+                    continue
+                if ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                headers[key.strip().lower()] = value.strip()
+            content_length = int(headers.get("content-length", "0") or "0")
+            if content_length > 0:
+                body = await asyncio.wait_for(
+                    reader.readexactly(content_length),
+                    timeout=self._config.timeout_seconds,
+                )
+            else:
+                body = await asyncio.wait_for(reader.read(), timeout=self._config.timeout_seconds)
+            return int(status_code), headers, body
+        except Exception:
+            return None
+
+    async def _read_headers(self, reader) -> bytes | None:
+        try:
+            raw = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=self._config.timeout_seconds)
+            return raw[:-4]
+        except Exception:
+            return None
+
+    def _build_error_response(self, status: int, error: str, message: str) -> bytes:
+        reasons = {400: "Bad Request", 413: "Payload Too Large", 502: "Bad Gateway"}
+        phrase = reasons.get(status, "Error")
+        payload = {"error": error, "message": message}
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        lines = [
+            f"HTTP/1.1 {status} {phrase}",
+            "Content-Type: application/json",
+            f"Content-Length: {len(body)}",
+            "Connection: close",
+            "",
+            "",
+        ]
+        return "\r\n".join(lines).encode("utf-8") + body
+
+    def _build_response_bytes(self, status: int, headers: dict[str, str], body: bytes) -> bytes:
+        phrase_map = {
+            200: "OK",
+            201: "Created",
+            204: "No Content",
+            400: "Bad Request",
+            403: "Forbidden",
+            404: "Not Found",
+            500: "Internal Server Error",
+            502: "Bad Gateway",
+        }
+        phrase = phrase_map.get(status, "OK")
+        merged = dict(headers)
+        merged["content-length"] = str(len(body))
+        merged["connection"] = "close"
+        merged["x-orchesis-decision"] = "ALLOW"
+        head = [f"HTTP/1.1 {status} {phrase}"]
+        for key, value in merged.items():
+            head.append(f"{key}: {value}")
+        return ("\r\n".join(head) + "\r\n\r\n").encode("utf-8") + body
 
 
 def _extract_tool(request: Request, body_json: dict[str, Any] | None) -> str:
