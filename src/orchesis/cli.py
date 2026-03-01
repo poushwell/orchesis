@@ -40,6 +40,15 @@ from orchesis.plugins import load_plugins_for_policy
 from orchesis.replay import ReplayEngine, read_events_from_jsonl
 from orchesis.reliability import ReliabilityReportGenerator
 from orchesis.scenarios import AdversarialScenarios
+from orchesis.scanner import (
+    ScanReport,
+    discover_mcp_configs,
+    format_report_markdown,
+    format_report_text,
+    report_to_dict,
+    scan_path,
+    severity_meets_threshold,
+)
 from orchesis.signing import generate_keypair, sign_entry, verify_entry
 from orchesis.state import RateLimitTracker
 from orchesis.telemetry import InMemoryEmitter, JsonlEmitter
@@ -1054,6 +1063,194 @@ def corpus(show_stats: bool, generate_tests: bool, show_quality: bool) -> None:
             click.echo("  Suggestions:")
             for idx, item in enumerate(suggestions[:5], start=1):
                 click.echo(f"    {idx}. {item}")
+
+
+def _format_gate_box(lines: list[tuple[str, str]]) -> str:
+    width = 34
+    top = "╔" + ("═" * width) + "╗"
+    sep = "╠" + ("═" * width) + "╣"
+    bottom = "╚" + ("═" * width) + "╝"
+    body = [top, f"║ {'Orchesis CI Security Gate':^{width}} ║", sep]
+    for left, right in lines:
+        text = f"{left:<22} {right:>9}"
+        body.append(f"║ {text[:width]:<{width}} ║")
+    body.append(bottom)
+    return "\n".join(body)
+
+
+def _has_rule_tests(policy: dict[str, Any], tests_dir: Path) -> bool:
+    rules = policy.get("rules")
+    if not isinstance(rules, list):
+        return False
+    test_text = ""
+    if tests_dir.exists():
+        for item in tests_dir.rglob("test_*.py"):
+            try:
+                test_text += item.read_text(encoding="utf-8").lower() + "\n"
+            except OSError:
+                continue
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        name = rule.get("name")
+        if isinstance(name, str) and name.lower() not in test_text:
+            return False
+    return True
+
+
+def _policy_guard_checks(policy: dict[str, Any]) -> dict[str, bool]:
+    rules = policy.get("rules")
+    rules_list = rules if isinstance(rules, list) else []
+    has_rate = any(isinstance(item, dict) and item.get("name") == "rate_limit" for item in rules_list)
+    has_budget = any(isinstance(item, dict) and item.get("name") == "budget_limit" for item in rules_list)
+    has_denied_paths = any(
+        isinstance(item, dict)
+        and item.get("name") == "file_access"
+        and isinstance(item.get("denied_paths"), list)
+        and len(item.get("denied_paths")) > 0
+        for item in rules_list
+    )
+    alerts = policy.get("alerts")
+    has_alerts = isinstance(alerts, dict) and len(alerts) > 0
+    return {
+        "rate_limits_defined": has_rate,
+        "budget_limits_defined": has_budget,
+        "denied_paths_defined": has_denied_paths,
+        "alert_config_present": has_alerts,
+    }
+
+
+@main.command("scan")
+@click.argument("path_arg", type=click.Path(), required=False)
+@click.option("--format", "output_format", type=click.Choice(["text", "json", "md"]), default="text")
+@click.option("--severity-threshold", "severity_threshold", default="medium")
+@click.option("--mcp", "scan_mcp_configs", is_flag=True, default=False)
+def scan_command(
+    path_arg: str | None,
+    output_format: str,
+    severity_threshold: str,
+    scan_mcp_configs: bool,
+) -> None:
+    """Static scan for skills, MCP configs, and policy files."""
+    reports: list[ScanReport] = []
+    if scan_mcp_configs:
+        discovered = discover_mcp_configs()
+        click.echo("Discovered MCP configs:")
+        for cfg in discovered:
+            click.echo(f"  {cfg}")
+        for cfg in discovered:
+            reports.extend(scan_path(cfg))
+    elif path_arg is not None:
+        target = Path(path_arg)
+        if not target.exists():
+            raise click.ClickException(f"Path not found: {target}")
+        reports = scan_path(target)
+    else:
+        raise click.ClickException("Provide <path> or use --mcp")
+
+    if output_format == "json":
+        payload = [report_to_dict(item) for item in reports]
+        click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
+    for report in reports:
+        if output_format == "md":
+            click.echo(format_report_markdown(report, threshold=severity_threshold))
+        else:
+            click.echo(format_report_text(report, threshold=severity_threshold))
+        click.echo("")
+
+
+@main.command("gate")
+@click.option("--policy", "policy_path", type=click.Path(), required=True)
+@click.option("--scan-dir", "scan_dir", type=click.Path(), default=".")
+@click.option("--fail-on", "fail_on", default="medium")
+@click.option("--report", "report_path", type=click.Path(), default=None)
+def gate(policy_path: str, scan_dir: str, fail_on: str, report_path: str | None) -> None:
+    """Run CI security gate over policy and static scan."""
+    policy_file = Path(policy_path)
+    if not policy_file.exists():
+        click.echo(f"Gate error: policy file not found: {policy_file}")
+        raise SystemExit(2)
+
+    try:
+        policy = load_policy(policy_file)
+    except Exception as error:  # noqa: BLE001
+        click.echo(f"Gate error: invalid policy: {error}")
+        raise SystemExit(2)
+
+    policy_errors = validate_policy(policy)
+    policy_ok = len(policy_errors) == 0
+    checks = _policy_guard_checks(policy)
+    rule_tests_ok = _has_rule_tests(policy, Path("tests"))
+
+    scan_reports: list[ScanReport] = []
+    if scan_dir:
+        target = Path(scan_dir)
+        if not target.exists():
+            click.echo(f"Gate error: scan directory not found: {target}")
+            raise SystemExit(2)
+        scan_reports = scan_path(target)
+
+    findings: list[dict[str, Any]] = []
+    for report in scan_reports:
+        for finding in report.findings:
+            findings.append(
+                {
+                    "target": report.target,
+                    "severity": finding.severity,
+                    "category": finding.category,
+                    "description": finding.description,
+                    "location": finding.location,
+                }
+            )
+
+    findings_above = [
+        item for item in findings if severity_meets_threshold(str(item["severity"]), fail_on)
+    ]
+    result_pass = (
+        policy_ok
+        and checks["rate_limits_defined"]
+        and checks["budget_limits_defined"]
+        and checks["denied_paths_defined"]
+        and len(findings_above) == 0
+    )
+
+    by_sev = Counter(str(item["severity"]).lower() for item in findings_above)
+    gate_lines = [
+        ("Policy validation:", "[OK] PASS" if policy_ok else "[FAIL] FAIL"),
+        (
+            "Scan findings:",
+            "none"
+            if len(findings_above) == 0
+            else ", ".join(f"{count} {sev}" for sev, count in sorted(by_sev.items())),
+        ),
+        ("Rate limits defined:", "[OK] YES" if checks["rate_limits_defined"] else "[FAIL] NO"),
+        ("Budget limits defined:", "[OK] YES" if checks["budget_limits_defined"] else "[FAIL] NO"),
+        ("Denied paths defined:", "[OK] YES" if checks["denied_paths_defined"] else "[FAIL] NO"),
+        ("Alert config present:", "[OK] YES" if checks["alert_config_present"] else "[FAIL] NO"),
+        ("Rule tests coverage:", "[OK] YES" if rule_tests_ok else "[FAIL] NO"),
+        ("Result:", f"{'PASS' if result_pass else 'FAIL'} (--fail-on {fail_on})"),
+    ]
+    click.echo(_format_gate_box(gate_lines))
+
+    report_payload = {
+        "policy_ok": policy_ok,
+        "policy_errors": policy_errors,
+        "checks": checks,
+        "rule_tests_coverage": rule_tests_ok,
+        "scan_findings_total": len(findings),
+        "scan_findings_above_threshold": len(findings_above),
+        "fail_on": fail_on,
+        "result": "PASS" if result_pass else "FAIL",
+        "reports": [report_to_dict(item) for item in scan_reports],
+    }
+    if report_path is not None:
+        target = Path(report_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(report_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    raise SystemExit(0 if result_pass else 1)
 
 
 @main.command()

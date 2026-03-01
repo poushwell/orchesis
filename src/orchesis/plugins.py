@@ -116,6 +116,7 @@ def load_plugins_for_policy(
         module_names.extend(modules)
     for rule_type in _policy_custom_rule_types(policy):
         module_names.append(f"orchesis.contrib.{rule_type}")
+        module_names.append(f"orchesis.contrib.{rule_type}_plugin")
     seen: set[str] = set()
     for module_name in module_names:
         if module_name in seen:
