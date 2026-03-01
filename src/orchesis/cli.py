@@ -1,6 +1,8 @@
 """CLI entrypoint for Orchesis."""
 
+import asyncio
 import json
+import os
 import time
 import tracemalloc
 from concurrent.futures import ThreadPoolExecutor
@@ -12,7 +14,9 @@ from random import Random
 from typing import Any
 
 import click
+import httpx
 import uvicorn
+import yaml
 from yaml import YAMLError
 
 from orchesis.audit import AuditEngine, AuditQuery
@@ -39,7 +43,10 @@ from orchesis.signing import generate_keypair, sign_entry, verify_entry
 from orchesis.state import RateLimitTracker
 from orchesis.telemetry import InMemoryEmitter, JsonlEmitter
 from orchesis.mutations import MutationEngine
+from orchesis.mcp_config import McpProxySettings
+from orchesis.mcp_proxy import run_stdio_proxy
 from orchesis.structured_log import StructuredLogger
+from orchesis.sync import PolicySyncClient
 from orchesis.templates import TEMPLATE_NAMES, load_template_text
 
 DEFAULT_KEYS_DIR = Path(".orchesis") / "keys"
@@ -433,6 +440,106 @@ def serve(port: int, policy_path: str, plugin_modules: tuple[str, ...]) -> None:
         plugin_modules=_normalize_plugin_modules(plugin_modules),
     )
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+
+@main.command("mcp-proxy")
+@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
+@click.option("--control-url", type=str, default=None)
+@click.option("--api-token", type=str, default=None)
+@click.option("--node-id", type=str, default=None)
+@click.option("--sync-poll", "sync_poll_interval", type=int, default=30)
+def mcp_proxy_command(
+    policy_path: str,
+    control_url: str | None,
+    api_token: str | None,
+    node_id: str | None,
+    sync_poll_interval: int,
+) -> None:
+    """Run MCP stdio proxy with optional control-plane policy sync."""
+    token = api_token or os.getenv("API_TOKEN")
+    base = McpProxySettings.from_env()
+    settings = McpProxySettings(
+        policy_path=policy_path,
+        downstream_command=base.downstream_command,
+        downstream_args=base.downstream_args,
+        default_tool_cost=base.default_tool_cost,
+        downstream_timeout_seconds=base.downstream_timeout_seconds,
+        control_url=control_url,
+        api_token=token,
+        node_id=node_id,
+        sync_poll_interval_seconds=max(1, sync_poll_interval),
+    )
+    asyncio.run(run_stdio_proxy(settings))
+
+
+@main.command("nodes")
+@click.option("--api-url", default="http://localhost:8080")
+@click.option("--api-token", default=None)
+def nodes(api_url: str, api_token: str | None) -> None:
+    """List connected enforcement nodes from control plane."""
+    token = api_token or os.getenv("API_TOKEN")
+    if not isinstance(token, str) or not token.strip():
+        raise click.ClickException("API token is required. Use --api-token or API_TOKEN env var.")
+    headers = {"Authorization": f"Bearer {token.strip()}"}
+    try:
+        response = httpx.get(f"{api_url.rstrip('/')}/api/v1/nodes", headers=headers, timeout=10.0)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as error:  # noqa: BLE001
+        raise click.ClickException(f"Failed to fetch nodes: {error}") from error
+    if not isinstance(payload, dict):
+        raise click.ClickException("Invalid response payload from control plane.")
+    nodes_payload = payload.get("nodes")
+    if not isinstance(nodes_payload, list):
+        nodes_payload = []
+    click.echo("Connected Nodes:")
+    for item in nodes_payload:
+        if not isinstance(item, dict):
+            continue
+        state = "[IN SYNC]" if item.get("in_sync") else "[OUT OF SYNC]"
+        click.echo(
+            f"  {item.get('node_id', 'unknown'):<16} "
+            f"v:{item.get('policy_version', 'unknown'):<12} "
+            f"last seen: {item.get('last_seen', 'unknown')}   {state}"
+        )
+    click.echo("")
+    click.echo(
+        "Total: "
+        f"{payload.get('total', 0)} nodes, "
+        f"{payload.get('in_sync', 0)} in sync, "
+        f"{payload.get('out_of_sync', 0)} out of sync"
+    )
+
+
+@main.command("sync")
+@click.option("--control-url", required=True)
+@click.option("--api-token", required=True)
+@click.option("--policy", "policy_path", default="policy.yaml")
+def sync_policy(control_url: str, api_token: str, policy_path: str) -> None:
+    """Run one-shot policy synchronization against control plane."""
+    client = PolicySyncClient(
+        control_url=control_url,
+        api_token=api_token,
+        poll_interval_seconds=30,
+    )
+    click.echo("Syncing with control plane...")
+    before = client.current_version or "unknown"
+    status = client.sync_once()
+    remote = status.policy_version
+    click.echo(f"Current version: {before}")
+    click.echo(f"Remote version: {remote}")
+    updated = isinstance(client.latest_policy, dict)
+    if updated:
+        target = Path(policy_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            yaml.safe_dump(client.latest_policy, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        click.echo(f"Policy updated: {before} -> {client.current_version}")
+    else:
+        click.echo("Policy already up to date")
+    click.echo("Sync complete [OK]")
 
 
 def _normalize_plugin_modules(raw_modules: tuple[str, ...]) -> list[str]:

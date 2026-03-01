@@ -7,9 +7,10 @@ import json
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
+import threading
 from typing import Any, Protocol
 
 import mcp.server.stdio
@@ -24,6 +25,8 @@ from orchesis.engine import evaluate
 from orchesis.identity import AgentRegistry
 from orchesis.mcp_config import McpProxySettings
 from orchesis.state import RateLimitTracker
+from orchesis.structured_log import StructuredLogger
+from orchesis.sync import PolicySyncClient
 from orchesis.telemetry import EventEmitter, JsonlEmitter
 
 
@@ -50,6 +53,7 @@ class McpToolInterceptor:
     emitter: EventEmitter | None = None
     policy_path: str | None = None
     _policy_hash: str | None = None
+    _policy_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def _build_evaluate_request(
         self,
@@ -79,18 +83,28 @@ class McpToolInterceptor:
         )
 
     def _maybe_reload_policy(self) -> None:
-        if not self.policy_path:
-            return
-        policy_file = Path(self.policy_path)
-        if not policy_file.exists():
-            return
-        current_hash = str(policy_file.stat().st_mtime_ns)
-        if current_hash == self._policy_hash:
-            return
-        self.policy = load_policy(str(policy_file))
-        has_identity = "agents" in self.policy or "default_trust_tier" in self.policy
-        self.registry = load_agent_registry(self.policy) if has_identity else None
-        self._policy_hash = current_hash
+        with self._policy_lock:
+            if not self.policy_path:
+                return
+            policy_file = Path(self.policy_path)
+            if not policy_file.exists():
+                return
+            current_hash = str(policy_file.stat().st_mtime_ns)
+            if current_hash == self._policy_hash:
+                return
+            self.policy = load_policy(str(policy_file))
+            has_identity = "agents" in self.policy or "default_trust_tier" in self.policy
+            self.registry = load_agent_registry(self.policy) if has_identity else None
+            self._policy_hash = current_hash
+
+    def update_policy(self, policy: dict[str, Any], version_hint: str | None = None) -> None:
+        """Apply a fresh policy snapshot downloaded from control plane."""
+        with self._policy_lock:
+            self.policy = policy
+            has_identity = "agents" in self.policy or "default_trust_tier" in self.policy
+            self.registry = load_agent_registry(self.policy) if has_identity else None
+            if isinstance(version_hint, str) and version_hint:
+                self._policy_hash = version_hint
 
     def _append_debug(
         self, result: types.CallToolResult, debug_trace: dict[str, Any] | None
@@ -115,12 +129,15 @@ class McpToolInterceptor:
         tool_args = arguments or {}
         eval_request, cleaned_args, debug = self._build_evaluate_request(name, tool_args)
         tracker = self.state or RateLimitTracker(persist_path=None)
+        with self._policy_lock:
+            current_policy = self.policy
+            current_registry = self.registry
         decision = evaluate(
             eval_request,
-            self.policy,
+            current_policy,
             state=tracker,
             emitter=self.emitter,
-            registry=self.registry,
+            registry=current_registry,
             debug=debug,
         )
         if not decision.allowed:
@@ -210,6 +227,7 @@ def build_proxy_server(interceptor: McpToolInterceptor) -> Server:
 async def run_stdio_proxy(settings: McpProxySettings | None = None) -> None:
     """Run Orchesis MCP proxy over stdio."""
     cfg = settings or McpProxySettings.from_env()
+    logger = StructuredLogger("mcp_proxy")
 
     async with open_downstream_session(
         downstream_command=cfg.downstream_command,
@@ -228,6 +246,44 @@ async def run_stdio_proxy(settings: McpProxySettings | None = None) -> None:
         if isinstance(state_path, str) and state_path.strip():
             interceptor.state = RateLimitTracker(persist_path=state_path.strip())
         interceptor._policy_hash = str(Path(cfg.policy_path).stat().st_mtime_ns)
+        sync_client: PolicySyncClient | None = None
+        if isinstance(cfg.control_url, str) and cfg.control_url.strip():
+            if not isinstance(cfg.api_token, str) or not cfg.api_token.strip():
+                raise ValueError("API token is required when control URL is set")
+            sync_client = PolicySyncClient(
+                control_url=cfg.control_url.strip(),
+                api_token=cfg.api_token.strip(),
+                node_id=cfg.node_id,
+                poll_interval_seconds=cfg.sync_poll_interval_seconds,
+            )
+
+            def _on_update(new_policy: dict[str, Any]) -> None:
+                interceptor.update_policy(new_policy, version_hint=sync_client.current_version)
+                logger.info(
+                    "policy synced from control plane",
+                    node_id=sync_client.node_id,
+                    policy_version=sync_client.current_version,
+                )
+
+            initial = sync_client.sync_once()
+            if isinstance(sync_client.latest_policy, dict):
+                interceptor.update_policy(
+                    sync_client.latest_policy,
+                    version_hint=sync_client.current_version,
+                )
+                logger.info(
+                    "initial policy sync completed",
+                    node_id=sync_client.node_id,
+                    in_sync=initial.in_sync,
+                    latency_ms=round(initial.latency_ms, 2),
+                )
+            sync_client.start_background_sync(_on_update)
+            logger.info(
+                "background sync enabled",
+                node_id=sync_client.node_id,
+                control_url=cfg.control_url,
+                poll_interval_seconds=cfg.sync_poll_interval_seconds,
+            )
         server = build_proxy_server(interceptor)
         init_options = InitializationOptions(
             server_name="orchesis-mcp-proxy",
@@ -237,8 +293,12 @@ async def run_stdio_proxy(settings: McpProxySettings | None = None) -> None:
                 experimental_capabilities={},
             ),
         )
-        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            await server.run(read_stream, write_stream, init_options)
+        try:
+            async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+                await server.run(read_stream, write_stream, init_options)
+        finally:
+            if sync_client is not None:
+                sync_client.stop()
 
 
 def main() -> None:

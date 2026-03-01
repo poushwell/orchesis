@@ -24,6 +24,7 @@ from orchesis.plugins import load_plugins_for_policy
 from orchesis.reliability import ReliabilityReportGenerator
 from orchesis.state import RateLimitTracker
 from orchesis.structured_log import StructuredLogger
+from orchesis.sync import PolicySyncServer
 from orchesis.telemetry import JsonlEmitter
 
 
@@ -72,6 +73,8 @@ def create_api_app(
     app.state.current_version = current_version
     app.state.plugin_modules = list(plugin_modules or [])
     app.state.plugins = load_plugins_for_policy(current_version.policy, app.state.plugin_modules)
+    app.state.sync_server = PolicySyncServer()
+    app.state.sync_server.set_current_version(current_version.version_id)
 
     def _refresh_current_version() -> None:
         app.state.current_version = store.current or store.load(str(policy_file))
@@ -79,6 +82,7 @@ def create_api_app(
             app.state.current_version.policy,
             app.state.plugin_modules,
         )
+        app.state.sync_server.set_current_version(app.state.current_version.version_id)
 
     def _auth_token_from_policy() -> str | None:
         policy = app.state.current_version.policy
@@ -429,5 +433,66 @@ def create_api_app(
             debug=debug_mode,
         )
         return response
+
+    @app.post("/api/v1/nodes/heartbeat")
+    def nodes_heartbeat(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Record node heartbeat and indicate if policy changed."""
+        _require_auth(authorization)
+        _refresh_current_version()
+        node_id = body.get("node_id")
+        policy_version = body.get("policy_version")
+        if not isinstance(node_id, str) or not node_id:
+            raise HTTPException(status_code=400, detail={"error": "node_id is required"})
+        if not isinstance(policy_version, str) or not policy_version:
+            raise HTTPException(status_code=400, detail={"error": "policy_version is required"})
+        app.state.sync_server.register_node(node_id=node_id, policy_version=policy_version)
+        forced = app.state.sync_server.consume_force_sync(node_id)
+        current_version = app.state.current_version.version_id
+        in_sync = policy_version == current_version
+        return {
+            "in_sync": in_sync,
+            "current_version": current_version,
+            "policy_changed": (not in_sync) or forced,
+        }
+
+    @app.get("/api/v1/nodes")
+    def list_nodes(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        """List known enforcement nodes and sync state."""
+        _require_auth(authorization)
+        _refresh_current_version()
+        nodes = app.state.sync_server.get_nodes()
+        payload_nodes = [
+            {
+                "node_id": item.node_id,
+                "policy_version": item.policy_version,
+                "last_seen": item.last_sync,
+                "in_sync": item.in_sync,
+            }
+            for item in nodes
+        ]
+        in_sync_count = sum(1 for item in nodes if item.in_sync)
+        out_of_sync_count = len(nodes) - in_sync_count
+        return {
+            "nodes": payload_nodes,
+            "total": len(nodes),
+            "in_sync": in_sync_count,
+            "out_of_sync": out_of_sync_count,
+        }
+
+    @app.post("/api/v1/nodes/{node_id}/force-sync")
+    def force_sync_node(
+        node_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Request policy re-pull for a node."""
+        _require_auth(authorization)
+        known = {item.node_id for item in app.state.sync_server.get_nodes()}
+        if node_id not in known:
+            raise HTTPException(status_code=404, detail={"error": "node not found"})
+        app.state.sync_server.request_force_sync(node_id)
+        return {"message": f"sync requested for {node_id}"}
 
     return app

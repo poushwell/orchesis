@@ -28,6 +28,10 @@ class McpProxySettings:
     downstream_args: list[str] = field(default_factory=list)
     default_tool_cost: float = 0.0
     downstream_timeout_seconds: float | None = None
+    control_url: str | None = None
+    api_token: str | None = None
+    node_id: str | None = None
+    sync_poll_interval_seconds: int = 30
 
     @classmethod
     def from_env(cls) -> "McpProxySettings":
@@ -42,4 +46,8 @@ class McpProxySettings:
                 if os.getenv("DOWNSTREAM_TIMEOUT_SECONDS")
                 else None
             ),
+            control_url=os.getenv("CONTROL_URL"),
+            api_token=os.getenv("API_TOKEN"),
+            node_id=os.getenv("NODE_ID"),
+            sync_poll_interval_seconds=int(os.getenv("SYNC_POLL_INTERVAL_SECONDS", "30")),
         )
