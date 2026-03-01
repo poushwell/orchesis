@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 
 import yaml
 
+from orchesis.contrib.ioc_database import IoCMatcher
 from orchesis.contrib.secret_scanner import SecretScanner
 
 SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
@@ -116,6 +117,7 @@ class SkillScanner:
 
     def __init__(self) -> None:
         self._secret_scanner = SecretScanner()
+        self._ioc_matcher = IoCMatcher()
 
     def scan(self, path: str) -> ScanReport:
         source = Path(path)
@@ -265,6 +267,20 @@ class SkillScanner:
                         evidence=match.group(0),
                     )
                 )
+
+        for match in self._ioc_matcher.scan_skill(str(source)):
+            severity = str(match.get("severity", "high")).lower()
+            if severity in {"low", "info"}:
+                severity = "high"
+            findings.append(
+                ScanFinding(
+                    severity=severity,
+                    category="ioc_match",
+                    description=f"IoC match: {match.get('ioc_id')} {match.get('ioc_name')}",
+                    location=f"line {_line_number(content, int(match.get('position', 0)))}",
+                    evidence=str(match.get("match", match.get("matched_pattern", ""))),
+                )
+            )
 
         return ScanReport(
             target=str(source),

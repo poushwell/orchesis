@@ -21,6 +21,8 @@ from yaml import YAMLError
 
 from orchesis.audit import AuditEngine, AuditQuery
 from orchesis.api import create_api_app
+from orchesis.compliance import ComplianceEngine, FRAMEWORK_CHECKS
+from orchesis.contrib.ioc_database import IoCMatcher
 from orchesis.config import (
     load_agent_registry,
     load_policy,
@@ -1639,3 +1641,169 @@ def reliability_report(output_format: str) -> None:
         click.echo(generator.to_json(report))
         return
     click.echo(generator.to_markdown(report))
+
+
+@main.command("compliance")
+@click.argument("framework")
+@click.option("--policy", "policy_path", default="policy.yaml")
+@click.option("--format", "output_format", type=click.Choice(["md", "json", "text"]), default="text")
+@click.option("--output", "output_path", type=click.Path(), default=None)
+def compliance_command(framework: str, policy_path: str, output_format: str, output_path: str | None) -> None:
+    """Generate compliance report(s) for one or all frameworks."""
+    engine = ComplianceEngine(policy_path=policy_path, decisions_path=str(DEFAULT_DECISIONS_PATH))
+    if framework == "all":
+        reports = engine.check_all()
+        if output_format == "json":
+            content = json.dumps(
+                {name: asdict(report) for name, report in reports.items()},
+                ensure_ascii=False,
+                indent=2,
+            )
+        elif output_format == "md":
+            content = _render_all_compliance_markdown(reports)
+        else:
+            content = _render_all_compliance_text(reports)
+    else:
+        valid = set(FRAMEWORK_CHECKS.keys())
+        if framework not in valid:
+            raise click.ClickException(
+                f"Unsupported framework '{framework}'. Use one of: {', '.join(sorted(valid))}, all"
+            )
+        report = engine.check(framework)
+        if output_format == "json":
+            content = engine.export_json(report)
+        elif output_format == "md":
+            content = engine.export_markdown(report)
+        else:
+            content = _render_single_compliance_text(report)
+
+    if output_path is not None:
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        click.echo(f"Report written to {target}")
+        return
+    click.echo(content)
+
+
+def _render_single_compliance_text(report: Any) -> str:
+    lines = [
+        f"{report.framework.upper()} Compliance Check",
+        "=" * (len(report.framework) + 17),
+    ]
+    for check in report.checks:
+        symbol = "PASS" if check.status == "pass" else ("PARTIAL" if check.status == "partial" else "FAIL")
+        lines.append(f"{symbol:8} {check.id}  {check.requirement}")
+    lines.append("")
+    lines.append(
+        f"Score: {report.score*100:.1f}% ({report.pass_count}/{len(report.checks)} pass, {report.partial_count} partial, {report.fail_count} fail)"
+    )
+    recommendations = [check.recommendation for check in report.checks if check.status != "pass" and check.recommendation]
+    if recommendations:
+        lines.append("")
+        lines.append("Recommendations:")
+        for index, text in enumerate(dict.fromkeys(recommendations), start=1):
+            lines.append(f"  {index}. {text}")
+    return "\n".join(lines)
+
+
+def _render_all_compliance_text(reports: dict[str, Any]) -> str:
+    lines = [
+        "Framework       Score   Pass  Fail  Partial",
+        "-------------------------------------------",
+    ]
+    total_score = 0.0
+    recommendations: list[str] = []
+    for framework, report in reports.items():
+        total_score += report.score
+        lines.append(
+            f"{framework.upper():<14} {report.score*100:>5.1f}%   {report.pass_count:<4}  {report.fail_count:<4}  {report.partial_count:<7}"
+        )
+        recommendations.extend(
+            check.recommendation
+            for check in report.checks
+            if check.status != "pass" and check.recommendation
+        )
+    overall = (total_score / len(reports)) if reports else 0.0
+    lines.append("")
+    lines.append(f"Overall: {overall*100:.1f}%")
+    unique_recs = list(dict.fromkeys(recommendations))
+    if unique_recs:
+        lines.append("Top recommendations:")
+        for index, text in enumerate(unique_recs[:3], start=1):
+            lines.append(f"  {index}. {text}")
+    return "\n".join(lines)
+
+
+def _render_all_compliance_markdown(reports: dict[str, Any]) -> str:
+    lines = [
+        "# Compliance Report (All Frameworks)",
+        "",
+        "| Framework | Score | Pass | Fail | Partial |",
+        "|-----------|------:|-----:|-----:|--------:|",
+    ]
+    for framework, report in reports.items():
+        lines.append(
+            f"| {framework.upper()} | {report.score*100:.1f}% | {report.pass_count} | {report.fail_count} | {report.partial_count} |"
+        )
+    overall = (sum(report.score for report in reports.values()) / len(reports)) if reports else 0.0
+    lines.extend(["", f"Overall: {overall*100:.1f}%"])
+    return "\n".join(lines) + "\n"
+
+
+@main.group("ioc")
+def ioc_group() -> None:
+    """Inspect and scan known indicators of compromise."""
+
+
+@ioc_group.command("list")
+@click.option("--category", default=None)
+@click.option("--severity", default=None)
+def ioc_list(category: str | None, severity: str | None) -> None:
+    """List IoCs from local in-memory database."""
+    matcher = IoCMatcher()
+    items = matcher.list_iocs(category=category, severity=severity)
+    if not items:
+        click.echo("No IoCs found for provided filters.")
+        return
+    for item in items:
+        click.echo(f"{item.id:<14} {item.severity.upper():<8} {item.category:<18} {item.name}")
+
+
+@ioc_group.command("scan")
+@click.argument("path", type=click.Path(exists=True))
+def ioc_scan(path: str) -> None:
+    """Scan a file/path content against IoC patterns."""
+    matcher = IoCMatcher()
+    findings = matcher.scan_file(path)
+    if not findings:
+        click.echo("No IoC matches found.")
+        return
+    for item in findings:
+        click.echo(
+            f"[{item['severity'].upper():<8}] {item['ioc_id']} {item['ioc_name']} "
+            f"@{item.get('position', 0)}"
+        )
+    click.echo(f"Total matches: {len(findings)}")
+
+
+@ioc_group.command("info")
+@click.argument("ioc_id")
+def ioc_info(ioc_id: str) -> None:
+    """Show detailed metadata for one IoC."""
+    matcher = IoCMatcher()
+    item = matcher.get_ioc(ioc_id)
+    if item is None:
+        raise click.ClickException(f"IoC '{ioc_id}' not found")
+    click.echo(f"ID: {item.id}")
+    click.echo(f"Name: {item.name}")
+    click.echo(f"Category: {item.category}")
+    click.echo(f"Severity: {item.severity}")
+    click.echo(f"Source: {item.source}")
+    if item.cve:
+        click.echo(f"CVE: {item.cve}")
+    if item.mitre_atlas:
+        click.echo(f"MITRE ATLAS: {item.mitre_atlas}")
+    click.echo("Indicators:")
+    for pattern in item.indicators:
+        click.echo(f"  - {pattern}")

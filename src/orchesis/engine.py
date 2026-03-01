@@ -7,6 +7,7 @@ import re
 import time
 import unicodedata
 import uuid
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
@@ -33,6 +34,7 @@ RULE_EVALUATION_ORDER = [
 KNOWN_RULE_TYPES = set(RULE_EVALUATION_ORDER) - {"identity_check"}
 _POLICY_PLAN_CACHE: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
 _POLICY_HASH_CACHE: dict[int, tuple[dict[str, Any], str]] = {}
+TIER_HIERARCHY = ["blocked", "intern", "assistant", "operator", "admin"]
 
 
 class EvaluationGuarantees:
@@ -154,6 +156,236 @@ def _resolve_session_id(request: dict[str, Any]) -> str:
         return DEFAULT_SESSION_ID
     cleaned = _sanitize_text(session)
     return cleaned if cleaned else DEFAULT_SESSION_ID
+
+
+def min_tier(tier_a: str | None, tier_b: str | None) -> str:
+    """Return the more restricted tier."""
+    def _normalize(value: str | None) -> str:
+        if not isinstance(value, str):
+            return ""
+        normalized = value.strip().lower()
+        if normalized == "principal":
+            return "admin"
+        if normalized in TIER_HIERARCHY:
+            return normalized
+        return ""
+
+    safe_a = _normalize(tier_a)
+    safe_b = _normalize(tier_b)
+    if not safe_a and safe_b:
+        return safe_b
+    if not safe_b and safe_a:
+        return safe_a
+    if not safe_a and not safe_b:
+        return "intern"
+    index_a = TIER_HIERARCHY.index(safe_a)
+    index_b = TIER_HIERARCHY.index(safe_b)
+    return TIER_HIERARCHY[min(index_a, index_b)]
+
+
+def _normalize_tier(identity: AgentIdentity | None) -> str:
+    if identity is None:
+        return "intern"
+    tier_name = identity.trust_tier.name.lower()
+    return "admin" if tier_name == "principal" else tier_name
+
+
+def _iter_string_values(value: Any) -> Iterable[str]:
+    if isinstance(value, str):
+        yield value
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from _iter_string_values(item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            yield from _iter_string_values(item)
+
+
+def _extract_tool_access(
+    base_tool_access: dict[str, Any] | None,
+    session_config: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    session_tool_access = (
+        session_config.get("tool_access")
+        if isinstance(session_config, dict) and isinstance(session_config.get("tool_access"), dict)
+        else None
+    )
+    if session_tool_access is not None:
+        return session_tool_access
+    return base_tool_access
+
+
+def _tier_allowed_and_denied(
+    tiers: dict[str, Any], tier_name: str
+) -> tuple[set[str], set[str], bool]:
+    raw = tiers.get(tier_name)
+    if isinstance(raw, list):
+        allowed = {item for item in raw if isinstance(item, str)}
+        return allowed, set(), "*" in allowed
+    if isinstance(raw, dict):
+        allowed_raw = raw.get("allowed")
+        if isinstance(allowed_raw, list):
+            allowed = {item for item in allowed_raw if isinstance(item, str)}
+        else:
+            allowed = {key for key in raw.keys() if isinstance(key, str) and key != "denied"}
+        denied_raw = raw.get("denied")
+        denied = {item for item in denied_raw if isinstance(item, str)} if isinstance(denied_raw, list) else set()
+        return allowed, denied, "*" in allowed
+    return set(), set(), False
+
+
+def _evaluate_tool_access_control(
+    *,
+    policy: dict[str, Any] | None,
+    request: dict[str, Any],
+    state: RateLimitTracker,
+    agent_id: str,
+    session_id: str,
+    session_type: str,
+    identity: AgentIdentity | None,
+    now: datetime,
+) -> tuple[list[str], list[str], str]:
+    reasons: list[str] = []
+    checked: list[str] = []
+    if not isinstance(policy, dict):
+        return reasons, checked, _normalize_tier(identity)
+
+    tool_name = request.get("tool")
+    tool = tool_name if isinstance(tool_name, str) and tool_name else "__unknown__"
+    session_policies = policy.get("session_policies")
+    session_config = (
+        session_policies.get(session_type)
+        if isinstance(session_policies, dict) and isinstance(session_policies.get(session_type), dict)
+        else None
+    )
+    base_tier = _normalize_tier(identity)
+    session_tier = session_config.get("trust_tier") if isinstance(session_config, dict) else None
+    effective_tier = min_tier(session_tier, base_tier)
+
+    # Session-level path deny.
+    denied_paths = (
+        session_config.get("denied_paths")
+        if isinstance(session_config, dict) and isinstance(session_config.get("denied_paths"), list)
+        else []
+    )
+    if denied_paths:
+        normalized_denied = [
+            _normalize_path(item) for item in denied_paths if isinstance(item, str) and item.strip()
+        ]
+        if normalized_denied:
+            checked.append("tool_access_control")
+            for value in _iter_string_values(request.get("params")):
+                try:
+                    normalized_value = _normalize_path(value)
+                except Exception:
+                    continue
+                if any(normalized_value.startswith(prefix) for prefix in normalized_denied):
+                    reasons.append(
+                        f"tool_access_control: path '{normalized_value}' is denied for session '{session_type}'"
+                    )
+                    break
+
+    # Session token cap.
+    max_tokens = (
+        session_config.get("max_tokens_per_call")
+        if isinstance(session_config, dict) and isinstance(session_config.get("max_tokens_per_call"), int | float)
+        else None
+    )
+    if isinstance(max_tokens, int | float):
+        checked.append("tool_access_control")
+        context = request.get("context")
+        estimated_tokens = (
+            context.get("estimated_tokens")
+            if isinstance(context, dict) and isinstance(context.get("estimated_tokens"), int | float)
+            else 0
+        )
+        if float(estimated_tokens) > float(max_tokens):
+            reasons.append(
+                f"tool_access_control: token limit exceeded for session '{session_type}' ({estimated_tokens} > {max_tokens})"
+            )
+
+    # Session budget cap.
+    session_budget = (
+        session_config.get("budget_per_session")
+        if isinstance(session_config, dict) and isinstance(session_config.get("budget_per_session"), int | float)
+        else None
+    )
+    if isinstance(session_budget, int | float):
+        checked.append("tool_access_control")
+        cost = _coerce_cost(request.get("cost"))
+        safe_cost = cost if isinstance(cost, float) and cost > 0 else 0.0
+        if safe_cost > 0:
+            spent = state.get_agent_budget_spent(
+                agent_id=agent_id,
+                window_seconds=86400,
+                session_id=session_id,
+                now=now,
+            )
+            if spent + safe_cost > float(session_budget):
+                reasons.append(
+                    f"tool_access_control: session budget exceeded for '{session_type}' ({spent + safe_cost} > {session_budget})"
+                )
+
+    # Top-level or session-level tool access.
+    base_tool_access = policy.get("tool_access") if isinstance(policy.get("tool_access"), dict) else None
+    tool_access = _extract_tool_access(base_tool_access, session_config)
+    if not isinstance(tool_access, dict):
+        return reasons, checked, effective_tier
+
+    mode = str(tool_access.get("mode", "denylist")).strip().lower()
+    checked.append("tool_access_control")
+
+    if mode == "allowlist":
+        allowed = {
+            item
+            for item in tool_access.get("allowed", [])
+            if isinstance(item, str) and item.strip()
+        }
+        overrides = tool_access.get("overrides")
+        if isinstance(overrides, dict):
+            override_entry = overrides.get(agent_id)
+            if isinstance(override_entry, dict):
+                additional = override_entry.get("additional_allowed")
+                if isinstance(additional, list):
+                    allowed.update(item for item in additional if isinstance(item, str) and item.strip())
+        if tool not in allowed:
+            reasons.append(
+                f"tool_access_control: tool '{tool}' not in allowlist (allowed: {sorted(allowed)})"
+            )
+        return reasons, checked, effective_tier
+
+    if mode == "denylist":
+        denied = {
+            item
+            for item in tool_access.get("denied", [])
+            if isinstance(item, str) and item.strip()
+        }
+        if tool in denied:
+            reasons.append(f"tool_access_control: tool '{tool}' is in denylist")
+        return reasons, checked, effective_tier
+
+    if mode == "tiered":
+        tiers = tool_access.get("tiers")
+        if not isinstance(tiers, dict):
+            reasons.append("tool_access_control: tiered mode requires tiers mapping")
+            return reasons, checked, effective_tier
+        allowed, denied, wildcard = _tier_allowed_and_denied(tiers, effective_tier)
+        if wildcard:
+            if tool in denied:
+                reasons.append(
+                    f"tool_access_control: tool '{tool}' denied for tier '{effective_tier}'"
+                )
+            return reasons, checked, effective_tier
+        if tool not in allowed:
+            reasons.append(
+                f"tool_access_control: tool '{tool}' not allowed for tier '{effective_tier}' (allowed: {sorted(allowed)})"
+            )
+        return reasons, checked, effective_tier
+
+    reasons.append(f"tool_access_control: unsupported mode '{mode}'")
+    return reasons, checked, effective_tier
 
 
 def _is_modify_or_destructive_action(request: dict[str, Any]) -> bool:
@@ -621,6 +853,7 @@ def evaluate(
     plugins: PluginRegistry | None = None,
     now: datetime | None = None,
     debug: bool = False,
+    session_type: str = "cli",
 ) -> Decision:
     """Evaluate request against policy rules."""
     started_ns = time.perf_counter_ns()
@@ -631,11 +864,34 @@ def evaluate(
     agent_id = _resolve_agent_id(request)
     session_id = _resolve_session_id(request)
     identity = registry.get(agent_id) if registry is not None else None
+    effective_tier_for_eval = _normalize_tier(identity)
     policy_version_hash = _policy_version_hash(policy) if (emitter is not None or debug) else ""
     policy_version = policy_version_hash if emitter is not None else None
     decision: Decision
     debug_rule_results: list[dict[str, Any]] = []
     debug_identity_passed = identity is None
+
+    tool_access_reasons, tool_access_checked, effective_tier_for_eval = _evaluate_tool_access_control(
+        policy=policy,
+        request=request,
+        state=tracker,
+        agent_id=agent_id,
+        session_id=session_id,
+        session_type=session_type,
+        identity=identity,
+        now=evaluation_now,
+    )
+    reasons.extend(tool_access_reasons)
+    rules_checked.extend(tool_access_checked)
+    if debug and tool_access_checked:
+        debug_rule_results.append(
+            {
+                "rule": "tool_access_control",
+                "passed": len(tool_access_reasons) == 0,
+                "duration_us": 0,
+                "reason": tool_access_reasons[0] if tool_access_reasons else "",
+            }
+        )
 
     def _attach_debug_trace(target: Decision) -> None:
         if not debug:
@@ -647,11 +903,12 @@ def evaluate(
         total_duration_us = max(0, (time.perf_counter_ns() - started_ns) // 1000)
         target.debug_trace = {
             "evaluation_order": [
-                name for name in RULE_EVALUATION_ORDER if name != "identity_check"
+                "tool_access_control",
+                *[name for name in RULE_EVALUATION_ORDER if name != "identity_check"],
             ],
             "rule_results": list(debug_rule_results),
             "agent_id": agent_id,
-            "agent_tier": identity.trust_tier.name.lower() if identity is not None else "unknown",
+            "agent_tier": effective_tier_for_eval,
             "identity_check_passed": bool(debug_identity_passed),
             "total_duration_us": int(total_duration_us),
             "policy_version": policy_version_hash,

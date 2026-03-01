@@ -25,6 +25,7 @@ from orchesis.otel import OTelEmitter, TraceContext
 from orchesis.policy_store import PolicyStore
 from orchesis.plugins import load_plugins_for_policy
 from orchesis.reliability import ReliabilityReportGenerator
+from orchesis.redaction import AuditRedactor
 from orchesis.state import RateLimitTracker
 from orchesis.structured_log import StructuredLogger
 from orchesis.sync import PolicySyncServer
@@ -61,7 +62,7 @@ def create_api_app(
     tracker = RateLimitTracker(persist_path=state_persist)
     event_bus = EventBus()
     metrics = MetricsCollector()
-    _ = event_bus.subscribe(JsonlEmitter(decisions_log))
+    decision_log_subscriber_id: int | None = None
     _ = event_bus.subscribe(metrics)
     _ = event_bus.subscribe(OTelEmitter(".orchesis/traces.jsonl"))
     corpus = RegressionCorpus()
@@ -81,6 +82,36 @@ def create_api_app(
     app.state.plugins = load_plugins_for_policy(current_version.policy, app.state.plugin_modules)
     app.state.sync_server = PolicySyncServer()
     app.state.sync_server.set_current_version(current_version.version_id)
+
+    def _build_audit_redactor(candidate_policy: dict[str, Any]) -> AuditRedactor | None:
+        logging_cfg = candidate_policy.get("logging")
+        if not isinstance(logging_cfg, dict):
+            return None
+        redaction_cfg = logging_cfg.get("redaction")
+        if not isinstance(redaction_cfg, dict):
+            return None
+        if not bool(redaction_cfg.get("enabled", False)):
+            return None
+        preserve_fields = (
+            redaction_cfg.get("preserve_fields")
+            if isinstance(redaction_cfg.get("preserve_fields"), list)
+            else None
+        )
+        return AuditRedactor(
+            redact_secrets=bool(redaction_cfg.get("redact_secrets", True)),
+            redact_pii=bool(redaction_cfg.get("redact_pii", True)),
+            preserve_fields=[item for item in preserve_fields if isinstance(item, str)]
+            if preserve_fields is not None
+            else None,
+        )
+
+    def _sync_decision_emitter(candidate_policy: dict[str, Any]) -> None:
+        nonlocal decision_log_subscriber_id
+        if decision_log_subscriber_id is not None:
+            event_bus.unsubscribe(decision_log_subscriber_id)
+            decision_log_subscriber_id = None
+        redactor = _build_audit_redactor(candidate_policy)
+        decision_log_subscriber_id = event_bus.subscribe(JsonlEmitter(decisions_log, redactor=redactor))
 
     def _incident_alert_callback(incident: Incident) -> None:
         for notifier in list(alert_notifiers):
@@ -154,9 +185,11 @@ def create_api_app(
             app.state.current_version.policy,
             app.state.plugin_modules,
         )
+        _sync_decision_emitter(app.state.current_version.policy)
         app.state.sync_server.set_current_version(app.state.current_version.version_id)
         _sync_alerts(app.state.current_version.policy)
 
+    _sync_decision_emitter(current_version.policy)
     _sync_alerts(current_version.policy)
 
     def _auth_token_from_policy() -> str | None:
