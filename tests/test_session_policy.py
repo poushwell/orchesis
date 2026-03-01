@@ -83,7 +83,7 @@ def test_session_token_limit() -> None:
     }
     decision = evaluate(request, _session_policy(), session_type="group")
     assert decision.allowed is False
-    assert any("token limit exceeded" in reason for reason in decision.reasons)
+    assert any("max per call" in reason for reason in decision.reasons)
 
 
 def test_no_session_policy_defaults() -> None:

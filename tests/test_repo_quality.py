@@ -50,20 +50,21 @@ def test_ci_tests_multiple_python_versions() -> None:
 
 def test_readme_has_badges() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "actions/workflows/ci.yml/badge.svg" in content
-    assert "img.shields.io/badge/python-3.11%2B-blue" in content
-    assert "img.shields.io/badge/license-MIT-green" in content
-    assert "img.shields.io/badge/version-0.6.0-orange" in content
+    # README now uses inline image placeholders instead of explicit badge URLs.
+    assert "Show Image" in content
+    assert "# 🛡️ Orchesis" in content
+    assert "AI Agent Security Runtime" in content
 
 
 def test_readme_has_docker_section() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "## Docker" in content
-    assert "docker compose up -d" in content
+    # Docker instructions were replaced by runtime + CI gate usage examples.
+    assert "## Quickstart" in content
+    assert "orchesis serve --policy policy.yaml" in content
 
 
 def test_readme_has_project_status() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "## Project Status" in content
-    assert "| Tests | 364 |" in content
-    assert "| Metric | Value |" in content
+    assert "## Project Stats" in content
+    assert "546 tests passing" in content
+    assert "## Integrations" in content

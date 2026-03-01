@@ -4,11 +4,12 @@ import hashlib
 import json
 import posixpath
 import re
+import threading
 import time
 import unicodedata
 import uuid
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from typing import Any
 from urllib.parse import unquote
@@ -35,6 +36,9 @@ KNOWN_RULE_TYPES = set(RULE_EVALUATION_ORDER) - {"identity_check"}
 _POLICY_PLAN_CACHE: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
 _POLICY_HASH_CACHE: dict[int, tuple[dict[str, Any], str]] = {}
 TIER_HIERARCHY = ["blocked", "intern", "assistant", "operator", "admin"]
+_daily_token_usage: dict[str, int] = {}
+_daily_token_usage_day: date = date.today()
+_daily_token_usage_lock = threading.Lock()
 
 
 class EvaluationGuarantees:
@@ -287,25 +291,6 @@ def _evaluate_tool_access_control(
                     )
                     break
 
-    # Session token cap.
-    max_tokens = (
-        session_config.get("max_tokens_per_call")
-        if isinstance(session_config, dict) and isinstance(session_config.get("max_tokens_per_call"), int | float)
-        else None
-    )
-    if isinstance(max_tokens, int | float):
-        checked.append("tool_access_control")
-        context = request.get("context")
-        estimated_tokens = (
-            context.get("estimated_tokens")
-            if isinstance(context, dict) and isinstance(context.get("estimated_tokens"), int | float)
-            else 0
-        )
-        if float(estimated_tokens) > float(max_tokens):
-            reasons.append(
-                f"tool_access_control: token limit exceeded for session '{session_type}' ({estimated_tokens} > {max_tokens})"
-            )
-
     # Session budget cap.
     session_budget = (
         session_config.get("budget_per_session")
@@ -386,6 +371,78 @@ def _evaluate_tool_access_control(
 
     reasons.append(f"tool_access_control: unsupported mode '{mode}'")
     return reasons, checked, effective_tier
+
+
+def _reset_daily_tokens(now: datetime) -> None:
+    global _daily_token_usage_day
+    current_day = now.date()
+    with _daily_token_usage_lock:
+        if _daily_token_usage_day != current_day:
+            _daily_token_usage.clear()
+            _daily_token_usage_day = current_day
+
+
+def _check_token_limits(
+    *,
+    policy: dict[str, Any] | None,
+    agent_id: str,
+    context: dict[str, Any],
+    session_type: str,
+    now: datetime,
+) -> tuple[list[str], list[str]]:
+    reasons: list[str] = []
+    checked: list[str] = []
+    if not isinstance(policy, dict):
+        return reasons, checked
+
+    token_limits = policy.get("token_limits")
+    token_limits = token_limits if isinstance(token_limits, dict) else {}
+    session_policies = policy.get("session_policies")
+    session_config = (
+        session_policies.get(session_type)
+        if isinstance(session_policies, dict) and isinstance(session_policies.get(session_type), dict)
+        else {}
+    )
+    if not token_limits and not isinstance(session_config, dict):
+        return reasons, checked
+    if not token_limits and not session_config:
+        return reasons, checked
+
+    estimated_raw = context.get("estimated_tokens")
+    estimated = int(estimated_raw) if isinstance(estimated_raw, int | float) else 0
+    if estimated <= 0:
+        return reasons, checked
+
+    checked.append("token_budget")
+    max_per_call = session_config.get("max_tokens_per_call") or token_limits.get("max_tokens_per_call")
+    if isinstance(max_per_call, int | float) and estimated > int(max_per_call):
+        reasons.append(f"token_budget: {estimated} tokens > {int(max_per_call)} max per call")
+        return reasons, checked
+
+    session_used_raw = context.get("session_tokens_used")
+    session_used = int(session_used_raw) if isinstance(session_used_raw, int | float) else 0
+    max_per_session = session_config.get("max_tokens_per_session") or token_limits.get("max_tokens_per_session")
+    if isinstance(max_per_session, int | float) and (session_used + estimated) > int(max_per_session):
+        reasons.append(
+            f"token_budget: session token budget exhausted ({session_used + estimated} > {int(max_per_session)})"
+        )
+        return reasons, checked
+
+    max_per_day = token_limits.get("max_tokens_per_day")
+    if isinstance(max_per_day, int | float):
+        _reset_daily_tokens(now)
+        with _daily_token_usage_lock:
+            used = _daily_token_usage.get(agent_id, 0)
+            projected = used + estimated
+            if projected > int(max_per_day):
+                reasons.append(
+                    f"token_budget: daily token budget exhausted for agent '{agent_id}' ({projected} > {int(max_per_day)})"
+                )
+                return reasons, checked
+            _daily_token_usage[agent_id] = projected
+            _ = token_limits.get("warn_at_percentage", 80)
+
+    return reasons, checked
 
 
 def _is_modify_or_destructive_action(request: dict[str, Any]) -> bool:
@@ -890,6 +947,26 @@ def evaluate(
                 "passed": len(tool_access_reasons) == 0,
                 "duration_us": 0,
                 "reason": tool_access_reasons[0] if tool_access_reasons else "",
+            }
+        )
+
+    context = request.get("context")
+    token_reasons, token_checked = _check_token_limits(
+        policy=policy,
+        agent_id=agent_id,
+        context=context if isinstance(context, dict) else {},
+        session_type=session_type,
+        now=evaluation_now,
+    )
+    reasons.extend(token_reasons)
+    rules_checked.extend(token_checked)
+    if debug and token_checked:
+        debug_rule_results.append(
+            {
+                "rule": "token_budget",
+                "passed": len(token_reasons) == 0,
+                "duration_us": 0,
+                "reason": token_reasons[0] if token_reasons else "",
             }
         )
 

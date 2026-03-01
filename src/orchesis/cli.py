@@ -23,6 +23,7 @@ from orchesis.audit import AuditEngine, AuditQuery
 from orchesis.api import create_api_app
 from orchesis.compliance import ComplianceEngine, FRAMEWORK_CHECKS
 from orchesis.contrib.ioc_database import IoCMatcher
+from orchesis.contrib.network_scanner import NetworkExposureScanner
 from orchesis.config import (
     load_agent_registry,
     load_policy,
@@ -1127,14 +1128,19 @@ def _policy_guard_checks(policy: dict[str, Any]) -> dict[str, bool]:
 @click.option("--format", "output_format", type=click.Choice(["text", "json", "md"]), default="text")
 @click.option("--severity-threshold", "severity_threshold", default="medium")
 @click.option("--mcp", "scan_mcp_configs", is_flag=True, default=False)
+@click.option("--network", "scan_network", is_flag=True, default=False)
 def scan_command(
     path_arg: str | None,
     output_format: str,
     severity_threshold: str,
     scan_mcp_configs: bool,
+    scan_network: bool,
 ) -> None:
     """Static scan for skills, MCP configs, and policy files."""
     reports: list[ScanReport] = []
+    network_findings: list[dict[str, Any]] = []
+    if scan_network:
+        network_findings = NetworkExposureScanner().scan_all()
     if scan_mcp_configs:
         discovered = discover_mcp_configs()
         click.echo("Discovered MCP configs:")
@@ -1147,11 +1153,22 @@ def scan_command(
         if not target.exists():
             raise click.ClickException(f"Path not found: {target}")
         reports = scan_path(target)
-    else:
+    elif not scan_network:
         raise click.ClickException("Provide <path> or use --mcp")
 
     if output_format == "json":
         payload = [report_to_dict(item) for item in reports]
+        if network_findings:
+            payload.append(
+                {
+                    "target": "local",
+                    "target_type": "network",
+                    "findings": network_findings,
+                    "risk_score": 0,
+                    "summary": f"{len(network_findings)} network finding(s)",
+                    "scanned_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
         click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
         return
 
@@ -1161,6 +1178,9 @@ def scan_command(
         else:
             click.echo(format_report_text(report, threshold=severity_threshold))
         click.echo("")
+    if network_findings:
+        click.echo(_format_network_scan_text(network_findings))
+        click.echo("")
 
 
 @main.command("gate")
@@ -1168,7 +1188,14 @@ def scan_command(
 @click.option("--scan-dir", "scan_dir", type=click.Path(), default=".")
 @click.option("--fail-on", "fail_on", default="medium")
 @click.option("--report", "report_path", type=click.Path(), default=None)
-def gate(policy_path: str, scan_dir: str, fail_on: str, report_path: str | None) -> None:
+@click.option("--network", "include_network", is_flag=True, default=False)
+def gate(
+    policy_path: str,
+    scan_dir: str,
+    fail_on: str,
+    report_path: str | None,
+    include_network: bool,
+) -> None:
     """Run CI security gate over policy and static scan."""
     policy_file = Path(policy_path)
     if not policy_file.exists():
@@ -1204,6 +1231,19 @@ def gate(policy_path: str, scan_dir: str, fail_on: str, report_path: str | None)
                     "category": finding.category,
                     "description": finding.description,
                     "location": finding.location,
+                }
+            )
+    network_findings: list[dict[str, Any]] = []
+    if include_network and scan_dir:
+        network_findings = NetworkExposureScanner().scan_all()
+        for item in network_findings:
+            findings.append(
+                {
+                    "target": "local",
+                    "severity": item.get("severity", "info"),
+                    "category": item.get("check", "network"),
+                    "description": item.get("description", ""),
+                    "location": item.get("evidence", ""),
                 }
             )
 
@@ -1246,6 +1286,7 @@ def gate(policy_path: str, scan_dir: str, fail_on: str, report_path: str | None)
         "fail_on": fail_on,
         "result": "PASS" if result_pass else "FAIL",
         "reports": [report_to_dict(item) for item in scan_reports],
+        "network_findings": network_findings,
     }
     if report_path is not None:
         target = Path(report_path)
@@ -1749,6 +1790,28 @@ def _render_all_compliance_markdown(reports: dict[str, Any]) -> str:
     overall = (sum(report.score for report in reports.values()) / len(reports)) if reports else 0.0
     lines.extend(["", f"Overall: {overall*100:.1f}%"])
     return "\n".join(lines) + "\n"
+
+
+def _format_network_scan_text(findings: list[dict[str, Any]]) -> str:
+    lines = ["Network Exposure Scan", "====================="]
+    counts = Counter(str(item.get("severity", "info")).lower() for item in findings)
+    for item in findings:
+        sev = str(item.get("severity", "info")).upper()
+        lines.append(
+            f"[{sev:<8}] {item.get('check','network'):<18} {item.get('description','')} ({item.get('evidence','')})"
+        )
+    lines.append("")
+    lines.append(
+        f"Findings: {counts.get('critical',0)} critical, {counts.get('high',0)} high, "
+        f"{counts.get('medium',0)} medium, {counts.get('info',0)} info"
+    )
+    recommendations = [str(item.get("recommendation", "")) for item in findings if item.get("recommendation")]
+    if recommendations:
+        lines.append("")
+        lines.append("Recommendations:")
+        for index, text in enumerate(dict.fromkeys(recommendations), start=1):
+            lines.append(f"  {index}. {text}")
+    return "\n".join(lines)
 
 
 @main.group("ioc")

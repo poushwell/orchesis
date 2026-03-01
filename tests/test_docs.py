@@ -27,10 +27,10 @@ def test_all_doc_files_exist() -> None:
 def test_readme_has_required_sections() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
     for section in (
-        "## Quick Start",
+        "## Quickstart",
         "## Architecture",
-        "## Core Features",
-        "## CLI Reference",
+        "## Features",
+        "## Documentation",
         "## License",
     ):
         assert section in text

@@ -182,6 +182,17 @@ class SkillScanner:
                     )
                 )
 
+        for match in re.finditer(r"wss?://[^\s)>\"]+", content, flags=re.IGNORECASE):
+            findings.append(
+                ScanFinding(
+                    severity="medium",
+                    category="websocket_connection_in_skill",
+                    description="Skill instructs WebSocket connection; verify endpoint trust.",
+                    location=f"line {_line_number(content, match.start())}",
+                    evidence=match.group(0),
+                )
+            )
+
         shell_patterns = [
             (r"\|\s*(bash|sh)\b", "high", "Pipe to shell execution"),
             (r"\beval\s*\(", "high", "eval() usage"),
@@ -340,6 +351,18 @@ class McpConfigScanner:
             url = str(server.get("url", "")).strip()
             bind = str(server.get("bind", "")).strip()
             endpoint = url or bind or host
+            transport = str(server.get("transport", "")).strip().lower()
+            has_ws_transport = (
+                url.startswith("ws://")
+                or url.startswith("wss://")
+                or transport in {"ws", "websocket"}
+                or bool(server.get("websocket"))
+            )
+            has_http_transport = url.startswith("http://") or url.startswith("https://")
+            cors_cfg = server.get("cors")
+            allowed_origins = server.get("allowedOrigins") or server.get("allowed_origins")
+            has_origin_validation = bool(cors_cfg) or bool(allowed_origins)
+
             if "0.0.0.0" in endpoint:
                 findings.append(
                     ScanFinding(
@@ -348,6 +371,45 @@ class McpConfigScanner:
                         description=f"server '{name}' binds to 0.0.0.0",
                         location=f"{prefix}.url",
                         evidence=endpoint,
+                    )
+                )
+
+            if has_ws_transport and not has_origin_validation:
+                findings.append(
+                    ScanFinding(
+                        severity="high",
+                        category="websocket_no_origin_check",
+                        description="WebSocket transport without origin validation",
+                        location=prefix,
+                        evidence=(
+                            "WebSocket server without origin validation is vulnerable to "
+                            "cross-site WebSocket hijacking (CVE-2026-25253)"
+                        ),
+                    )
+                )
+
+            if has_http_transport and not has_origin_validation:
+                findings.append(
+                    ScanFinding(
+                        severity="medium",
+                        category="http_no_cors",
+                        description="HTTP endpoint without explicit CORS/origin configuration",
+                        location=prefix,
+                        evidence=url or endpoint,
+                    )
+                )
+
+            if has_ws_transport and any(token in endpoint for token in ("127.0.0.1", "localhost")):
+                findings.append(
+                    ScanFinding(
+                        severity="info",
+                        category="localhost_bypass_risk",
+                        description="Localhost WebSocket may still be reachable from browser context",
+                        location=prefix,
+                        evidence=(
+                            "Localhost binding does not protect against browser-based WebSocket attacks. "
+                            "See CVE-2026-25253."
+                        ),
                     )
                 )
 
