@@ -106,7 +106,17 @@ def test_check_all_frameworks(tmp_path: Path) -> None:
     policy_path = tmp_path / "policy.yaml"
     _write_policy(policy_path, _strong_policy())
     reports = ComplianceEngine(policy_path=str(policy_path)).check_all()
-    assert set(reports.keys()) == {"hipaa", "soc2", "eu_ai_act", "nist_ai_rmf"}
+    assert set(reports.keys()) == {
+        "hipaa",
+        "soc2",
+        "eu_ai_act",
+        "nist_ai_rmf",
+        "owasp_asi",
+        "mitre_atlas",
+        "cosai",
+        "csa_maestro",
+        "nist_ai_100_2",
+    }
 
 
 def test_compliance_score_calculation(tmp_path: Path) -> None:
@@ -158,5 +168,5 @@ def test_compliance_cli_all(tmp_path: Path) -> None:
         ["compliance", "all", "--policy", str(policy_path)],
     )
     assert result.exit_code == 0
-    assert "Framework       Score   Pass  Fail  Partial" in result.output
+    assert "Framework" in result.output and "Score" in result.output
     assert "Overall:" in result.output

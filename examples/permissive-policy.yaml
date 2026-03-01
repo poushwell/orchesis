@@ -1,0 +1,28 @@
+version: "1.0"
+default_trust_tier: operator
+
+tool_access:
+  mode: denylist
+  default: allow
+  denied:
+    - format_disk
+    - rm_rf
+
+agents:
+  - id: "default"
+    name: "Default Agent"
+    trust_tier: operator
+    daily_budget: 100.0
+    rate_limit_per_minute: 60
+
+rules:
+  - name: file_access
+    denied_paths: ["/etc/shadow", "/etc/passwd"]
+  - name: budget_limit
+    daily_budget: 100.0
+    max_cost_per_call: 10.0
+
+logging:
+  redaction:
+    enabled: true
+    redact_secrets: true

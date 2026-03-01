@@ -12,6 +12,7 @@ import yaml
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from orchesis.auth import AgentAuthenticator, CredentialStore
 from orchesis.audit import AuditEngine, AuditQuery
 from orchesis.config import load_policy, validate_policy, validate_policy_warnings
 from orchesis.corpus import RegressionCorpus
@@ -83,6 +84,8 @@ def create_api_app(
     app.state.sync_server = PolicySyncServer()
     app.state.sync_server.set_current_version(current_version.version_id)
     app.state.proxy_stats = None
+    app.state.authenticator = None
+    app.state.auth_mode = "optional"
 
     def _build_audit_redactor(candidate_policy: dict[str, Any]) -> AuditRedactor | None:
         logging_cfg = candidate_policy.get("logging")
@@ -189,9 +192,31 @@ def create_api_app(
         _sync_decision_emitter(app.state.current_version.policy)
         app.state.sync_server.set_current_version(app.state.current_version.version_id)
         _sync_alerts(app.state.current_version.policy)
+        _sync_auth(app.state.current_version.policy)
+
+    def _sync_auth(candidate_policy: dict[str, Any]) -> None:
+        auth = candidate_policy.get("authentication")
+        if not isinstance(auth, dict) or not bool(auth.get("enabled", False)):
+            app.state.authenticator = None
+            app.state.auth_mode = "optional"
+            return
+        mode = str(auth.get("mode", "enforce")).lower()
+        if mode not in {"enforce", "log", "optional"}:
+            mode = "enforce"
+        skew = auth.get("max_clock_skew", 300)
+        credentials_file = auth.get("credentials_file", ".orchesis/credentials.yaml")
+        store_obj = CredentialStore(str(credentials_file))
+        credentials = store_obj.load()
+        app.state.authenticator = AgentAuthenticator(
+            credentials=credentials,
+            mode=mode,
+            max_clock_skew=int(skew) if isinstance(skew, int | float) else 300,
+        )
+        app.state.auth_mode = mode
 
     _sync_decision_emitter(current_version.policy)
     _sync_alerts(current_version.policy)
+    _sync_auth(current_version.policy)
 
     def _auth_token_from_policy() -> str | None:
         policy = app.state.current_version.policy
@@ -430,7 +455,7 @@ def create_api_app(
         )
         corpus_stats = corpus.stats()
         return {
-            "version": "0.6.0",
+            "version": "0.7.0",
             "uptime_seconds": int(max(0.0, time.perf_counter() - started_at)),
             "policy_version": app.state.current_version.version_id,
             "total_decisions": total_decisions,
@@ -568,6 +593,21 @@ def create_api_app(
             response["debug_trace"] = decision.debug_trace
         return response
 
+    def _authenticate_request(request: Request, eval_payload: dict[str, Any]) -> tuple[bool, str]:
+        authenticator = getattr(app.state, "authenticator", None)
+        mode = str(getattr(app.state, "auth_mode", "optional"))
+        if authenticator is None:
+            return True, ""
+        allowed, agent_id, reason = authenticator.authenticate_request(eval_payload, dict(request.headers))
+        if not allowed:
+            if mode == "enforce":
+                raise HTTPException(status_code=401, detail={"error": "unauthorized", "reason": reason})
+            if mode == "log":
+                logger.warn("authentication failed (log mode)", reason=reason)
+                return True, ""
+            return True, ""
+        return True, agent_id
+
     @app.post("/api/v1/evaluate")
     def evaluate_remote(
         body: dict[str, Any],
@@ -577,6 +617,15 @@ def create_api_app(
         _require_auth(authorization)
         _refresh_current_version()
         trace = getattr(request.state, "trace_context", TraceContext())
+        tool_name = body.get("tool_name")
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            tool_name = body.get("tool")
+        params = body.get("params")
+        eval_payload = {"tool": tool_name or "", "params": params if isinstance(params, dict) else {}}
+        _ok, verified_agent_id = _authenticate_request(request, eval_payload)
+        if verified_agent_id:
+            body = dict(body)
+            body["agent_id"] = verified_agent_id
         response = _evaluate_payload(body=body, trace=trace)
         request.state.orchesis_decision = "ALLOW" if response["allowed"] else "DENY"
         logger.debug(
@@ -603,6 +652,15 @@ def create_api_app(
         results: list[dict[str, Any]] = []
         for item in evaluations:
             if isinstance(item, dict):
+                tool_name = item.get("tool_name")
+                if not isinstance(tool_name, str) or not tool_name.strip():
+                    tool_name = item.get("tool")
+                params = item.get("params")
+                eval_payload = {"tool": tool_name or "", "params": params if isinstance(params, dict) else {}}
+                _ok, verified_agent_id = _authenticate_request(request, eval_payload)
+                if verified_agent_id:
+                    item = dict(item)
+                    item["agent_id"] = verified_agent_id
                 results.append(_evaluate_payload(item, trace))
         denied_count = sum(1 for item in results if item.get("allowed") is False)
         request.state.orchesis_decision = "DENY" if denied_count > 0 else "ALLOW"

@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\mcp_config.py
+# hypothesis_version: 6.151.9
+
+[0.0, '0', '30', 'API_TOKEN', 'CONTROL_URL', 'DEFAULT_TOOL_COST', 'DOWNSTREAM_ARGS', 'DOWNSTREAM_COMMAND', 'McpProxySettings', 'NODE_ID', 'POLICY_PATH', 'examples', 'policy.yaml', 'python']

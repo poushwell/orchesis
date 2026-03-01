@@ -1,6 +1,7 @@
 """CLI entrypoint for Orchesis."""
 
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -14,14 +15,12 @@ from random import Random
 from typing import Any
 
 import click
-import httpx
-import uvicorn
 import yaml
 from yaml import YAMLError
 
+from orchesis.auth import AgentAuthenticator, CredentialStore
 from orchesis.audit import AuditEngine, AuditQuery
-from orchesis.api import create_api_app
-from orchesis.compliance import ComplianceEngine, FRAMEWORK_CHECKS
+from orchesis.compliance import ComplianceEngine, FRAMEWORK_CHECKS, FrameworkCrossReference
 from orchesis.contrib.ioc_database import IoCMatcher
 from orchesis.contrib.network_scanner import NetworkExposureScanner
 from orchesis.contrib.remote_scanner import RemoteSkillScanner
@@ -57,13 +56,8 @@ from orchesis.signing import generate_keypair, sign_entry, verify_entry
 from orchesis.state import RateLimitTracker
 from orchesis.telemetry import InMemoryEmitter, JsonlEmitter
 from orchesis.mutations import MutationEngine
-from orchesis.mcp_config import McpProxySettings
-from orchesis.mcp_proxy import run_stdio_proxy
 from orchesis.marketplace import PolicyMarketplace
-from orchesis.proxy import OrchesisProxy, ProxyConfig
-from orchesis.interceptors import McpStdioProxy
 from orchesis.structured_log import StructuredLogger
-from orchesis.sync import PolicySyncClient
 from orchesis.templates import TEMPLATE_NAMES, load_template_text
 
 DEFAULT_KEYS_DIR = Path(".orchesis") / "keys"
@@ -78,6 +72,7 @@ OPERATIONS_LOG = StructuredLogger("cli")
 
 
 @click.group()
+@click.version_option(version="0.7.0")
 def main() -> None:
     """Orchesis command line interface."""
 
@@ -92,6 +87,148 @@ def _percentile_us(values: list[int], percentile: float) -> int:
     rank = int(round((percentile / 100.0) * (len(values) - 1)))
     rank = max(0, min(rank, len(values) - 1))
     return values[rank]
+
+
+def _server_dependency_error() -> click.ClickException:
+    return click.ClickException(
+        "Server dependencies not installed. Run: pip install orchesis[server]"
+    )
+
+
+def _load_server_runtime() -> tuple[Any, Any, Any, Any]:
+    try:
+        import uvicorn  # type: ignore[import-not-found]
+        from orchesis.api import create_api_app
+        from orchesis.proxy import OrchesisProxy, ProxyConfig
+    except ModuleNotFoundError as error:
+        raise _server_dependency_error() from error
+    return uvicorn, create_api_app, OrchesisProxy, ProxyConfig
+
+
+def _load_httpx() -> Any:
+    try:
+        import httpx  # type: ignore[import-not-found]
+    except ModuleNotFoundError as error:
+        raise _server_dependency_error() from error
+    return httpx
+
+
+def _load_sync_runtime() -> Any:
+    try:
+        from orchesis.sync import PolicySyncClient
+    except ModuleNotFoundError as error:
+        raise _server_dependency_error() from error
+    return PolicySyncClient
+
+
+def _load_mcp_proxy_runtime() -> tuple[Any, Any, Any]:
+    try:
+        from orchesis.interceptors import McpStdioProxy
+        from orchesis.mcp_config import McpProxySettings
+        from orchesis.mcp_proxy import run_stdio_proxy
+    except ModuleNotFoundError as error:
+        raise _server_dependency_error() from error
+    return McpStdioProxy, McpProxySettings, run_stdio_proxy
+
+
+def _load_auth_stack(credentials_file: str, mode: str = "enforce") -> tuple[CredentialStore, AgentAuthenticator]:
+    store = CredentialStore(credentials_file)
+    credentials = store.load() if store.exists() else {}
+    authenticator = AgentAuthenticator(credentials=credentials, mode=mode)
+    return store, authenticator
+
+
+@main.group("auth")
+def auth_group() -> None:
+    """Manage HMAC credentials for agents."""
+
+
+@auth_group.command("register")
+@click.argument("agent_id")
+@click.option("--credentials-file", default=".orchesis/credentials.yaml")
+def auth_register(agent_id: str, credentials_file: str) -> None:
+    store, authenticator = _load_auth_stack(credentials_file, mode="enforce")
+    cred = authenticator.register(agent_id)
+    store.save(authenticator.credentials)
+    click.echo(f"Agent registered: {cred.agent_id}")
+    click.echo(f"Secret key: {cred.secret_key} (SAVE THIS — it won't be shown again)")
+    click.echo("")
+    click.echo("Add these headers to agent requests:")
+    click.echo(f"  X-Orchesis-Agent: {cred.agent_id}")
+    click.echo("  X-Orchesis-Timestamp: <unix_timestamp>")
+    click.echo("  X-Orchesis-Signature: hmac-sha256(secret, agent:timestamp:tool:params_hash)")
+
+
+@auth_group.command("list")
+@click.option("--credentials-file", default=".orchesis/credentials.yaml")
+def auth_list(credentials_file: str) -> None:
+    _store, authenticator = _load_auth_stack(credentials_file, mode="enforce")
+    rows = sorted(authenticator.list_agents(), key=lambda item: str(item.get("agent_id", "")))
+    click.echo("Agent           Enabled   Created              Last Used")
+    click.echo("---------------------------------------------------------")
+    for row in rows:
+        agent_id = str(row.get("agent_id", ""))
+        enabled = "✅" if bool(row.get("enabled")) else "❌"
+        created_at = row.get("created_at", 0.0)
+        last_used = row.get("last_used", 0.0)
+        try:
+            created_str = datetime.fromtimestamp(float(created_at), tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            created_str = "unknown"
+        if isinstance(last_used, int | float) and float(last_used) > 0:
+            last_used_str = datetime.fromtimestamp(float(last_used), tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        else:
+            last_used_str = "never"
+        click.echo(f"{agent_id:<15} {enabled:<8} {created_str:<20} {last_used_str}")
+
+
+@auth_group.command("revoke")
+@click.argument("agent_id")
+@click.option("--credentials-file", default=".orchesis/credentials.yaml")
+def auth_revoke(agent_id: str, credentials_file: str) -> None:
+    store, authenticator = _load_auth_stack(credentials_file, mode="enforce")
+    if not authenticator.revoke(agent_id):
+        raise click.ClickException(f"Unknown agent: {agent_id}")
+    store.save(authenticator.credentials)
+    click.echo(f"Agent revoked: {agent_id}")
+
+
+@auth_group.command("rotate")
+@click.argument("agent_id")
+@click.option("--credentials-file", default=".orchesis/credentials.yaml")
+def auth_rotate(agent_id: str, credentials_file: str) -> None:
+    store, authenticator = _load_auth_stack(credentials_file, mode="enforce")
+    cred = authenticator.rotate(agent_id)
+    if cred is None:
+        raise click.ClickException(f"Unknown agent: {agent_id}")
+    store.save(authenticator.credentials)
+    click.echo(f"Secret rotated for: {agent_id}")
+    click.echo(f"New secret: {cred.secret_key} (SAVE THIS)")
+
+
+@auth_group.command("verify")
+@click.option("--agent", "agent_id", required=True)
+@click.option("--tool", "tool_name", required=True)
+@click.option("--params", "params_json", default="{}")
+@click.option("--secret", "secret_key", required=True)
+def auth_verify(agent_id: str, tool_name: str, params_json: str, secret_key: str) -> None:
+    try:
+        params = json.loads(params_json)
+    except Exception as error:  # noqa: BLE001
+        raise click.ClickException(f"Invalid --params JSON: {error}") from error
+    if not isinstance(params, dict):
+        raise click.ClickException("--params must be a JSON object")
+    ts = str(int(time.time()))
+    params_hash = hashlib.sha256(
+        json.dumps(params, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    authenticator = AgentAuthenticator(mode="optional")
+    signature = authenticator.compute_signature(secret_key, agent_id, ts, tool_name, params_hash)
+    click.echo("✅ Signature valid")
+    click.echo("Headers to use:")
+    click.echo(f"  X-Orchesis-Agent: {agent_id}")
+    click.echo(f"  X-Orchesis-Timestamp: {ts}")
+    click.echo(f"  X-Orchesis-Signature: {signature}")
 
 
 @main.command("new")
@@ -437,6 +574,7 @@ def rollback(policy_path: str) -> None:
 )
 def serve(port: int, policy_path: str, plugin_modules: tuple[str, ...]) -> None:
     """Run Orchesis control API server."""
+    uvicorn, create_api_app, _orchesis_proxy_cls, _proxy_config_cls = _load_server_runtime()
     try:
         policy = load_policy(policy_path)
     except (ValueError, YAMLError, OSError) as error:
@@ -480,6 +618,7 @@ def proxy_command(
     buffer_responses: bool,
 ) -> None:
     """Run transparent HTTP proxy interceptor."""
+    _uvicorn, _create_api_app, OrchesisProxy, ProxyConfig = _load_server_runtime()
     policy = load_policy(policy_path)
     tracker = RateLimitTracker(persist_path=None)
     config = ProxyConfig(
@@ -534,6 +673,7 @@ def mcp_proxy_command(
     server_command: tuple[str, ...],
 ) -> None:
     """Run MCP stdio proxy with optional control-plane policy sync."""
+    McpStdioProxy, McpProxySettings, run_stdio_proxy = _load_mcp_proxy_runtime()
     _ = ctx
     token = api_token or os.getenv("API_TOKEN")
     if server_command:
@@ -571,6 +711,7 @@ def mcp_proxy_command(
 @click.option("--api-token", default=None)
 def nodes(api_url: str, api_token: str | None) -> None:
     """List connected enforcement nodes from control plane."""
+    httpx = _load_httpx()
     token = api_token or os.getenv("API_TOKEN")
     if not isinstance(token, str) or not token.strip():
         raise click.ClickException("API token is required. Use --api-token or API_TOKEN env var.")
@@ -611,6 +752,7 @@ def nodes(api_url: str, api_token: str | None) -> None:
 @click.option("--policy", "policy_path", default="policy.yaml")
 def sync_policy(control_url: str, api_token: str, policy_path: str) -> None:
     """Run one-shot policy synchronization against control plane."""
+    PolicySyncClient = _load_sync_runtime()
     client = PolicySyncClient(
         control_url=control_url,
         api_token=api_token,
@@ -1814,6 +1956,23 @@ def reliability_report(output_format: str) -> None:
 @click.option("--output", "output_path", type=click.Path(), default=None)
 def compliance_command(framework: str, policy_path: str, output_format: str, output_path: str | None) -> None:
     """Generate compliance report(s) for one or all frameworks."""
+    if framework == "cross-map":
+        cross = FrameworkCrossReference()
+        if output_format == "json":
+            content = json.dumps(cross.generate_coverage_matrix(), ensure_ascii=False, indent=2)
+        elif output_format == "md":
+            content = _render_cross_map_markdown(cross)
+        else:
+            content = _render_cross_map_text(cross)
+        if output_path is not None:
+            target = Path(output_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            click.echo(f"Report written to {target}")
+            return
+        click.echo(content)
+        return
+
     engine = ComplianceEngine(policy_path=policy_path, decisions_path=str(DEFAULT_DECISIONS_PATH))
     if framework == "all":
         reports = engine.check_all()
@@ -1831,7 +1990,7 @@ def compliance_command(framework: str, policy_path: str, output_format: str, out
         valid = set(FRAMEWORK_CHECKS.keys())
         if framework not in valid:
             raise click.ClickException(
-                f"Unsupported framework '{framework}'. Use one of: {', '.join(sorted(valid))}, all"
+                f"Unsupported framework '{framework}'. Use one of: {', '.join(sorted(valid))}, all, cross-map"
             )
         report = engine.check(framework)
         if output_format == "json":
@@ -1872,16 +2031,28 @@ def _render_single_compliance_text(report: Any) -> str:
 
 
 def _render_all_compliance_text(reports: dict[str, Any]) -> str:
+    framework_labels = {
+        "hipaa": "HIPAA",
+        "soc2": "SOC2",
+        "eu_ai_act": "EU AI Act",
+        "nist_ai_rmf": "NIST AI RMF",
+        "owasp_asi": "OWASP ASI Top 10",
+        "mitre_atlas": "MITRE ATLAS",
+        "cosai": "CoSAI",
+        "csa_maestro": "CSA MAESTRO",
+        "nist_ai_100_2": "NIST AI 100-2",
+    }
     lines = [
-        "Framework       Score   Pass  Fail  Partial",
-        "-------------------------------------------",
+        "Framework           Score   Pass  Fail  Partial",
+        "------------------------------------------------",
     ]
     total_score = 0.0
     recommendations: list[str] = []
     for framework, report in reports.items():
         total_score += report.score
+        label = framework_labels.get(framework, framework.upper())
         lines.append(
-            f"{framework.upper():<14} {report.score*100:>5.1f}%   {report.pass_count:<4}  {report.fail_count:<4}  {report.partial_count:<7}"
+            f"{label:<18} {report.score*100:>5.1f}%   {report.pass_count:<4}  {report.fail_count:<4}  {report.partial_count:<7}"
         )
         recommendations.extend(
             check.recommendation
@@ -1890,7 +2061,7 @@ def _render_all_compliance_text(reports: dict[str, Any]) -> str:
         )
     overall = (total_score / len(reports)) if reports else 0.0
     lines.append("")
-    lines.append(f"Overall: {overall*100:.1f}%")
+    lines.append(f"Overall: {overall*100:.1f}% across {len(reports)} frameworks")
     unique_recs = list(dict.fromkeys(recommendations))
     if unique_recs:
         lines.append("Top recommendations:")
@@ -1900,6 +2071,17 @@ def _render_all_compliance_text(reports: dict[str, Any]) -> str:
 
 
 def _render_all_compliance_markdown(reports: dict[str, Any]) -> str:
+    framework_labels = {
+        "hipaa": "HIPAA",
+        "soc2": "SOC2",
+        "eu_ai_act": "EU AI Act",
+        "nist_ai_rmf": "NIST AI RMF",
+        "owasp_asi": "OWASP ASI Top 10",
+        "mitre_atlas": "MITRE ATLAS",
+        "cosai": "CoSAI",
+        "csa_maestro": "CSA MAESTRO",
+        "nist_ai_100_2": "NIST AI 100-2",
+    }
     lines = [
         "# Compliance Report (All Frameworks)",
         "",
@@ -1907,11 +2089,59 @@ def _render_all_compliance_markdown(reports: dict[str, Any]) -> str:
         "|-----------|------:|-----:|-----:|--------:|",
     ]
     for framework, report in reports.items():
+        label = framework_labels.get(framework, framework.upper())
         lines.append(
-            f"| {framework.upper()} | {report.score*100:.1f}% | {report.pass_count} | {report.fail_count} | {report.partial_count} |"
+            f"| {label} | {report.score*100:.1f}% | {report.pass_count} | {report.fail_count} | {report.partial_count} |"
         )
     overall = (sum(report.score for report in reports.values()) / len(reports)) if reports else 0.0
-    lines.extend(["", f"Overall: {overall*100:.1f}%"])
+    lines.extend(["", f"Overall: {overall*100:.1f}% across {len(reports)} frameworks"])
+    return "\n".join(lines) + "\n"
+
+
+def _render_cross_map_text(cross: FrameworkCrossReference) -> str:
+    lines = [
+        "Feature                  Frameworks Covered",
+        "--------------------------------------------",
+    ]
+    matrix = cross.generate_coverage_matrix()
+    features = matrix.get("features", {})
+    if isinstance(features, dict):
+        for feature, refs in features.items():
+            if not isinstance(refs, list):
+                continue
+            compact = ", ".join(ref.split(":", 1)[1] if ":" in ref else ref for ref in refs)
+            lines.append(f"{feature:<24} {compact}")
+    lines.append("")
+    lines.append(
+        "Coverage: "
+        f"{matrix.get('covered_checks', 0)}/{matrix.get('total_checks', 0)} checks "
+        f"({float(matrix.get('coverage_ratio', 0.0))*100:.1f}%)"
+    )
+    return "\n".join(lines)
+
+
+def _render_cross_map_markdown(cross: FrameworkCrossReference) -> str:
+    matrix = cross.generate_coverage_matrix()
+    lines = [
+        "# Compliance Cross-Framework Map",
+        "",
+        "| Feature | Frameworks Covered |",
+        "|---------|--------------------|",
+    ]
+    features = matrix.get("features", {})
+    if isinstance(features, dict):
+        for feature, refs in features.items():
+            if not isinstance(refs, list):
+                continue
+            compact = ", ".join(refs)
+            lines.append(f"| {feature} | {compact} |")
+    lines.extend(
+        [
+            "",
+            f"Coverage: {matrix.get('covered_checks', 0)}/{matrix.get('total_checks', 0)} checks "
+            f"({float(matrix.get('coverage_ratio', 0.0))*100:.1f}%)",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 

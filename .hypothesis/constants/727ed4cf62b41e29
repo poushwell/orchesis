@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\interceptors\mcp.py
+# hypothesis_version: 6.151.9
+
+[0.0, 5.0, 30.0, -32001, '2.0', ':', 'SUSP-URL-IP', 'agent', 'allowed', 'allowlist', 'arguments', 'blocked_by_policy', 'category', 'cli', 'code', 'content', 'context', 'cost', 'daily token budget', 'data', 'description', 'error', 'evaluate', 'high', 'http(s)://<ip>', 'id', 'ioc_id', 'ioc_name', 'jsonrpc', 'match', 'matched_pattern', 'mcp', 'mcp_agent', 'medium', 'message', 'method', 'mode', 'name', 'orchesis_scan', 'params', 'policy', 'position', 'reasons', 'result', 'rule', 'secrets_found', 'severity', 'text', 'tool', 'tool_access', 'tool_poisoning', 'tools', 'tools/call', 'transport', 'type', 'utf-8']

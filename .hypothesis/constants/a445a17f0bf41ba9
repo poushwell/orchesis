@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\contrib\network_scanner.py
+# hypothesis_version: 6.151.9
+
+[0.1, 511, 3000, 3001, 3306, 5432, 8080, 8081, 9090, 18789, 27017, ', ', '.clawdbot', '.config', '.cursor', '.env', '.env.development', '.env.local', '.env.production', '.vscode', '/etc/pf.conf', '/etc/pf.conf missing', '/sbin/iptables', '/usr/sbin/nft', '0.0.0.0', '127.0.0.1', 'auth', 'check', 'claude', 'config_perms', 'critical', 'darwin', 'description', 'device.json', 'env_secrets', 'evidence', 'firewall_status', 'high', 'info', 'known_agent_config', 'localhost_ws', 'mcp.json', 'medium', 'netsh required', 'no_firewall', 'nt', 'open_port', 'openclaw.json', 'pattern', 'policy.yaml', 'recommendation', 'severity', 'soul.md', 'utf-8', 'windows']

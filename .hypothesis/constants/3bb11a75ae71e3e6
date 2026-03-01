@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\audit.py
+# hypothesis_version: 6.151.9
+
+[0.0, 0.8, 0.95, 1.0, 60.0, 100, 10000, '+00:00', '; ', 'ALLOW', 'DENY', 'Z', '__default__', 'agent_id', 'burst_spike', 'decision', 'description', 'detail', 'event_id', 'high', 'high_deny_rate', 'medium', 'min_requests', 'multiplier', 'name', 'policy_version', 'rate_limit', 'rate_limit_hammering', 'reasons', 'rule', 'session_id', 'severity', 'threshold', 'timestamp', 'tool', 'tool_persistence', 'unknown', 'unknown_agent_recon', 'utf-8', 'w', 'window_minutes']

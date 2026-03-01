@@ -14,6 +14,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
+from orchesis.auth import AgentAuthenticator, CredentialStore
 from orchesis.contrib.pii_detector import PiiDetector
 from orchesis.contrib.secret_scanner import SecretScanner
 from orchesis.config import PolicyWatcher, load_policy
@@ -759,6 +760,8 @@ def create_proxy_app(
     current_registry = None
     watcher: PolicyWatcher | None = None
     current_policy_hash = "inline"
+    authenticator: AgentAuthenticator | None = None
+    auth_mode = "optional"
     event_bus = EventBus()
     metrics = MetricsCollector()
     decisions_log_path = os.getenv("DECISIONS_LOG_PATH", ".orchesis/decisions.jsonl")
@@ -831,6 +834,26 @@ def create_proxy_app(
         )
         return store_version.registry if has_identity_config else None
 
+    def _sync_auth(candidate_policy: dict[str, Any]) -> None:
+        nonlocal authenticator, auth_mode
+        auth_cfg = candidate_policy.get("authentication")
+        if not isinstance(auth_cfg, dict) or not bool(auth_cfg.get("enabled", False)):
+            authenticator = None
+            auth_mode = "optional"
+            return
+        mode = str(auth_cfg.get("mode", "enforce")).lower()
+        if mode not in {"enforce", "log", "optional"}:
+            mode = "enforce"
+        skew = auth_cfg.get("max_clock_skew", 300)
+        credentials_file = auth_cfg.get("credentials_file", ".orchesis/credentials.yaml")
+        store_obj = CredentialStore(str(credentials_file))
+        authenticator = AgentAuthenticator(
+            credentials=store_obj.load(),
+            mode=mode,
+            max_clock_skew=int(skew) if isinstance(skew, int | float) else 300,
+        )
+        auth_mode = mode
+
     def _sync_alerts(candidate_policy: dict[str, Any]) -> None:
         nonlocal alert_subscriber_ids
         alert_notifiers.clear()
@@ -880,6 +903,7 @@ def create_proxy_app(
         current_policy_hash = current_version.version_id
         _sync_webhooks(current_policy)
         _sync_alerts(current_policy)
+        _sync_auth(current_policy)
 
         def _on_reload(new_policy: dict[str, Any]) -> None:
             _ = new_policy
@@ -890,12 +914,14 @@ def create_proxy_app(
             current_policy_hash = version.version_id
             _sync_webhooks(current_policy)
             _sync_alerts(current_policy)
+            _sync_auth(current_policy)
 
         watcher = PolicyWatcher(policy_path, _on_reload)
         watcher._last_hash = PolicyWatcher(policy_path, lambda _policy: None).current_hash()
     else:
         _sync_webhooks(current_policy)
         _sync_alerts(current_policy)
+        _sync_auth(current_policy)
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
@@ -938,9 +964,29 @@ def create_proxy_app(
         context["trace_id"] = trace.trace_id
         if trace.parent_span_id:
             context["parent_span_id"] = trace.parent_span_id
+        extracted_tool = _extract_tool(request, body_json)
+        extracted_params = _extract_params(request, body_json)
+        if authenticator is not None:
+            auth_ok, verified_agent_id, auth_reason = authenticator.authenticate_request(
+                {"tool": extracted_tool, "params": extracted_params},
+                dict(request.headers),
+            )
+            if not auth_ok:
+                if auth_mode == "enforce":
+                    response = JSONResponse(
+                        status_code=401,
+                        content={"error": "unauthorized", "reason": auth_reason},
+                    )
+                    response.headers["X-Orchesis-Trace-Id"] = trace.trace_id
+                    response.headers["X-Orchesis-Decision"] = "DENY"
+                    return response
+                if auth_mode == "log":
+                    logger.warn("authentication failed (log mode)", reason=auth_reason)
+            elif verified_agent_id:
+                context["agent"] = verified_agent_id
         eval_request = {
-            "tool": _extract_tool(request, body_json),
-            "params": _extract_params(request, body_json),
+            "tool": extracted_tool,
+            "params": extracted_params,
             "cost": _extract_cost(request, body_json),
             "context": context,
         }
@@ -1010,7 +1056,7 @@ def create_proxy_app(
                         total_decisions += value
         return {
             "status": "healthy",
-            "version": "0.6.0",
+            "version": "0.7.0",
             "policy_version": current_policy_hash,
             "uptime_seconds": int(max(0.0, time.perf_counter() - app_started_at)),
             "total_decisions": total_decisions,

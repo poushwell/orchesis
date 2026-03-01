@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\proxy.py
+# hypothesis_version: 6.151.9
+
+[0.0, 10.0, 403, '/', '/files/', 'BACKEND_URL', 'Orchesis Proxy', 'POLICY_PATH', 'agent', 'allowed', 'content-type', 'context', 'cost', 'examples', 'host', 'http', 'http://backend', 'method', 'params', 'path', 'policy.yaml', 'query', 'reasons', 'root', 'rules_checked', 'session', 'tool', 'x-agent', 'x-cost', 'x-session']

@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\contrib\remote_scanner.py
+# hypothesis_version: 6.151.9
+
+[0.0, 10.0, 86400.0, 301, 302, 307, 308, 1000000, '"mcpServers"', '"name"', '"version"', '+00:00', '.md', '.orchesis', '/', '0|1|l|rn', ':', 'Invalid npm metadata', 'IoC match detected', 'Location', 'Too many redirects', 'User-Agent', 'Z', 'blob', 'clawhub:', 'created', 'dangerous_script', 'description', 'dist-tags', 'github.com', 'high', 'http', 'https', 'install', 'install_script_risk', 'ioc_match', 'ioc_name', 'latest', 'match', 'mcp', 'medium', 'new_package_risk', 'npm:', 'npm:name', 'npm:time.created', 'package.json', 'postinstall', 'preinstall', 'remote', 'remote:content', 'remote:generic', 'remote_npm', 'replace', 'scripts', 'secret_leak', 'severity', 'shell_exec', 'skill.md', 'subprocess.run', 'time', 'typosquat_risk', 'utf-8', 'versions']

@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\corpus.py
+# hypothesis_version: 6.151.9
+
+[0.0, 1.0, 2.0, '+00:00', '-', 'BYPASS-*.json', 'DENY', 'Z', 'by_category', 'categories', 'category_balance', 'composite', 'cost_manipulation', 'fixed', 'fixed_at', 'gaps', 'identity_spoofing', 'mutations', 'path_traversal', 'rate_limit', 'regex_evasion', 'sql_injection', 'staleness_days', 'suggestions', 'tests/corpus', 'total', 'total_entries', 'unfixed', 'utf-8']

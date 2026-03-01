@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\mutations.py
+# hypothesis_version: 6.151.9
+
+[-1.0, 1.999, 2.0, 2.001, 1000, '%2e.', '&#46;', '.', '..', '/', '/etc/passwd', '/etc/passwd\x00safe.txt', '/etc/\u200bpasswd', 'DR\x00OP TABLE users', 'DROP\tTABLE users', 'DROP TABLE users', 'agent', 'boundary', 'case', 'combine', 'command', 'context', 'cost', 'cursor\x00admin', 'dRoP tAbLe users', 'encoding', 'null_byte', 'null_byte_injection', 'params', 'path', 'query', 'read_file', 'rm\t-rf /', 'run_command', 'run_sql', 'tool', 'unicode', 'whitespace']

@@ -1,57 +1,91 @@
 # Contributing to Orchesis
 
+Thank you for your interest in contributing to Orchesis!
+
 ## Getting Started
 ```bash
-git clone https://github.com/YOUR_USERNAME/orchesis.git
+git clone https://github.com/orchesis-security/orchesis.git
 cd orchesis
-pip install -e .[dev]
+pip install -e ".[dev]"
 pytest
 ```
 
 ## Development Workflow
 
-1. Fork the repo
-2. Create a feature branch
-3. Write tests first (TDD)
-4. Implement the feature
-5. Run full test suite: `pytest`
-6. Run linter: `ruff check .`
-7. Run invariants: `orchesis invariants --policy examples/production_policy.yaml`
-8. Submit PR
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/my-feature`
+3. Make your changes
+4. Run tests: `pytest`
+5. Run linter: `ruff check src/ tests/`
+6. Commit: `git commit -m "Add my feature"`
+7. Push: `git push origin feature/my-feature`
+8. Open a Pull Request
 
-## Code Standards
+## Code Style
 
 - Python 3.11+
-- Line length: 99 chars
-- All new code must have tests
-- No new dependencies without discussion
-- Backward compatible (existing tests must pass)
+- Follow ruff defaults (line length 100)
+- Type hints on all public functions
+- Docstrings on all public classes and methods
 
 ## Testing
+
+Every PR must:
+- Pass all existing tests
+- Include tests for new functionality
+- Maintain or improve test coverage
+
+Run specific test files:
 ```bash
-make test          # Full test suite
-make fuzz          # Synthetic fuzzer
-make invariants    # Formal invariants
-make scenarios     # Adversarial scenarios
+pytest tests/test_engine.py -v
+pytest tests/test_scanner.py -v
 ```
 
 ## Adding a Plugin
 
 1. Create `src/orchesis/contrib/your_plugin.py`
-2. Implement `RuleHandler` protocol
-3. Add tests in `tests/test_plugins.py`
-4. Document in policy reference
+2. Add tests for the plugin behavior
+3. Document configuration and usage in docs
 
-## Adding to Attack Corpus
+## Priority Contribution Areas
 
-Found a bypass? Great!
+### Policy Marketplace Packs
+Create new policy packs for specific industries:
+- Financial services (PCI-DSS, SOX)
+- Government (FedRAMP, FISMA)
+- Education (FERPA, COPPA)
 
-1. Run: `orchesis fuzz --save-bypasses`
-2. Or manually create `tests/corpus/BYPASS-NNN.json`
-3. Run: `orchesis corpus --generate-tests`
-4. Submit PR with the corpus entry
+Location: `src/orchesis/marketplace/packs/`  
+Format: YAML (see existing packs for examples)
+
+### Agent Framework Integrations
+- LangChain callback handler
+- CrewAI middleware
+- AutoGen guardrails
+- Vercel AI SDK middleware
+
+### IoC Database Updates
+Add new attack patterns as they're discovered:
+- New malicious skill patterns
+- New CVEs affecting AI agents
+- New infostealer targeting patterns
+
+Location: `src/orchesis/contrib/ioc_database.py`
+
+### Compliance Frameworks
+Add checks for additional frameworks:
+- PCI-DSS
+- ISO 27001
+- GDPR
+- CCPA
+
+Location: `src/orchesis/compliance.py`
 
 ## Reporting Security Issues
 
-See [SECURITY.md](docs/SECURITY.md).  
+Please report security vulnerabilities via email to security@orchesis.dev  
 Do NOT open public issues for security vulnerabilities.
+
+## License
+
+By contributing, you agree that your contributions will be licensed under the MIT License.

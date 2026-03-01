@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\contrib\pii_detector.py
+# hypothesis_version: 6.151.9
+
+['.', '1.0', 'check_fields', 'credit_card', 'email', 'params', 'phone', 'pii_detector', 'ssn', 'value']

@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\integrations\forensics_emitter.py
+# hypothesis_version: 6.151.9
+
+[60.0, 'DENY', 'a', 'action', 'agent_id', 'anomaly', 'bypass', 'critical', 'deny_count_1m', 'details', 'detected', 'forensics_emitter', 'high', 'id', 'open', 'policy_version', 'reasons', 'related_events', 'resolution', 'severity', 'timeline', 'timestamp', 'title', 'tool', 'ts', 'type', 'utf-8']

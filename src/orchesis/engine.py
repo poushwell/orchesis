@@ -1208,6 +1208,54 @@ _RULE_HANDLERS: dict[str, str] = {
 }
 
 
+class PolicyEngine:
+    """Stateful wrapper around module-level evaluate()."""
+
+    def __init__(
+        self,
+        policy: dict[str, Any] | None = None,
+        *,
+        state: RateLimitTracker | None = None,
+        emitter: EventEmitter | None = None,
+        registry: AgentRegistry | None = None,
+        plugins: PluginRegistry | None = None,
+    ):
+        self._policy = policy or {"rules": []}
+        self._state = state
+        self._emitter = emitter
+        self._registry = registry
+        self._plugins = plugins
+
+    @property
+    def policy(self) -> dict[str, Any]:
+        return self._policy
+
+    def set_policy(self, policy: dict[str, Any]) -> None:
+        self._policy = policy
+
+    def evaluate(
+        self,
+        request: dict[str, Any],
+        *,
+        now: datetime | None = None,
+        debug: bool = False,
+        session_type: str = "cli",
+        channel: str | None = None,
+    ) -> Decision:
+        return evaluate(
+            request=request,
+            policy=self._policy,
+            state=self._state,
+            emitter=self._emitter,
+            registry=self._registry,
+            plugins=self._plugins,
+            now=now,
+            debug=debug,
+            session_type=session_type,
+            channel=channel,
+        )
+
+
 def evaluate(
     request: dict[str, Any],
     policy: dict[str, Any] | None,

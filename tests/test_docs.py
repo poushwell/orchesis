@@ -78,8 +78,8 @@ def test_package_builds_cleanly(tmp_path: Path) -> None:
     result = subprocess.run(build_cmd, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
 
-    artifacts = sorted(dist_dir.glob("orchesis-0.6.0*"))
-    assert artifacts, "Build artifacts for 0.6.0 not found"
+    artifacts = sorted(dist_dir.glob("orchesis-0.7.0*"))
+    assert artifacts, "Build artifacts for 0.7.0 not found"
 
     twine_cmd = [sys.executable, "-m", "twine", "check", *[str(item) for item in artifacts]]
     check = subprocess.run(twine_cmd, capture_output=True, text=True)

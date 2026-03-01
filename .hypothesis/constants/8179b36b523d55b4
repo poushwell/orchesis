@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\structured_log.py
+# hypothesis_version: 6.151.9
+
+['+00:00', 'DEBUG', 'ERROR', 'INFO', 'WARN', 'Z', 'component', 'level', 'msg', 'stderr', 'stdout', 'ts']

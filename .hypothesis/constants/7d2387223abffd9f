@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\contrib\ip_allowlist.py
+# hypothesis_version: 6.151.9
+
+['1.0', 'allowed_ips', 'context', 'denied_ips', 'ip_allowlist', 'source_ip']

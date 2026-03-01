@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\contrib\time_window.py
+# hypothesis_version: 6.151.9
+
+['1.0', ':', 'UTC', 'allowed_hours', 'end', 'invalid time range', 'start', 'time_window', 'timezone']
