@@ -515,6 +515,10 @@ def create_api_app(
             payload_context["agent"] = "__global__"
         session_type = payload.get("session_type")
         session_type = session_type if isinstance(session_type, str) and session_type.strip() else "cli"
+        channel = payload.get("channel")
+        channel = channel.strip().lower() if isinstance(channel, str) and channel.strip() else None
+        if channel is not None:
+            payload_context["channel"] = channel
 
         payload_context["trace_id"] = trace.trace_id
         if trace.parent_span_id:
@@ -536,6 +540,7 @@ def create_api_app(
             registry=app.state.current_version.registry,
             plugins=app.state.plugins,
             session_type=session_type,
+            channel=channel,
             debug=debug_mode,
         )
         elapsed_us = max(0, (time.perf_counter_ns() - started_ns) // 1000)
@@ -556,6 +561,7 @@ def create_api_app(
             "evaluation_us": int(elapsed_us),
             "tool_name": tool_name.strip(),
             "agent_id": payload_context.get("agent", "__global__"),
+            "channel": channel,
             "debug": debug_mode,
         }
         if debug_mode:

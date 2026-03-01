@@ -1,6 +1,7 @@
 """Rule evaluation engine."""
 
 import hashlib
+import ipaddress
 import json
 import posixpath
 import re
@@ -12,9 +13,11 @@ from collections.abc import Iterable
 from datetime import date, datetime, timezone
 from functools import lru_cache
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 import yaml
+from orchesis.contrib.pii_detector import PiiDetector
+from orchesis.contrib.secret_scanner import SecretScanner
 from orchesis.identity import AgentIdentity, AgentRegistry, TrustTier, check_capability
 from orchesis.models import Decision
 from orchesis.plugins import PluginRegistry
@@ -39,6 +42,8 @@ TIER_HIERARCHY = ["blocked", "intern", "assistant", "operator", "admin"]
 _daily_token_usage: dict[str, int] = {}
 _daily_token_usage_day: date = date.today()
 _daily_token_usage_lock = threading.Lock()
+_SECRET_SCANNER = SecretScanner()
+_PII_DETECTOR = PiiDetector()
 
 
 class EvaluationGuarantees:
@@ -443,6 +448,309 @@ def _check_token_limits(
             _ = token_limits.get("warn_at_percentage", 80)
 
     return reasons, checked
+
+
+def _looks_like_hidden_file(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    parts = [item for item in normalized.split("/") if item]
+    return any(part.startswith(".") for part in parts)
+
+
+def _extract_paths(params: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("path", "file_path", "filename", "directory", "filepath", "target"):
+        candidate = params.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            values.append(candidate.strip())
+    for value in _iter_string_values(params):
+        if not isinstance(value, str):
+            continue
+        if "://" in value:
+            continue
+        if "/" in value or "\\" in value:
+            values.append(value)
+    return values
+
+
+def _extract_network_values(params: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("url", "endpoint", "host", "domain"):
+        candidate = params.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            values.append(candidate.strip())
+    for value in _iter_string_values(params):
+        if isinstance(value, str) and ("http://" in value or "https://" in value):
+            values.append(value)
+    return values
+
+
+def _is_ip_address(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except Exception:
+        return False
+
+
+def _check_sandbox(
+    *,
+    policy: dict[str, Any] | None,
+    request: dict[str, Any],
+    session_type: str,
+) -> tuple[list[str], list[str]]:
+    reasons: list[str] = []
+    checked: list[str] = []
+    if not isinstance(policy, dict):
+        return reasons, checked
+    session_policies = policy.get("session_policies")
+    session_config = (
+        session_policies.get(session_type)
+        if isinstance(session_policies, dict) and isinstance(session_policies.get(session_type), dict)
+        else None
+    )
+    if not isinstance(session_config, dict):
+        return reasons, checked
+    sandbox = session_config.get("sandbox")
+    if not isinstance(sandbox, dict):
+        return reasons, checked
+
+    tool_name = request.get("tool")
+    tool = tool_name if isinstance(tool_name, str) and tool_name else "__unknown__"
+    params = request.get("params")
+    safe_params = params if isinstance(params, dict) else {}
+    checked.append("sandbox")
+
+    filesystem = sandbox.get("filesystem")
+    if isinstance(filesystem, dict):
+        paths = _extract_paths(safe_params)
+        denied_paths = [
+            _normalize_path(item)
+            for item in filesystem.get("denied_paths", [])
+            if isinstance(item, str) and item.strip()
+        ]
+        if denied_paths:
+            for raw in paths:
+                try:
+                    normalized = _normalize_path(raw)
+                except Exception:
+                    continue
+                if any(normalized.startswith(prefix) for prefix in denied_paths):
+                    reasons.append(f"sandbox: filesystem path '{normalized}' denied for session '{session_type}'")
+                    break
+        if not reasons:
+            allowed_paths = [
+                _normalize_path(item)
+                for item in filesystem.get("allowed_paths", [])
+                if isinstance(item, str) and item.strip()
+            ]
+            if allowed_paths:
+                for raw in paths:
+                    try:
+                        normalized = _normalize_path(raw)
+                    except Exception:
+                        continue
+                    if not any(normalized.startswith(prefix) for prefix in allowed_paths):
+                        reasons.append(
+                            f"sandbox: filesystem path '{normalized}' outside allowed_paths for session '{session_type}'"
+                        )
+                        break
+        if not reasons and bool(filesystem.get("deny_hidden_files")):
+            for raw in paths:
+                if _looks_like_hidden_file(raw):
+                    reasons.append(f"sandbox: hidden file access denied for session '{session_type}'")
+                    break
+        max_file_size = filesystem.get("max_file_size_bytes")
+        file_size = safe_params.get("file_size_bytes")
+        if not isinstance(file_size, int | float):
+            file_size = safe_params.get("size")
+        if isinstance(max_file_size, int | float) and isinstance(file_size, int | float):
+            if int(file_size) > int(max_file_size):
+                reasons.append(
+                    f"sandbox: file size {int(file_size)} exceeds max_file_size_bytes {int(max_file_size)}"
+                )
+
+    if not reasons:
+        network = sandbox.get("network")
+        if isinstance(network, dict):
+            values = _extract_network_values(safe_params)
+            denied_domains = {
+                item.lower()
+                for item in network.get("denied_domains", [])
+                if isinstance(item, str) and item.strip()
+            }
+            allowed_domains = {
+                item.lower()
+                for item in network.get("allowed_domains", [])
+                if isinstance(item, str) and item.strip()
+            }
+            deny_ip = bool(network.get("deny_ip_addresses"))
+            for raw in values:
+                parsed = urlparse(raw) if "://" in raw else None
+                host = parsed.hostname if parsed is not None else raw
+                if not isinstance(host, str):
+                    continue
+                safe_host = host.lower().strip()
+                if deny_ip and _is_ip_address(safe_host):
+                    reasons.append(f"sandbox: IP address '{safe_host}' denied for session '{session_type}'")
+                    break
+                if denied_domains and any(
+                    safe_host == denied or safe_host.endswith(f".{denied}") for denied in denied_domains
+                ):
+                    reasons.append(f"sandbox: domain '{safe_host}' denied for session '{session_type}'")
+                    break
+                if allowed_domains and not any(
+                    safe_host == allowed or safe_host.endswith(f".{allowed}") for allowed in allowed_domains
+                ):
+                    reasons.append(f"sandbox: domain '{safe_host}' not in allowlist for session '{session_type}'")
+                    break
+            max_request_size = network.get("max_request_size_bytes")
+            request_size = safe_params.get("request_size_bytes")
+            if not isinstance(request_size, int | float):
+                request_size = safe_params.get("size")
+            if isinstance(max_request_size, int | float) and isinstance(request_size, int | float):
+                if int(request_size) > int(max_request_size):
+                    reasons.append(
+                        f"sandbox: request size {int(request_size)} exceeds max_request_size_bytes {int(max_request_size)}"
+                    )
+
+    if not reasons:
+        execution = sandbox.get("execution")
+        if isinstance(execution, dict):
+            normalized_tool = tool.lower()
+            command_value = safe_params.get("command")
+            command_text = command_value if isinstance(command_value, str) else ""
+            shell_like = any(token in normalized_tool for token in ("shell", "exec", "command"))
+            eval_like = "eval" in normalized_tool or "eval(" in command_text.lower()
+            subprocess_like = "subprocess" in normalized_tool or "subprocess" in command_text.lower()
+            if bool(execution.get("deny_shell")) and shell_like:
+                reasons.append(f"sandbox: shell execution denied for session '{session_type}'")
+            if not reasons and bool(execution.get("deny_eval")) and eval_like:
+                reasons.append(f"sandbox: eval execution denied for session '{session_type}'")
+            if not reasons and bool(execution.get("deny_subprocess")) and subprocess_like:
+                reasons.append(f"sandbox: subprocess execution denied for session '{session_type}'")
+            allowed_commands = [
+                item for item in execution.get("allowed_commands", []) if isinstance(item, str) and item.strip()
+            ]
+            if not reasons and allowed_commands and command_text:
+                if not any(command_text.strip().startswith(prefix) for prefix in allowed_commands):
+                    reasons.append("sandbox: command not in allowed_commands")
+
+    if not reasons:
+        data_cfg = sandbox.get("data")
+        if isinstance(data_cfg, dict):
+            output_value = safe_params.get("output")
+            if not isinstance(output_value, str):
+                output_value = safe_params.get("content")
+            if not isinstance(output_value, str):
+                output_value = safe_params.get("text")
+            output_text = output_value if isinstance(output_value, str) else ""
+            max_output_length = data_cfg.get("max_output_length")
+            if isinstance(max_output_length, int | float) and output_text:
+                if len(output_text) > int(max_output_length):
+                    reasons.append(
+                        f"sandbox: output length {len(output_text)} exceeds max_output_length {int(max_output_length)}"
+                    )
+            if not reasons and bool(data_cfg.get("deny_secrets_in_output")) and output_text:
+                if _SECRET_SCANNER.scan_text(output_text):
+                    reasons.append("sandbox: secrets detected in output")
+            if not reasons and bool(data_cfg.get("deny_pii_in_output")) and output_text:
+                if _PII_DETECTOR.scan_text(output_text):
+                    reasons.append("sandbox: pii detected in output")
+
+    return reasons, checked
+
+
+def _check_channel_policy(
+    *,
+    policy: dict[str, Any] | None,
+    request: dict[str, Any],
+    context: dict[str, Any],
+    channel: str | None,
+    tracker: RateLimitTracker,
+    now: datetime,
+    session_id: str,
+    effective_tier: str,
+) -> tuple[list[str], list[str], str]:
+    reasons: list[str] = []
+    checked: list[str] = []
+    resolved_tier = effective_tier
+    if not isinstance(policy, dict):
+        return reasons, checked, resolved_tier
+    channel_name = channel
+    if not isinstance(channel_name, str) or not channel_name.strip():
+        raw = context.get("channel")
+        channel_name = raw if isinstance(raw, str) and raw.strip() else None
+    if not isinstance(channel_name, str) or not channel_name.strip():
+        return reasons, checked, resolved_tier
+    normalized_channel = channel_name.strip().lower()
+    channel_policies = policy.get("channel_policies")
+    channel_config = (
+        channel_policies.get(normalized_channel)
+        if isinstance(channel_policies, dict) and isinstance(channel_policies.get(normalized_channel), dict)
+        else None
+    )
+    if not isinstance(channel_config, dict):
+        return reasons, checked, resolved_tier
+
+    checked.append("channel_policy")
+    tool_name = request.get("tool")
+    tool = tool_name if isinstance(tool_name, str) and tool_name else "__unknown__"
+
+    denied_tools = {
+        item for item in channel_config.get("denied_tools", []) if isinstance(item, str) and item.strip()
+    }
+    if tool in denied_tools:
+        reasons.append(f"channel_policy: tool '{tool}' denied for channel '{normalized_channel}'")
+        return reasons, checked, resolved_tier
+
+    approval_tools = {
+        item
+        for item in channel_config.get("require_approval_for", [])
+        if isinstance(item, str) and item.strip()
+    }
+    if tool in approval_tools:
+        reasons.append(
+            f"channel_policy: requires_human_approval for tool '{tool}' on channel '{normalized_channel}'"
+        )
+        return reasons, checked, resolved_tier
+
+    max_per_minute = channel_config.get("max_requests_per_minute")
+    if isinstance(max_per_minute, int):
+        over_limit = tracker.check_and_record(
+            f"__channel__:{normalized_channel}",
+            max_requests=max_per_minute,
+            window_seconds=60,
+            timestamp=now,
+            agent_id="__channel_policy__",
+            session_id=f"channel:{normalized_channel}:{session_id}",
+        )
+        if over_limit:
+            reasons.append(
+                f"channel_policy: channel '{normalized_channel}' exceeded max_requests_per_minute {max_per_minute}"
+            )
+            return reasons, checked, resolved_tier
+
+    channel_tier = channel_config.get("trust_tier")
+    resolved_tier = min_tier(channel_tier if isinstance(channel_tier, str) else None, effective_tier)
+    tool_access = policy.get("tool_access")
+    if isinstance(tool_access, dict):
+        mode = str(tool_access.get("mode", "")).lower()
+        if mode == "tiered":
+            tiers = tool_access.get("tiers")
+            if isinstance(tiers, dict):
+                allowed, denied, wildcard = _tier_allowed_and_denied(tiers, resolved_tier)
+                if tool in denied:
+                    reasons.append(
+                        f"channel_policy: tool '{tool}' denied for effective tier '{resolved_tier}' on channel '{normalized_channel}'"
+                    )
+                    return reasons, checked, resolved_tier
+                if not wildcard and tool not in allowed:
+                    reasons.append(
+                        f"channel_policy: tool '{tool}' not allowed for effective tier '{resolved_tier}' on channel '{normalized_channel}'"
+                    )
+                    return reasons, checked, resolved_tier
+
+    return reasons, checked, resolved_tier
 
 
 def _is_modify_or_destructive_action(request: dict[str, Any]) -> bool:
@@ -911,6 +1219,7 @@ def evaluate(
     now: datetime | None = None,
     debug: bool = False,
     session_type: str = "cli",
+    channel: str | None = None,
 ) -> Decision:
     """Evaluate request against policy rules."""
     started_ns = time.perf_counter_ns()
@@ -951,10 +1260,11 @@ def evaluate(
         )
 
     context = request.get("context")
+    safe_context = context if isinstance(context, dict) else {}
     token_reasons, token_checked = _check_token_limits(
         policy=policy,
         agent_id=agent_id,
-        context=context if isinstance(context, dict) else {},
+        context=safe_context,
         session_type=session_type,
         now=evaluation_now,
     )
@@ -970,6 +1280,45 @@ def evaluate(
             }
         )
 
+    channel_reasons, channel_checked, effective_tier_for_eval = _check_channel_policy(
+        policy=policy,
+        request=request,
+        context=safe_context,
+        channel=channel,
+        tracker=tracker,
+        now=evaluation_now,
+        session_id=session_id,
+        effective_tier=effective_tier_for_eval,
+    )
+    reasons.extend(channel_reasons)
+    rules_checked.extend(channel_checked)
+    if debug and channel_checked:
+        debug_rule_results.append(
+            {
+                "rule": "channel_policy",
+                "passed": len(channel_reasons) == 0,
+                "duration_us": 0,
+                "reason": channel_reasons[0] if channel_reasons else "",
+            }
+        )
+
+    sandbox_reasons, sandbox_checked = _check_sandbox(
+        policy=policy,
+        request=request,
+        session_type=session_type,
+    )
+    reasons.extend(sandbox_reasons)
+    rules_checked.extend(sandbox_checked)
+    if debug and sandbox_checked:
+        debug_rule_results.append(
+            {
+                "rule": "sandbox",
+                "passed": len(sandbox_reasons) == 0,
+                "duration_us": 0,
+                "reason": sandbox_reasons[0] if sandbox_reasons else "",
+            }
+        )
+
     def _attach_debug_trace(target: Decision) -> None:
         if not debug:
             return
@@ -981,6 +1330,9 @@ def evaluate(
         target.debug_trace = {
             "evaluation_order": [
                 "tool_access_control",
+                "token_budget",
+                "channel_policy",
+                "sandbox",
                 *[name for name in RULE_EVALUATION_ORDER if name != "identity_check"],
             ],
             "rule_results": list(debug_rule_results),

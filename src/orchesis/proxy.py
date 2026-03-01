@@ -14,6 +14,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
+from orchesis.contrib.pii_detector import PiiDetector
 from orchesis.contrib.secret_scanner import SecretScanner
 from orchesis.config import PolicyWatcher, load_policy
 from orchesis.engine import evaluate
@@ -52,6 +53,9 @@ class ProxyStats:
     requests_passthrough: int = 0
     requests_error: int = 0
     bytes_proxied: int = 0
+    secrets_detected: int = 0
+    secrets_blocked: int = 0
+    pii_detected: int = 0
     avg_latency_ms: float = 0.0
     start_time: float = field(default_factory=time.time)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -66,6 +70,9 @@ class ProxyStats:
                 "requests_passthrough": self.requests_passthrough,
                 "requests_error": self.requests_error,
                 "bytes_proxied": self.bytes_proxied,
+                "secrets_detected": self.secrets_detected,
+                "secrets_blocked": self.secrets_blocked,
+                "pii_detected": self.pii_detected,
                 "avg_latency_ms": self.avg_latency_ms,
                 "uptime_seconds": int(uptime),
             }
@@ -90,18 +97,48 @@ class ProxyStats:
                 n = float(self.requests_total)
                 self.avg_latency_ms = ((prev * (n - 1.0)) + max(0.0, float(latency_ms))) / n
 
+    def record_detection(self, *, secrets_detected: int = 0, secrets_blocked: int = 0, pii_detected: int = 0) -> None:
+        with self._lock:
+            self.secrets_detected += max(0, int(secrets_detected))
+            self.secrets_blocked += max(0, int(secrets_blocked))
+            self.pii_detected += max(0, int(pii_detected))
+
+
+_SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
 
 class OrchesisProxy:
     """Asyncio HTTP proxy that can enforce Orchesis policy checks."""
 
-    def __init__(self, engine, config: ProxyConfig, event_bus=None, redactor=None):
+    def __init__(self, engine, config: ProxyConfig, event_bus=None, redactor=None, policy: dict[str, Any] | None = None):
         self._engine = engine
         self._config = config
         self._event_bus = event_bus
         self._redactor = redactor
+        self._policy = policy if isinstance(policy, dict) else {}
         self._stats = ProxyStats()
         self._server: asyncio.base_events.Server | None = None
+        proxy_cfg = self._policy.get("proxy") if isinstance(self._policy.get("proxy"), dict) else {}
+        secret_cfg = proxy_cfg.get("secret_scanning") if isinstance(proxy_cfg.get("secret_scanning"), dict) else {}
+        pii_cfg = proxy_cfg.get("pii_scanning") if isinstance(proxy_cfg.get("pii_scanning"), dict) else {}
+        redaction_cfg = (
+            proxy_cfg.get("response_redaction")
+            if isinstance(proxy_cfg.get("response_redaction"), dict)
+            else {}
+        )
+        self._scan_requests = bool(proxy_cfg.get("scan_requests", True))
+        self._scan_responses = bool(proxy_cfg.get("scan_responses", True))
+        self._secret_enabled = bool(secret_cfg.get("enabled", True))
+        self._secret_threshold = str(secret_cfg.get("severity_threshold", "high")).lower()
+        self._secret_block_on_critical = bool(secret_cfg.get("block_on_critical", False))
+        self._pii_enabled = bool(pii_cfg.get("enabled", True))
+        self._pii_threshold = str(pii_cfg.get("severity_threshold", "medium")).lower()
+        self._pii_block_on_critical = bool(pii_cfg.get("block_on_critical", False))
+        self._response_redaction_enabled = bool(redaction_cfg.get("enabled", False))
+        self._response_redact_secrets = bool(redaction_cfg.get("redact_secrets", True))
+        self._response_redact_pii = bool(redaction_cfg.get("redact_pii", False))
         self._secret_scanner = SecretScanner()
+        self._pii_detector = PiiDetector(severity_threshold=self._pii_threshold)
 
     @property
     def stats(self) -> ProxyStats:
@@ -193,9 +230,70 @@ class OrchesisProxy:
                 )
                 return
 
+            if self._scan_requests and self._secret_enabled and tool_call is not None:
+                request_findings = self._scan_request(tool_call[0], tool_call[1])
+                critical = [item for item in request_findings if str(item.get("severity", "")).lower() == "critical"]
+                if critical and self._secret_block_on_critical:
+                    self._stats.record_detection(
+                        secrets_detected=len(request_findings),
+                        secrets_blocked=len(critical),
+                    )
+                    writer.write(
+                        self._build_deny_response(
+                            "credential_leak_in_request",
+                            "credential_leak_in_request",
+                            "high",
+                        )
+                    )
+                    await writer.drain()
+                    decision_label = "DENY"
+                    self._emit_event(
+                        {
+                            "event": "proxy_decision",
+                            "decision": "DENY",
+                            "rule": "credential_leak_in_request",
+                            "reason": "credential_leak_in_request",
+                            "path": path,
+                            "method": method,
+                            "findings": request_findings[:10],
+                        }
+                    )
+                    return
+
             status, resp_headers, resp_body = await self._forward_request(method, path, headers, body)
-            if self._config.buffer_responses and tool_call is not None:
-                self._scan_response(tool_call[0], resp_body)
+            if self._config.buffer_responses and tool_call is not None and self._scan_responses:
+                scan_result = self._scan_response_findings(tool_call[0], resp_body)
+                secrets = scan_result["secrets"]
+                pii = scan_result["pii"]
+                self._stats.record_detection(
+                    secrets_detected=len(secrets),
+                    pii_detected=len(pii),
+                )
+                if self._response_redaction_enabled:
+                    resp_body = self._redact_response_body(resp_body)
+                    resp_headers = dict(resp_headers)
+                    resp_headers["content-length"] = str(len(resp_body))
+                if self._secret_block_on_critical and any(
+                    str(item.get("severity", "")).lower() == "critical" for item in secrets
+                ):
+                    resp_body = self._redact_response_body(resp_body, force_secret_redaction=True)
+                    self._stats.record_detection(secrets_blocked=1)
+                if self._pii_block_on_critical and any(
+                    str(item.get("severity", "")).lower() == "critical" for item in pii
+                ):
+                    resp_body = self._redact_response_body(resp_body, force_pii_redaction=True)
+                if secrets or pii:
+                    self._emit_event(
+                        {
+                            "event": "proxy_alert",
+                            "decision": "ALERT",
+                            "tool": tool_call[0],
+                            "path": path,
+                            "method": method,
+                            "secret_findings": secrets[:10],
+                            "pii_findings": pii[:10],
+                        }
+                    )
 
             response_bytes = self._build_response_bytes(status, resp_headers, resp_body)
             writer.write(response_bytes)
@@ -375,6 +473,89 @@ class OrchesisProxy:
         except Exception:
             return []
         return findings
+
+    def _scan_request(self, tool_name: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+        findings: list[dict[str, Any]] = []
+        try:
+            findings = self._secret_scanner.scan_dict(params, path="params")
+            if self._secret_threshold:
+                threshold_rank = _SEVERITY_ORDER.get(self._secret_threshold, 3)
+                findings = [
+                    item
+                    for item in findings
+                    if _SEVERITY_ORDER.get(str(item.get("severity", "")).lower(), 0) >= threshold_rank
+                ]
+            if findings:
+                self._emit_event(
+                    {
+                        "event": "proxy_request_scan",
+                        "tool": tool_name,
+                        "count": len(findings),
+                        "findings": findings[:10],
+                    }
+                )
+        except Exception:
+            return []
+        return findings
+
+    def _scan_response_findings(self, tool_name: str, response_body: bytes) -> dict[str, list[dict[str, Any]]]:
+        secret_findings: list[dict[str, Any]] = []
+        pii_findings: list[dict[str, Any]] = []
+        try:
+            text = response_body.decode("utf-8", errors="ignore")
+            if self._secret_enabled:
+                secret_findings = self._secret_scanner.scan_text(text)
+                if self._secret_threshold:
+                    threshold_rank = _SEVERITY_ORDER.get(self._secret_threshold, 3)
+                    secret_findings = [
+                        item
+                        for item in secret_findings
+                        if _SEVERITY_ORDER.get(str(item.get("severity", "")).lower(), 0) >= threshold_rank
+                    ]
+            if self._pii_enabled:
+                pii_findings = self._pii_detector.scan_text(text)
+            if secret_findings or pii_findings:
+                self._emit_event(
+                    {
+                        "event": "proxy_response_scan",
+                        "tool": tool_name,
+                        "secret_count": len(secret_findings),
+                        "pii_count": len(pii_findings),
+                        "secret_findings": secret_findings[:10],
+                        "pii_findings": pii_findings[:10],
+                    }
+                )
+        except Exception:
+            return {"secrets": [], "pii": []}
+        return {"secrets": secret_findings, "pii": pii_findings}
+
+    def _redact_response_body(
+        self,
+        response_body: bytes,
+        *,
+        force_secret_redaction: bool = False,
+        force_pii_redaction: bool = False,
+    ) -> bytes:
+        try:
+            text = response_body.decode("utf-8", errors="ignore")
+        except Exception:
+            return response_body
+        redact_secrets = self._response_redaction_enabled and self._response_redact_secrets
+        redact_pii = self._response_redaction_enabled and self._response_redact_pii
+        if force_secret_redaction:
+            redact_secrets = True
+        if force_pii_redaction:
+            redact_pii = True
+        if redact_secrets:
+            findings = self._secret_scanner.scan_text(text)
+            for finding in findings:
+                raw_match = finding.get("raw_match")
+                pattern = finding.get("pattern")
+                if isinstance(raw_match, str) and raw_match:
+                    text = text.replace(raw_match, f"[REDACTED-{pattern}]")
+        if redact_pii:
+            text = self._pii_detector.redact_text(text)
+        return text.encode("utf-8")
 
     def _evaluate(self, payload: dict[str, Any]):
         if hasattr(self._engine, "evaluate"):

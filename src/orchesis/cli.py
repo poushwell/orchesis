@@ -24,6 +24,7 @@ from orchesis.api import create_api_app
 from orchesis.compliance import ComplianceEngine, FRAMEWORK_CHECKS
 from orchesis.contrib.ioc_database import IoCMatcher
 from orchesis.contrib.network_scanner import NetworkExposureScanner
+from orchesis.contrib.remote_scanner import RemoteSkillScanner
 from orchesis.config import (
     load_agent_registry,
     load_policy,
@@ -492,7 +493,7 @@ def proxy_command(
     def _engine(request_payload: dict[str, Any]):
         return evaluate(request_payload, policy, state=tracker)
 
-    proxy = OrchesisProxy(engine=_engine, config=config)
+    proxy = OrchesisProxy(engine=_engine, config=config, policy=policy)
     click.echo("Orchesis Proxy starting...")
     click.echo(f"Policy: {policy_path}")
     click.echo(f"Mode: {intercept_mode}")
@@ -1259,6 +1260,49 @@ def scan_command(
         click.echo("")
     if network_findings:
         click.echo(_format_network_scan_text(network_findings))
+        click.echo("")
+
+
+@main.command("scan-remote")
+@click.argument("target", required=False)
+@click.option("--format", "output_format", type=click.Choice(["text", "json", "md"]), default="text")
+@click.option("--batch", "batch_file", type=click.Path(), default=None)
+def scan_remote_command(target: str | None, output_format: str, batch_file: str | None) -> None:
+    """Scan remote skill URLs/IDs before installation."""
+    scanner = RemoteSkillScanner()
+    targets: list[str] = []
+    if isinstance(batch_file, str):
+        file_path = Path(batch_file)
+        if not file_path.exists():
+            raise click.ClickException(f"Batch file not found: {file_path}")
+        targets.extend(
+            line.strip() for line in file_path.read_text(encoding="utf-8").splitlines() if line.strip()
+        )
+    elif isinstance(target, str) and target.strip():
+        targets.append(target.strip())
+    else:
+        raise click.ClickException("Provide <url_or_id> or use --batch <file>")
+
+    reports: list[ScanReport] = []
+    for item in targets:
+        if item.startswith("clawhub:"):
+            reports.append(scanner.scan_clawhub(item))
+        elif item.startswith("npm:"):
+            reports.append(scanner.scan_npm_package(item))
+        elif "github.com" in item:
+            reports.append(scanner.scan_github(item))
+        else:
+            reports.append(scanner.scan_url(item))
+
+    if output_format == "json":
+        click.echo(json.dumps([report_to_dict(item) for item in reports], ensure_ascii=False, indent=2))
+        return
+
+    for report in reports:
+        if output_format == "md":
+            click.echo(format_report_markdown(report, threshold="info"))
+        else:
+            click.echo(format_report_text(report, threshold="info"))
         click.echo("")
 
 
