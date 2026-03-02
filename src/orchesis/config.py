@@ -8,6 +8,52 @@ from typing import Any, Callable
 import yaml
 from orchesis.identity import AgentIdentity, AgentRegistry, TrustTier
 
+_TOOL_RATE_LIMIT_PATTERN = re.compile(r"^\s*(\d+)\s*/\s*(second|minute|hour)\s*$", re.IGNORECASE)
+_RATE_LIMIT_WINDOW_SECONDS = {"second": 1, "minute": 60, "hour": 3600}
+
+
+class PolicyError(ValueError):
+    """Raised when policy structure/content is invalid."""
+
+
+def _parse_tool_rate_limit(value: Any) -> tuple[int, int, str]:
+    if not isinstance(value, str):
+        raise PolicyError("tool_access.rate_limits values must be strings like '10/minute'")
+    match = _TOOL_RATE_LIMIT_PATTERN.match(value)
+    if match is None:
+        raise PolicyError(f"Invalid tool rate limit format: '{value}'")
+    max_requests = int(match.group(1))
+    unit = match.group(2).lower()
+    if max_requests <= 0:
+        raise PolicyError(f"Tool rate limit must be positive: '{value}'")
+    window_seconds = _RATE_LIMIT_WINDOW_SECONDS.get(unit)
+    if not isinstance(window_seconds, int):
+        raise PolicyError(f"Unsupported tool rate limit unit in '{value}'")
+    return max_requests, window_seconds, unit
+
+
+def _normalize_tool_access_rate_limits(policy: dict[str, Any]) -> None:
+    tool_access = policy.get("tool_access")
+    if not isinstance(tool_access, dict):
+        return
+    raw_rate_limits = tool_access.get("rate_limits")
+    if raw_rate_limits is None:
+        return
+    if not isinstance(raw_rate_limits, dict):
+        raise PolicyError("tool_access.rate_limits must be a mapping of tool_name -> 'N/unit'")
+    parsed: dict[str, dict[str, Any]] = {}
+    for tool_name, value in raw_rate_limits.items():
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            raise PolicyError("tool_access.rate_limits keys must be non-empty tool names")
+        max_requests, window_seconds, unit = _parse_tool_rate_limit(value)
+        parsed[tool_name.strip()] = {
+            "max_requests": max_requests,
+            "window_seconds": window_seconds,
+            "unit": unit,
+            "raw": f"{max_requests}/{unit}",
+        }
+    tool_access["_parsed_rate_limits"] = parsed
+
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool)
@@ -25,6 +71,7 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise ValueError("Policy top-level YAML object must be a mapping.")
 
+    _normalize_tool_access_rate_limits(loaded)
     return loaded
 
 

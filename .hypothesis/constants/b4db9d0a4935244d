@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\config.py
+# hypothesis_version: 6.151.9
+
+[3600, 'AND', 'OR', '_parsed_rate_limits', 'agents', 'allowed_paths', 'allowed_tools', 'budget_limit', 'composite', 'conditions', 'daily_budget', 'default_trust_tier', 'denied_operations', 'denied_paths', 'denied_tools', 'deny_patterns', 'field', 'file_access', 'hour', 'id', 'max_cost_per_call', 'max_requests', 'metadata', 'minute', 'name', 'operator', 'r', 'rate_limit', 'rate_limits', 'raw', 'regex_match', 'rule', 'rules', 'second', 'sql_restriction', 'tool_access', 'trust_tier', 'type', 'unit', 'utf-8', 'version', 'window_seconds']

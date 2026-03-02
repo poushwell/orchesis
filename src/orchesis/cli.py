@@ -42,6 +42,7 @@ from orchesis.policy_store import PolicyStore
 from orchesis.plugins import load_plugins_for_policy
 from orchesis.replay import ReplayEngine, read_events_from_jsonl
 from orchesis.reliability import ReliabilityReportGenerator
+from orchesis.rules_generator import generate_security_rules_from_policy
 from orchesis.scenarios import AdversarialScenarios
 from orchesis.scanner import (
     ScanReport,
@@ -500,6 +501,25 @@ def validate(policy_path: str) -> None:
     for error in errors:
         click.echo(f"- {error}")
     raise SystemExit(1)
+
+
+@main.command("generate-rules")
+@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
+@click.option("--format", "output_format", type=click.Choice(["markdown", "text"]), default="markdown")
+@click.option("--output", "output_path", type=click.Path(), default=None)
+def generate_rules_command(policy_path: str, output_format: str, output_path: str | None) -> None:
+    """Generate behavioral security rules from policy."""
+    try:
+        content = generate_security_rules_from_policy(policy_path, output_format=output_format)
+    except (ValueError, YAMLError, OSError) as error:
+        raise click.ClickException(f"Failed to load policy: {error}") from error
+    if output_path is not None:
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        click.echo(f"Rules written to {target}")
+        return
+    click.echo(content)
 
 
 @main.command()

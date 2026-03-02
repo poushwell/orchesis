@@ -44,6 +44,8 @@ _daily_token_usage_day: date = date.today()
 _daily_token_usage_lock = threading.Lock()
 _SECRET_SCANNER = SecretScanner()
 _PII_DETECTOR = PiiDetector()
+_TOOL_RATE_LIMIT_PATTERN = re.compile(r"^\s*(\d+)\s*/\s*(second|minute|hour)\s*$", re.IGNORECASE)
+_RATE_LIMIT_WINDOW_SECONDS = {"second": 1, "minute": 60, "hour": 3600}
 
 
 class EvaluationGuarantees:
@@ -55,6 +57,35 @@ class EvaluationGuarantees:
     UNKNOWN_FIELD_SAFE = True
     THREAD_SAFE = True
     EVALUATION_ORDER = RULE_EVALUATION_ORDER
+
+
+class ToolRateLimiter:
+    """Sliding-window rate limiter for per-tool limits."""
+
+    def __init__(self, tracker: RateLimitTracker, agent_id: str, session_id: str) -> None:
+        self._tracker = tracker
+        self._agent_id = agent_id
+        self._session_id = session_id
+
+    def check_and_record(
+        self, *, tool_name: str, max_requests: int, window_seconds: int, now: datetime
+    ) -> tuple[bool, int]:
+        over_limit = self._tracker.check_and_record(
+            tool_name,
+            max_requests=max_requests,
+            window_seconds=window_seconds,
+            timestamp=now,
+            agent_id=self._agent_id,
+            session_id=self._session_id,
+        )
+        current_count = self._tracker.get_count(
+            tool_name,
+            window_seconds=window_seconds,
+            now=now,
+            agent_id=self._agent_id,
+            session_id=self._session_id,
+        )
+        return over_limit, current_count
 
 
 def _stable_sha256(payload: Any) -> str:
@@ -224,6 +255,69 @@ def _extract_tool_access(
     if session_tool_access is not None:
         return session_tool_access
     return base_tool_access
+
+
+def _parse_rate_limit_value(raw: Any) -> tuple[int, int, str] | None:
+    if isinstance(raw, dict):
+        max_requests = raw.get("max_requests")
+        window_seconds = raw.get("window_seconds")
+        unit_raw = raw.get("unit")
+        if isinstance(max_requests, int) and isinstance(window_seconds, int) and max_requests > 0:
+            unit = str(unit_raw).lower() if isinstance(unit_raw, str) else "minute"
+            return max_requests, window_seconds, unit
+        return None
+    if not isinstance(raw, str):
+        return None
+    match = _TOOL_RATE_LIMIT_PATTERN.match(raw)
+    if match is None:
+        return None
+    max_requests = int(match.group(1))
+    unit = match.group(2).lower()
+    if max_requests <= 0:
+        return None
+    window_seconds = _RATE_LIMIT_WINDOW_SECONDS.get(unit)
+    if not isinstance(window_seconds, int):
+        return None
+    return max_requests, window_seconds, unit
+
+
+def _resolve_per_tool_rate_limit(
+    *,
+    policy: dict[str, Any] | None,
+    request: dict[str, Any],
+    session_type: str,
+) -> dict[str, Any] | None:
+    if not isinstance(policy, dict):
+        return None
+    tool_name = request.get("tool")
+    tool = tool_name if isinstance(tool_name, str) and tool_name else "__unknown__"
+    session_policies = policy.get("session_policies")
+    session_config = (
+        session_policies.get(session_type)
+        if isinstance(session_policies, dict) and isinstance(session_policies.get(session_type), dict)
+        else None
+    )
+    base_tool_access = policy.get("tool_access") if isinstance(policy.get("tool_access"), dict) else None
+    tool_access = _extract_tool_access(base_tool_access, session_config)
+    if not isinstance(tool_access, dict):
+        return None
+    parsed_limits = (
+        tool_access.get("_parsed_rate_limits")
+        if isinstance(tool_access.get("_parsed_rate_limits"), dict)
+        else tool_access.get("rate_limits")
+    )
+    if not isinstance(parsed_limits, dict):
+        return None
+    parsed = _parse_rate_limit_value(parsed_limits.get(tool))
+    if parsed is None:
+        return None
+    max_requests, window_seconds, unit = parsed
+    return {
+        "tool": tool,
+        "max_requests": max_requests,
+        "window_seconds": window_seconds,
+        "unit": unit,
+    }
 
 
 def _tier_allowed_and_denied(
@@ -1284,6 +1378,8 @@ def evaluate(
     decision: Decision
     debug_rule_results: list[dict[str, Any]] = []
     debug_identity_passed = identity is None
+    decision_reason: str | None = None
+    per_tool_rate_limit_meta: dict[str, Any] | None = None
 
     tool_access_reasons, tool_access_checked, effective_tier_for_eval = _evaluate_tool_access_control(
         policy=policy,
@@ -1307,6 +1403,11 @@ def evaluate(
             }
         )
 
+    per_tool_rate_limit = _resolve_per_tool_rate_limit(
+        policy=policy,
+        request=request,
+        session_type=session_type,
+    )
     context = request.get("context")
     safe_context = context if isinstance(context, dict) else {}
     token_reasons, token_checked = _check_token_limits(
@@ -1378,6 +1479,7 @@ def evaluate(
         target.debug_trace = {
             "evaluation_order": [
                 "tool_access_control",
+                "per_tool_rate_limit",
                 "token_budget",
                 "channel_policy",
                 "sandbox",
@@ -1391,6 +1493,47 @@ def evaluate(
             "policy_version": policy_version_hash,
             "state_snapshot": snapshot,
         }
+
+    if per_tool_rate_limit is not None:
+        rules_checked.append("per_tool_rate_limit")
+        limiter = ToolRateLimiter(tracker, agent_id, session_id)
+        over_limit, current_count = limiter.check_and_record(
+            tool_name=str(per_tool_rate_limit["tool"]),
+            max_requests=int(per_tool_rate_limit["max_requests"]),
+            window_seconds=int(per_tool_rate_limit["window_seconds"]),
+            now=evaluation_now,
+        )
+        if over_limit:
+            tool = str(per_tool_rate_limit["tool"])
+            max_requests = int(per_tool_rate_limit["max_requests"])
+            unit = str(per_tool_rate_limit["unit"])
+            reasons.append(
+                f"rate_limit_exceeded: {tool} limited to {max_requests}/{unit} (current: {current_count})"
+            )
+            decision_reason = "per_tool_rate_limit"
+            per_tool_rate_limit_meta = {
+                "tool": tool,
+                "limit": f"{max_requests}/{unit}",
+                "max_requests": max_requests,
+                "window_seconds": int(per_tool_rate_limit["window_seconds"]),
+                "current_count": current_count,
+            }
+            decision = Decision(allowed=False, reasons=reasons, rules_checked=rules_checked)
+            _attach_debug_trace(decision)
+            _emit_event(
+                emitter=emitter,
+                request=request,
+                policy=policy,
+                agent_id=agent_id,
+                tracker=tracker,
+                session_id=session_id,
+                decision=decision,
+                started_ns=started_ns,
+                policy_version=policy_version,
+                decision_reason=decision_reason,
+                decision_context=per_tool_rate_limit_meta,
+            )
+            return decision
 
     if identity is not None:
         identity_reasons, identity_checked, blocked_immediately = _apply_identity_check(
@@ -1472,10 +1615,14 @@ def evaluate(
     effective_rate_limit_per_minute = (
         identity.rate_limit_per_minute if identity is not None else None
     )
+    if per_tool_rate_limit is not None:
+        effective_rate_limit_per_minute = None
     effective_daily_budget_limit: float | None = None
 
     for rule_type in RULE_EVALUATION_ORDER:
         if rule_type == "identity_check":
+            continue
+        if rule_type == "rate_limit" and per_tool_rate_limit is not None:
             continue
         handler_name = _RULE_HANDLERS.get(rule_type)
         handler = globals().get(handler_name) if isinstance(handler_name, str) else None
@@ -1654,6 +1801,8 @@ def evaluate(
         decision=decision,
         started_ns=started_ns,
         policy_version=policy_version,
+        decision_reason=decision_reason,
+        decision_context=per_tool_rate_limit_meta,
     )
     return decision
 
@@ -1669,6 +1818,8 @@ def _emit_event(
     decision: Decision,
     started_ns: int,
     policy_version: str | None,
+    decision_reason: str | None = None,
+    decision_context: dict[str, Any] | None = None,
 ) -> None:
     if emitter is None:
         return
@@ -1695,6 +1846,16 @@ def _emit_event(
             }
         except Exception:
             state_snapshot = {"error": "state_unavailable"}
+        resolved_reason = decision_reason
+        if resolved_reason is None and any(
+            isinstance(reason, str) and reason.startswith("rate_limit_exceeded:")
+            for reason in decision.reasons
+        ):
+            resolved_reason = "per_tool_rate_limit"
+        if isinstance(resolved_reason, str) and resolved_reason:
+            state_snapshot["decision_reason"] = resolved_reason
+        if isinstance(decision_context, dict) and decision_context:
+            state_snapshot["decision_context"] = dict(decision_context)
         context = request.get("context")
         if isinstance(context, dict):
             trace_id = context.get("trace_id")
