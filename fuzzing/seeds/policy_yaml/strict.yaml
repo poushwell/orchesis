@@ -1,0 +1,15 @@
+default_trust_tier: intern
+tool_access:
+  mode: allowlist
+  default: deny
+  allowed: ["read_file", "web_search"]
+rules:
+  - name: budget_limit
+    max_cost_per_call: 0.2
+    daily_budget: 2.0
+  - name: file_access
+    denied_paths: ["/etc", "/root", "~/.ssh", ".env"]
+  - name: sql_restriction
+    denied_operations: ["DROP", "DELETE", "TRUNCATE", "ALTER"]
+  - name: rate_limit
+    max_requests_per_minute: 5

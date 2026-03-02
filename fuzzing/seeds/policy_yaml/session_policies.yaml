@@ -1,0 +1,11 @@
+session_policies:
+  group:
+    trust_tier: intern
+    tool_access:
+      mode: allowlist
+      allowed: ["web_search"]
+  dm:
+    trust_tier: assistant
+rules:
+  - name: rate_limit
+    max_requests_per_minute: 20

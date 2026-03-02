@@ -1,0 +1,8 @@
+tool_access:
+  mode: denylist
+  denied:
+    - shell
+    - exec
+rules:
+  - name: rate_limit
+    max_requests_per_minute: 100

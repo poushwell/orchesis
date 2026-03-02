@@ -1,0 +1,10 @@
+tool_access:
+  mode: allowlist
+  allowed: ["shell_execute", "web_search", "send_email"]
+  rate_limits:
+    shell_execute: 2/minute
+    web_search: 10/minute
+    send_email: 5/hour
+rules:
+  - name: rate_limit
+    max_requests_per_minute: 60

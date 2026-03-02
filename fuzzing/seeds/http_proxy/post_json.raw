@@ -1,0 +1,6 @@
+POST /api/v1/evaluate HTTP/1.1
+Host: localhost
+Content-Type: application/json
+Content-Length: 43
+
+{"tool":"web_search","params":{"query":"x"}}

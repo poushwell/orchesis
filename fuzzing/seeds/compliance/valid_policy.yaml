@@ -1,0 +1,12 @@
+policy_version: "v1"
+risk_profiles: true
+incident_detection: true
+alerts:
+  recipients: ["secops@example.com"]
+rules:
+  - name: budget_limit
+    max_cost_per_call: 1.0
+  - name: rate_limit
+    max_requests_per_minute: 30
+  - name: sql_restriction
+    denied_operations: ["DROP", "DELETE"]

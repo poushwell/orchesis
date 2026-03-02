@@ -1,0 +1,4 @@
+rules:
+  - name: budget_limit
+    max_cost_per_call: 0.5
+    daily_budget: 50.0

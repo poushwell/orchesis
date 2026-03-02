@@ -1,0 +1,5 @@
+policy_version: 1
+risk_profiles: 1
+rules:
+  - name: budget_limit
+    max_cost_per_call: 1

@@ -1,0 +1,96 @@
+═══════════════════════════════════════ 
+ Orchesis Nightly Run: 02.03.2026  2:04:30,63 
+═══════════════════════════════════════ 
+ 
+[1/6] Fuzzer (10000 requests)... 
+{"ts": "2026-03-01T23:04:32.436589Z", "level": "INFO", "component": "cli", "msg": "fuzz run completed", "total_requests": 10000, "bypasses": 0, "seed": 42}
+Fuzzer Report:
+  Total requests: 10000
+  Correctly denied: 6456
+  Correctly allowed: 3544
+  BYPASSES FOUND: 0 (0.00%)
+
+  Categories tested:
+    composite: 1398
+    cost_manipulation: 1405
+    identity_spoofing: 1424
+    path_traversal: 1433
+    rate_limit: 1476
+    regex_evasion: 1460
+    sql_injection: 1404
+ 
+[2/6] Mutation engine (1000 mutations)... 
+Mutation results: 1000 tested, 0 bypasses
+{"ts": "2026-03-01T23:04:32.904084Z", "level": "INFO", "component": "cli", "msg": "mutation run completed", "mutations_tested": 1000, "bypasses": 0, "seed": 42}
+ 
+[3/6] Invariant checks... 
+Invariant Checks:
+  [OK] never_fail_open
+  [FAIL] deterministic_replay
+  [OK] state_isolation
+  [OK] no_cross_session_leak
+  [OK] fail_closed_on_error
+  [OK] evaluation_order_stable
+  [OK] identity_enforcement
+  [OK] cost_never_negative_allow
+  [OK] rate_limit_atomic
+  [FAIL] no_state_drift
+
+8/10 passed (0.03s)
+{"ts": "2026-03-01T23:04:33.217500Z", "level": "INFO", "component": "cli", "msg": "invariants checked", "total": 10, "failures": 2}
+ 
+[4/6] Adversarial scenarios... 
+Adversarial Scenarios:
+  [OK] escalation_attack        - 7 steps, 0 bypasses
+  [OK] budget_drainer           - 80 steps, 0 bypasses
+  [WARN] identity_rotation        - 10 steps, known limitation
+  [OK] session_hopping          - 20 steps, 0 bypasses
+  [OK] slow_probe               - 30 steps, 0 bypasses
+  [OK] mixed_legitimate_malicious - 100 steps, 0 bypasses
+ 
+[5/6] Full test suite... 
+........................................................................ [ 10%]
+........................................................................ [ 21%]
+........................................................................ [ 32%]
+........................................................................ [ 43%]
+........................................................................ [ 53%]
+........................................................................ [ 64%]
+........................................................................ [ 75%]
+........................................................................ [ 86%]
+........................................................................ [ 96%]
+.....................                                                    [100%]
+669 passed in 143.60s (0:02:23)
+ 
+[6/6] Reliability report... 
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\lenovo\AppData\Local\Programs\Python\Python312\Scripts\orchesis.exe\__main__.py", line 7, in <module>
+  File "C:\Users\lenovo\AppData\Local\Programs\Python\Python312\Lib\site-packages\click\core.py", line 1161, in __call__
+    return self.main(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\lenovo\AppData\Local\Programs\Python\Python312\Lib\site-packages\click\core.py", line 1082, in main
+    rv = self.invoke(ctx)
+         ^^^^^^^^^^^^^^^^
+  File "C:\Users\lenovo\AppData\Local\Programs\Python\Python312\Lib\site-packages\click\core.py", line 1697, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\lenovo\AppData\Local\Programs\Python\Python312\Lib\site-packages\click\core.py", line 1443, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\lenovo\AppData\Local\Programs\Python\Python312\Lib\site-packages\click\core.py", line 788, in invoke
+    return __callback(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\cli.py", line 1949, in reliability_report
+    click.echo(generator.to_markdown(report))
+  File "C:\Users\lenovo\AppData\Local\Programs\Python\Python312\Lib\site-packages\click\utils.py", line 318, in echo
+    file.write(out)  # type: ignore
+    ^^^^^^^^^^^^^^^
+  File "C:\Users\lenovo\AppData\Local\Programs\Python\Python312\Lib\encodings\cp1251.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2713' in position 634: character maps to <undefined>
+ 
+═══════════════════════════════════════ 
+ Completed: 02.03.2026  2:06:59,84 
+═══════════════════════════════════════ 

@@ -1,0 +1,6 @@
+GET /multi HTTP/1.1
+Host: localhost
+X-Test: one
+X-Test: two
+X-Test: three
+

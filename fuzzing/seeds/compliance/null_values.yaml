@@ -1,0 +1,5 @@
+policy_version: null
+alerts: null
+rules:
+  - name: file_access
+    denied_paths: null

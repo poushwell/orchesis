@@ -1,0 +1,3 @@
+rules:
+  - name: rate_limit
+    max_requests_per_minute: 1

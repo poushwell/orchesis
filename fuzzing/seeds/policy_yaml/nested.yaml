@@ -1,0 +1,10 @@
+rules:
+  - name: context_rules
+    rules:
+      - agent: "nested-agent"
+        params:
+          level1:
+            level2:
+              level3:
+                level4:
+                  level5: "deep"

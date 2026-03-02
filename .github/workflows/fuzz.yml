@@ -1,0 +1,122 @@
+name: Continuous Fuzzing
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      fuzz_seconds:
+        description: 'Seconds per target'
+        default: '18000'
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+  issues: write
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        fuzzer:
+          - fuzz_policy_yaml
+          - fuzz_http_proxy
+          - fuzz_mcp_jsonrpc
+          - fuzz_secret_scanner
+          - fuzz_pii_detector
+          - fuzz_compliance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install atheris
+          pip install -e ".[server]"
+
+      - name: Restore corpus cache
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzzing/corpus/${{ matrix.fuzzer }}
+          key: fuzz-corpus-${{ matrix.fuzzer }}-${{ github.sha }}
+          restore-keys: fuzz-corpus-${{ matrix.fuzzer }}-
+
+      - name: Prepare directories
+        run: mkdir -p fuzzing/corpus/${{ matrix.fuzzer }} fuzzing/crashes/
+
+      - name: Seed corpus
+        run: |
+          TARGET=${{ matrix.fuzzer }}
+          SEED_DIR=""
+          case $TARGET in
+            fuzz_policy_yaml) SEED_DIR="fuzzing/seeds/policy_yaml" ;;
+            fuzz_http_proxy) SEED_DIR="fuzzing/seeds/http_proxy" ;;
+            fuzz_mcp_jsonrpc) SEED_DIR="fuzzing/seeds/mcp_jsonrpc" ;;
+            fuzz_secret_scanner) SEED_DIR="fuzzing/seeds/secret_scanner" ;;
+            fuzz_pii_detector) SEED_DIR="fuzzing/seeds/pii_detector" ;;
+            fuzz_compliance) SEED_DIR="fuzzing/seeds/compliance" ;;
+          esac
+          if [ -d "$SEED_DIR" ]; then
+            cp "$SEED_DIR"/* fuzzing/corpus/${{ matrix.fuzzer }}/ 2>/dev/null || true
+          fi
+
+      - name: Run fuzzer
+        run: |
+          FUZZ_TIME=${{ github.event.inputs.fuzz_seconds || '18000' }}
+          DICT=""
+          case ${{ matrix.fuzzer }} in
+            fuzz_policy_yaml) DICT="-dict=fuzzing/dictionaries/yaml.dict" ;;
+            fuzz_http_proxy) DICT="-dict=fuzzing/dictionaries/http.dict" ;;
+            fuzz_mcp_jsonrpc) DICT="-dict=fuzzing/dictionaries/jsonrpc.dict" ;;
+          esac
+          timeout $((FUZZ_TIME + 60)) python fuzzing/${{ matrix.fuzzer }}.py \
+            -max_total_time=$FUZZ_TIME \
+            -artifact_prefix=fuzzing/crashes/ \
+            -print_final_stats=1 \
+            $DICT \
+            fuzzing/corpus/${{ matrix.fuzzer }} \
+          || true
+
+      - name: Save corpus cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: fuzzing/corpus/${{ matrix.fuzzer }}
+          key: fuzz-corpus-${{ matrix.fuzzer }}-${{ github.sha }}
+
+      - name: Upload crashes
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: crashes-${{ matrix.fuzzer }}-${{ github.run_id }}
+          path: fuzzing/crashes/
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Check for crashes
+        id: check_crashes
+        run: |
+          if ls fuzzing/crashes/crash-* 1>/dev/null 2>&1; then
+            echo "has_crashes=true" >> $GITHUB_OUTPUT
+            echo "::error::Fuzzer ${{ matrix.fuzzer }} found crashes!"
+          else
+            echo "has_crashes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: File issue on crash
+        if: steps.check_crashes.outputs.has_crashes == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🐛 Fuzzing crash: ${{ matrix.fuzzer }}`,
+              labels: ['bug', 'fuzzing', 'automated'],
+              body: `## Fuzzing Crash Report\n\n**Target:** \`${{ matrix.fuzzer }}\`\n**Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n**Commit:** ${context.sha}\n\nDownload crash artifacts from the workflow run.\n\nReproduce:\n\`\`\`\npython fuzzing/${{ matrix.fuzzer }}.py crash-<hash>\n\`\`\`\n\n- [ ] Reproduce locally\n- [ ] Classify severity\n- [ ] Fix and add to regression seeds`
+            });
