@@ -6,10 +6,6 @@ Orchesis is an open-source, agent-agnostic security runtime that enforces polici
 
 Built for the agentic AI era: OpenClaw, NanoBot, PicoClaw, ZeroClaw, LangChain, CrewAI, MCP servers — any agent that calls tools.
 
-Show Image  
-Show Image  
-Show Image
-
 ## Why Orchesis
 
 30,000+ OpenClaw instances were found exposed on the public internet with no authentication. 800+ malicious skills discovered in ClawHub stealing credentials. CVE-2026-25253 enabled one-click remote code execution. Infostealers now target AI agent config files.
