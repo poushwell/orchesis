@@ -1857,6 +1857,7 @@ def _emit_event(
         if isinstance(decision_context, dict) and decision_context:
             state_snapshot["decision_context"] = dict(decision_context)
         context = request.get("context")
+        credentials_injected: list[str] | None = None
         if isinstance(context, dict):
             trace_id = context.get("trace_id")
             parent_span_id = context.get("parent_span_id")
@@ -1864,6 +1865,11 @@ def _emit_event(
                 state_snapshot["trace_id"] = trace_id
             if isinstance(parent_span_id, str) and parent_span_id:
                 state_snapshot["parent_span_id"] = parent_span_id
+            raw_aliases = context.get("credentials_injected")
+            if isinstance(raw_aliases, list):
+                aliases = [item for item in raw_aliases if isinstance(item, str) and item.strip()]
+                if aliases:
+                    credentials_injected = aliases
 
         elapsed_us = max(0, (time.perf_counter_ns() - started_ns) // 1000)
         event = DecisionEvent(
@@ -1881,6 +1887,7 @@ def _emit_event(
             evaluation_duration_us=int(elapsed_us),
             policy_version=policy_version or "",
             state_snapshot=state_snapshot,
+            credentials_injected=credentials_injected,
         )
         emitter.emit(event)
     except Exception:

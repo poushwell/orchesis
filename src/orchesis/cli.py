@@ -24,6 +24,7 @@ from orchesis.compliance import ComplianceEngine, FRAMEWORK_CHECKS, FrameworkCro
 from orchesis.contrib.ioc_database import IoCMatcher
 from orchesis.contrib.network_scanner import NetworkExposureScanner
 from orchesis.contrib.remote_scanner import RemoteSkillScanner
+from orchesis.credential_vault import CredentialNotFoundError, EnvVault, FileVault, build_vault_from_policy
 from orchesis.config import (
     load_agent_registry,
     load_policy,
@@ -43,6 +44,7 @@ from orchesis.plugins import load_plugins_for_policy
 from orchesis.replay import ReplayEngine, read_events_from_jsonl
 from orchesis.reliability import ReliabilityReportGenerator
 from orchesis.rules_generator import generate_security_rules_from_policy
+from orchesis.scanner_server import run_scanner_http_server
 from orchesis.scenarios import AdversarialScenarios
 from orchesis.scanner import (
     ScanReport,
@@ -520,6 +522,108 @@ def generate_rules_command(policy_path: str, output_format: str, output_path: st
         click.echo(f"Rules written to {target}")
         return
     click.echo(content)
+
+
+@main.command("serve-scanner")
+@click.option("--port", type=int, default=8081)
+@click.option("--host", type=str, default="127.0.0.1")
+@click.option("--policy", "policy_path", type=click.Path(exists=True), default=None)
+@click.option("--allow-file-access/--no-allow-file-access", default=False)
+def serve_scanner_command(port: int, host: str, policy_path: str | None, allow_file_access: bool) -> None:
+    """Run scanner HTTP API server (stdlib only)."""
+    click.echo(f"Orchesis Scanner API running on http://{host}:{port}")
+    click.echo("Endpoints:")
+    click.echo("  POST /scan/skill")
+    click.echo("  POST /scan/mcp")
+    click.echo("  POST /scan/policy")
+    click.echo("  POST /scan/ioc")
+    click.echo("  GET  /health")
+    click.echo("  GET  /frameworks")
+    click.echo("No authentication in v1. Use reverse proxy for production.")
+    run_scanner_http_server(
+        host=host,
+        port=max(1, int(port)),
+        policy_path=policy_path,
+        allow_file_access=bool(allow_file_access),
+    )
+
+
+@main.group("credentials")
+def credentials_group() -> None:
+    """Manage credential vault aliases."""
+
+
+@credentials_group.command("set")
+@click.argument("alias")
+@click.option("--env", "use_env_vault", is_flag=True, default=False)
+@click.option("--vault-path", default=".orchesis/credentials.enc")
+def credentials_set(alias: str, use_env_vault: bool, vault_path: str) -> None:
+    """Set credential value for alias."""
+    safe_alias = alias.strip()
+    if not safe_alias:
+        raise click.ClickException("Alias must be non-empty")
+    if use_env_vault:
+        vault = EnvVault()
+        vault.set_mapping(safe_alias, safe_alias.upper())
+        click.echo(f"✓ {safe_alias}: mapped to env var {safe_alias.upper()}")
+        return
+    value = click.prompt(f"Credential value for {safe_alias}", hide_input=True, confirmation_prompt=True)
+    vault = FileVault(vault_path=vault_path)
+    vault.set(safe_alias, value)
+    click.echo(f"✓ {safe_alias}: stored")
+
+
+@credentials_group.command("list")
+@click.option("--policy", "policy_path", type=click.Path(exists=True), default=None)
+@click.option("--vault-path", default=".orchesis/credentials.enc")
+def credentials_list(policy_path: str | None, vault_path: str) -> None:
+    """List credential aliases only (never values)."""
+    if policy_path is not None:
+        policy = load_policy(policy_path)
+        vault = build_vault_from_policy(policy)
+    else:
+        vault = FileVault(vault_path=vault_path)
+    aliases = vault.list_aliases()
+    if not aliases:
+        click.echo("(no credentials)")
+        return
+    for alias in aliases:
+        click.echo(alias)
+
+
+@credentials_group.command("remove")
+@click.argument("alias")
+@click.option("--policy", "policy_path", type=click.Path(exists=True), default=None)
+@click.option("--vault-path", default=".orchesis/credentials.enc")
+def credentials_remove(alias: str, policy_path: str | None, vault_path: str) -> None:
+    """Remove alias from vault."""
+    if policy_path is not None:
+        policy = load_policy(policy_path)
+        vault = build_vault_from_policy(policy)
+    else:
+        vault = FileVault(vault_path=vault_path)
+    removed = vault.remove(alias.strip())
+    if not removed:
+        raise click.ClickException(f"Unknown alias: {alias}")
+    click.echo(f"✓ {alias}: removed")
+
+
+@credentials_group.command("test")
+@click.argument("alias")
+@click.option("--policy", "policy_path", type=click.Path(exists=True), default=None)
+@click.option("--vault-path", default=".orchesis/credentials.enc")
+def credentials_test(alias: str, policy_path: str | None, vault_path: str) -> None:
+    """Test if credential alias is accessible."""
+    if policy_path is not None:
+        policy = load_policy(policy_path)
+        vault = build_vault_from_policy(policy)
+    else:
+        vault = FileVault(vault_path=vault_path)
+    try:
+        value = vault.get(alias.strip())
+    except CredentialNotFoundError as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(f"✓ {alias}: accessible ({len(value)} chars...hidden)")
 
 
 @main.command()

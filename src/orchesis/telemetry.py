@@ -36,6 +36,7 @@ class DecisionEvent:
     policy_version: str
     state_snapshot: dict[str, Any]
     decision_reason: str | None = None
+    credentials_injected: list[str] | None = None
     signature: str | None = None
 
 

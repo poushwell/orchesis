@@ -15,6 +15,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 from orchesis.auth import AgentAuthenticator, CredentialStore
+from orchesis.credential_injector import CredentialInjector
+from orchesis.credential_vault import CredentialNotFoundError, build_vault_from_policy
 from orchesis.contrib.pii_detector import PiiDetector
 from orchesis.contrib.secret_scanner import SecretScanner
 from orchesis.config import PolicyWatcher, load_policy
@@ -140,6 +142,14 @@ class OrchesisProxy:
         self._response_redact_pii = bool(redaction_cfg.get("redact_pii", False))
         self._secret_scanner = SecretScanner()
         self._pii_detector = PiiDetector(severity_threshold=self._pii_threshold)
+        self._credential_injector: CredentialInjector | None = None
+        try:
+            credentials_cfg = self._policy.get("credentials")
+            if isinstance(credentials_cfg, dict):
+                vault = build_vault_from_policy(self._policy)
+                self._credential_injector = CredentialInjector(credentials_cfg, vault)
+        except Exception:
+            self._credential_injector = None
 
     @property
     def stats(self) -> ProxyStats:
@@ -260,6 +270,37 @@ class OrchesisProxy:
                         }
                     )
                     return
+
+            if self._credential_injector is not None and tool_call is not None:
+                try:
+                    injected_call, aliases = self._credential_injector.inject(
+                        {"tool_name": tool_call[0], "params": tool_call[1], "headers": headers}
+                    )
+                except CredentialNotFoundError:
+                    writer.write(
+                        self._build_deny_response(
+                            "credential_injection_failed",
+                            "credential_injection_failed",
+                            "high",
+                        )
+                    )
+                    await writer.drain()
+                    decision_label = "DENY"
+                    return
+                tool_call = (
+                    str(injected_call.get("tool_name", tool_call[0])),
+                    dict(injected_call.get("params", tool_call[1])),
+                )
+                headers = dict(injected_call.get("headers", headers))
+                body = self._apply_params_to_body(path, body, tool_call[1])
+                if aliases:
+                    self._emit_event(
+                        {
+                            "event": "proxy_credentials_injected",
+                            "tool": tool_call[0],
+                            "aliases": aliases,
+                        }
+                    )
 
             status, resp_headers, resp_body = await self._forward_request(method, path, headers, body)
             if self._config.buffer_responses and tool_call is not None and self._scan_responses:
@@ -383,6 +424,34 @@ class OrchesisProxy:
                     params = {}
             return tool_name, params
         return None
+
+    def _apply_params_to_body(self, path: str, body: bytes, params: dict[str, Any]) -> bytes:
+        if not body:
+            return body
+        try:
+            loaded = json.loads(body.decode("utf-8"))
+        except Exception:
+            return body
+        if not isinstance(loaded, dict):
+            return body
+        if isinstance(loaded.get("params"), dict):
+            loaded["params"] = dict(params)
+        elif isinstance(loaded.get("arguments"), dict):
+            loaded["arguments"] = dict(params)
+        elif isinstance(loaded.get("input"), dict):
+            loaded["input"] = dict(params)
+        elif loaded.get("method") == "tools/call" and isinstance(loaded.get("params"), dict):
+            nested = dict(loaded.get("params"))
+            nested["arguments"] = dict(params)
+            loaded["params"] = nested
+        elif loaded.get("jsonrpc") == "2.0" and isinstance(loaded.get("params"), dict):
+            loaded["params"] = dict(params)
+        else:
+            parts = [item for item in path.split("/") if item]
+            if len(parts) >= 2 and parts[0] == "tools":
+                for key, value in params.items():
+                    loaded[key] = value
+        return json.dumps(loaded, ensure_ascii=False).encode("utf-8")
 
     def _build_deny_response(self, reason: str, rule: str, severity: str = "medium") -> bytes:
         payload = {
@@ -762,6 +831,7 @@ def create_proxy_app(
     current_policy_hash = "inline"
     authenticator: AgentAuthenticator | None = None
     auth_mode = "optional"
+    credential_injector: CredentialInjector | None = None
     event_bus = EventBus()
     metrics = MetricsCollector()
     decisions_log_path = os.getenv("DECISIONS_LOG_PATH", ".orchesis/decisions.jsonl")
@@ -854,6 +924,18 @@ def create_proxy_app(
         )
         auth_mode = mode
 
+    def _sync_credentials(candidate_policy: dict[str, Any]) -> None:
+        nonlocal credential_injector
+        credentials_cfg = candidate_policy.get("credentials")
+        if not isinstance(credentials_cfg, dict):
+            credential_injector = None
+            return
+        try:
+            vault = build_vault_from_policy(candidate_policy)
+            credential_injector = CredentialInjector(credentials_cfg, vault)
+        except Exception:
+            credential_injector = None
+
     def _sync_alerts(candidate_policy: dict[str, Any]) -> None:
         nonlocal alert_subscriber_ids
         alert_notifiers.clear()
@@ -904,6 +986,7 @@ def create_proxy_app(
         _sync_webhooks(current_policy)
         _sync_alerts(current_policy)
         _sync_auth(current_policy)
+        _sync_credentials(current_policy)
 
         def _on_reload(new_policy: dict[str, Any]) -> None:
             _ = new_policy
@@ -915,6 +998,7 @@ def create_proxy_app(
             _sync_webhooks(current_policy)
             _sync_alerts(current_policy)
             _sync_auth(current_policy)
+            _sync_credentials(current_policy)
 
         watcher = PolicyWatcher(policy_path, _on_reload)
         watcher._last_hash = PolicyWatcher(policy_path, lambda _policy: None).current_hash()
@@ -922,6 +1006,7 @@ def create_proxy_app(
         _sync_webhooks(current_policy)
         _sync_alerts(current_policy)
         _sync_auth(current_policy)
+        _sync_credentials(current_policy)
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
@@ -966,6 +1051,10 @@ def create_proxy_app(
             context["parent_span_id"] = trace.parent_span_id
         extracted_tool = _extract_tool(request, body_json)
         extracted_params = _extract_params(request, body_json)
+        if credential_injector is not None:
+            aliases = credential_injector.matching_aliases(extracted_tool)
+            if aliases:
+                context["credentials_injected"] = aliases
         if authenticator is not None:
             auth_ok, verified_agent_id, auth_reason = authenticator.authenticate_request(
                 {"tool": extracted_tool, "params": extracted_params},
@@ -1011,13 +1100,53 @@ def create_proxy_app(
             response.headers["X-Orchesis-Decision"] = "DENY"
             return response
 
-        target_path = request.url.path
-        if request.url.query:
-            target_path = f"{target_path}?{request.url.query}"
-
         forwarded_headers = {
             key: value for key, value in request.headers.items() if key.lower() != "host"
         }
+        if credential_injector is not None:
+            try:
+                injected, aliases = credential_injector.inject(
+                    {"tool_name": extracted_tool, "params": extracted_params, "headers": forwarded_headers}
+                )
+            except CredentialNotFoundError:
+                response = JSONResponse(
+                    status_code=403,
+                    content={
+                        "allowed": False,
+                        "reasons": ["credential_injection_failed"],
+                        "rules_checked": ["credential_injection"],
+                    },
+                )
+                response.headers["X-Orchesis-Trace-Id"] = trace.trace_id
+                response.headers["X-Orchesis-Decision"] = "DENY"
+                return response
+            injected_params = injected.get("params") if isinstance(injected.get("params"), dict) else extracted_params
+            extracted_params = dict(injected_params)
+            forwarded_headers = (
+                dict(injected.get("headers"))
+                if isinstance(injected.get("headers"), dict)
+                else forwarded_headers
+            )
+            if aliases:
+                context["credentials_injected"] = aliases
+            if isinstance(body_json, dict):
+                if isinstance(body_json.get("params"), dict):
+                    body_json["params"] = dict(extracted_params)
+                elif isinstance(body_json.get("arguments"), dict):
+                    body_json["arguments"] = dict(extracted_params)
+                elif isinstance(body_json.get("input"), dict):
+                    body_json["input"] = dict(extracted_params)
+                elif body_json.get("method") == "tools/call" and isinstance(body_json.get("params"), dict):
+                    nested = dict(body_json.get("params"))
+                    nested["arguments"] = dict(extracted_params)
+                    body_json["params"] = nested
+                elif body_json.get("jsonrpc") == "2.0" and isinstance(body_json.get("params"), dict):
+                    body_json["params"] = dict(extracted_params)
+                raw_body = json.dumps(body_json, ensure_ascii=False).encode("utf-8")
+
+        target_path = request.url.path
+        if request.url.query:
+            target_path = f"{target_path}?{request.url.query}"
 
         async with httpx.AsyncClient(
             base_url=backend_url,
