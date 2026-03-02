@@ -67,14 +67,19 @@ Recommendation: Bind to 127.0.0.1 and enable authentication immediately.
 ```text
 $ orchesis compliance all
 
-Framework       Score   Pass  Fail  Partial
-──────────────────────────────────────────
-HIPAA           87.5%   7     0     1
-SOC2            71.4%   5     1     1
-EU AI Act       80.0%   4     0     1
-NIST AI RMF     75.0%   3     1     0
+Framework              Score   Pass  Fail  Partial
+─────────────────────────────────────────────────────
+HIPAA                  87.5%   7     0     1
+SOC2                   71.4%   5     1     1
+EU AI Act              80.0%   4     0     1
+NIST AI RMF            75.0%   3     1     0
+OWASP ASI Top 10       90.0%   9     0     1
+MITRE ATLAS            83.3%   5     0     1
+CoSAI                  80.0%   4     0     1
+CSA MAESTRO            85.7%   6     0     1
+NIST AI 100-2          87.5%   3     0     1
 
-Overall: 78.5%
+Overall: 82.3% across 9 frameworks
 Top recommendations:
   1. Enable pii_detector plugin
   2. Configure alert recipients
@@ -275,7 +280,7 @@ GitHub Actions example:
 | Agent-agnostic | ✅ | ❌ OpenClaw | ❌ MCP only | ✅ | ❌ NEAR AI |
 | Policy-as-code | ✅ YAML | ❌ | ❌ | ❌ | ❌ |
 | Tool allowlist | ✅ | ❌ | ❌ | ❌ | ✅ |
-| Compliance reports | ✅ 4 frameworks | ❌ | ❌ | ❌ | ❌ |
+| Compliance reports | ✅ 9 frameworks | ❌ | ❌ | ❌ | ❌ |
 | Secret scanning | ✅ | ❌ | ❌ | ✅ | ✅ |
 | PII detection | ✅ | ❌ | ❌ | ✅ | ❌ |
 | IoC database | ✅ | ✅ | ❌ | ❌ | ❌ |
@@ -284,8 +289,8 @@ GitHub Actions example:
 
 ## Project Stats
 
-- 546 tests passing (unit, integration, adversarial, fuzzing)
-- 4 compliance frameworks (HIPAA, SOC2, EU AI Act, NIST AI RMF)
+- 669 tests passing (unit, integration, adversarial, fuzzing)
+- 9 compliance frameworks (HIPAA, SOC2, EU AI Act, NIST AI RMF, OWASP ASI Top 10, MITRE ATLAS, CoSAI, CSA MAESTRO, NIST AI 100-2)
 - 4 policy marketplace packs (hipaa, soc2, openclaw-secure, development)
 - 20+ secret patterns detected
 - 15+ PII patterns detected
