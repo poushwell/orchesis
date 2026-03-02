@@ -130,3 +130,194 @@ def test_scan_command_with_yara_option(tmp_path: Path) -> None:
     result = runner.invoke(main, ["scan", str(target), "--yara", str(rules_dir)])
     assert result.exit_code == 0
     assert "yara:" in result.output.lower()
+
+
+def test_fullword_modifier_matches_whole_word_only() -> None:
+    parser = YaraParser()
+    rules = parser.parse_string(
+        """
+rule WholeWord {
+  strings:
+    $a = "cat" fullword
+  condition:
+    $a
+}
+"""
+    )
+    matches = scan_with_yara("a cat sits here", rules)
+    assert len(matches) == 1
+
+
+def test_fullword_modifier_rejects_partial_match() -> None:
+    parser = YaraParser()
+    rules = parser.parse_string(
+        """
+rule WholeWord {
+  strings:
+    $a = "cat" fullword
+  condition:
+    $a
+}
+"""
+    )
+    matches = scan_with_yara("concatenate", rules)
+    assert matches == []
+
+
+def test_wide_modifier_matches_utf16le_literal_form() -> None:
+    parser = YaraParser()
+    rules = parser.parse_string(
+        """
+rule WideRule {
+  strings:
+    $a = "test" wide
+  condition:
+    $a
+}
+"""
+    )
+    matches = scan_with_yara("t\x00e\x00s\x00t\x00", rules)
+    assert len(matches) == 1
+
+
+def test_filesize_less_than_1kb_true() -> None:
+    parser = YaraParser()
+    rules = parser.parse_string(
+        """
+rule SmallFile {
+  strings:
+    $a = "hello"
+  condition:
+    filesize < 1KB and $a
+}
+"""
+    )
+    matches = scan_with_yara("hello", rules)
+    assert len(matches) == 1
+
+
+def test_filesize_greater_than_1mb_true() -> None:
+    parser = YaraParser()
+    rules = parser.parse_string(
+        """
+rule BigFile {
+  strings:
+    $a = "x"
+  condition:
+    filesize > 1MB and $a
+}
+"""
+    )
+    content = "x" * (1024 * 1024 + 32)
+    matches = scan_with_yara(content, rules)
+    assert len(matches) == 1
+
+
+def test_filesize_suffix_parsing_works_for_kb_mb() -> None:
+    ev = ConditionEvaluator()
+    assert ev.evaluate("filesize == 2KB", set(), set(), content_size=2048) is True
+    assert ev.evaluate("filesize == 1MB", set(), set(), content_size=1024 * 1024) is True
+
+
+def test_string_count_gt_true() -> None:
+    parser = YaraParser()
+    rules = parser.parse_string(
+        """
+rule CountRule {
+  strings:
+    $a = "err"
+  condition:
+    #a > 3
+}
+"""
+    )
+    matches = scan_with_yara("err err err err err", rules)
+    assert len(matches) == 1
+
+
+def test_string_count_gt_false() -> None:
+    parser = YaraParser()
+    rules = parser.parse_string(
+        """
+rule CountRule {
+  strings:
+    $a = "err"
+  condition:
+    #a > 3
+}
+"""
+    )
+    matches = scan_with_yara("err err", rules)
+    assert matches == []
+
+
+def test_string_offset_condition_true() -> None:
+    parser = YaraParser()
+    rules = parser.parse_string(
+        """
+rule OffsetRule {
+  strings:
+    $a = "needle"
+  condition:
+    @a < 100
+}
+"""
+    )
+    content = ("x" * 50) + "needle"
+    matches = scan_with_yara(content, rules)
+    assert len(matches) == 1
+
+
+def test_private_rule_not_reported_in_results() -> None:
+    parser = YaraParser()
+    rules = parser.parse_string(
+        """
+private rule InternalRule {
+  strings:
+    $a = "secret"
+  condition:
+    $a
+}
+"""
+    )
+    matches = scan_with_yara("secret", rules)
+    assert matches == []
+
+
+def test_private_rule_used_by_public_rule_dependency() -> None:
+    parser = YaraParser()
+    rules = parser.parse_string(
+        """
+private rule InternalRule {
+  strings:
+    $a = "secret"
+  condition:
+    $a
+}
+rule PublicRule {
+  strings:
+    $b = "secret"
+  condition:
+    InternalRule and $b
+}
+"""
+    )
+    matches = scan_with_yara("secret", rules)
+    assert len(matches) == 1
+    assert matches[0].rule_name == "PublicRule"
+
+
+def test_import_line_is_accepted_by_parser() -> None:
+    parser = YaraParser()
+    rules = parser.parse_string(
+        """
+import "pe"
+rule Simple {
+  strings:
+    $a = "abc"
+  condition:
+    $a
+}
+"""
+    )
+    assert len(rules) == 1

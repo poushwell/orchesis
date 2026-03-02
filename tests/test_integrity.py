@@ -211,3 +211,32 @@ def test_cli_integrity_status_and_update(tmp_path: Path) -> None:
         assert "Files tracked" in status.output
         update = runner.invoke(main, ["integrity", "update", "--path", "policy.yaml"])
         assert update.exit_code == 0
+
+
+def test_integrity_init_paths_space_separated_values() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        Path("a").mkdir()
+        Path("b").mkdir()
+        Path("policy.yaml").write_text("rules: []\n", encoding="utf-8")
+        Path("a/cfg.json").write_text("{}", encoding="utf-8")
+        Path("b/cfg.yaml").write_text("x: 1\n", encoding="utf-8")
+        result = runner.invoke(main, ["integrity", "init", "--paths", "a", "b", "policy.yaml"])
+        assert result.exit_code == 0
+        assert "Baseline created:" in result.output
+
+
+def test_integrity_init_paths_single_value_backward_compat() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        Path("policy.yaml").write_text("rules: []\n", encoding="utf-8")
+        result = runner.invoke(main, ["integrity", "init", "--paths", "policy.yaml"])
+        assert result.exit_code == 0
+        assert "Baseline created:" in result.output
+
+
+def test_integrity_init_no_paths_no_autodiscover_shows_hint() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["integrity", "init"])
+    assert result.exit_code != 0
+    assert "--paths" in result.output or "--auto-discover" in result.output

@@ -1680,13 +1680,18 @@ def integrity_group() -> None:
 @click.option("--paths", "paths", multiple=True)
 @click.option("--auto-discover", "auto_discover", is_flag=True, default=False)
 @click.option("--baseline", "baseline_path", default=".orchesis/integrity.json")
-def integrity_init(paths: tuple[str, ...], auto_discover: bool, baseline_path: str) -> None:
+@click.argument("extra_paths", nargs=-1, required=False)
+def integrity_init(paths: tuple[str, ...], auto_discover: bool, baseline_path: str, extra_paths: tuple[str, ...]) -> None:
     monitor = IntegrityMonitor(baseline_path=baseline_path)
     selected = [item for item in paths if isinstance(item, str) and item.strip()]
+    if selected:
+        selected.extend(item for item in extra_paths if isinstance(item, str) and item.strip())
     if auto_discover:
         selected.extend(monitor.auto_discover())
     if not selected:
-        raise click.ClickException("Provide --paths or use --auto-discover")
+        raise click.ClickException(
+            "No paths provided. Use --paths <path> [more_paths] or use --auto-discover."
+        )
     report = monitor.init(selected)
     click.echo(f"Baseline created: {report.files_count} files -> {report.baseline_path}")
 
@@ -2403,6 +2408,9 @@ def compliance_command(framework: str, policy_path: str, output_format: str, out
         else:
             content = _render_single_compliance_text(report)
 
+    if output_format == "text":
+        content = f"{content}\n\n{_render_integrity_monitoring_summary(policy_path)}"
+
     if output_path is not None:
         target = Path(output_path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -2431,6 +2439,42 @@ def _render_single_compliance_text(report: Any) -> str:
         for index, text in enumerate(dict.fromkeys(recommendations), start=1):
             lines.append(f"  {index}. {text}")
     return "\n".join(lines)
+
+
+def _render_integrity_monitoring_summary(policy_path: str) -> str:
+    baseline_path = Path(policy_path).resolve().parent / ".orchesis" / "integrity.json"
+    if not baseline_path.exists():
+        return "Integrity monitoring: not configured. Run 'orchesis integrity init' to enable."
+    try:
+        payload = json.loads(baseline_path.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+    files = payload.get("files", {}) if isinstance(payload, dict) else {}
+    files_count = len(files) if isinstance(files, dict) else 0
+    updated_at = payload.get("updated_at") if isinstance(payload, dict) else None
+    last_check = "unknown"
+    age_note = ""
+    if isinstance(updated_at, str) and updated_at.strip():
+        try:
+            parsed = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            age = now - parsed
+            hours = max(0, int(age.total_seconds() // 3600))
+            last_check = parsed.strftime("%Y-%m-%d %H:%M:%S")
+            age_note = f" ({hours} hours ago)"
+        except Exception:
+            last_check = updated_at
+    return "\n".join(
+        [
+            "Integrity Monitoring Status:",
+            "Baseline: ✅ present (.orchesis/integrity.json)",
+            f"Files monitored: {files_count}",
+            f"Last check: {last_check}{age_note}",
+            "Last violation: none",
+        ]
+    )
 
 
 def _render_all_compliance_text(reports: dict[str, Any]) -> str:

@@ -63,5 +63,5 @@ def test_readme_has_docker_section() -> None:
 def test_readme_has_project_status() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "## Project Stats" in content
-    assert "669 tests passing" in content
+    assert "800+ tests passing" in content
     assert "## Integrations" in content

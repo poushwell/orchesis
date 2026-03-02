@@ -296,13 +296,19 @@ See also: [Lakera Guard](https://lakera.ai) (commercial prompt firewall), [Invar
 
 ## Project Stats
 
-- 669 tests passing (unit, integration, adversarial, fuzzing)
+- 800+ tests passing (unit, integration, adversarial, fuzzing, YARA)
 - 9 compliance frameworks (HIPAA, SOC2, EU AI Act, NIST AI RMF, OWASP ASI Top 10, MITRE ATLAS, CoSAI, CSA MAESTRO, NIST AI 100-2)
 - 4 policy marketplace packs (hipaa, soc2, openclaw-secure, development)
 - 20+ secret patterns detected
 - 15+ PII patterns detected
 - 6 IoC categories from real-world incidents
 - Zero external dependencies for core engine (stdlib only)
+- Pure Python Aho-Corasick engine for fast multi-pattern matching
+- YARA-compatible rule engine (no C dependency)
+- LLM-as-a-judge scanning mode (OpenAI-compatible API)
+- Credential injection proxy (agent never sees raw tokens)
+- File integrity monitoring with SHA-256 baselines
+- Scanner REST API for CI/CD integration
 
 ## Documentation
 

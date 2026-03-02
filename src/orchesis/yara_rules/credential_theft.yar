@@ -5,11 +5,11 @@ rule CredentialHarvesting {
         category = "credential_theft"
         author = "Orchesis"
     strings:
-        $aws_creds = ".aws/credentials" nocase
-        $ssh_key = ".ssh/id_rsa" nocase
-        $env_file = ".env" nocase
+        $aws_creds = ".aws/credentials" nocase ascii
+        $ssh_key = ".ssh/id_rsa" nocase ascii
+        $env_file = ".env" nocase ascii
         $post = /requests\.post\s*\(/
-        $webhook = "webhook.site" nocase
+        $webhook = "webhook.site" nocase ascii
     condition:
-        any of ($aws_creds, $ssh_key, $env_file) and any of ($post, $webhook)
+        filesize < 10MB and any of ($aws_creds, $ssh_key, $env_file) and any of ($post, $webhook)
 }

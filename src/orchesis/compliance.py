@@ -85,6 +85,12 @@ FRAMEWORK_CHECKS: dict[str, list[dict[str, str]]] = {
             "check": "incident_detection_enabled",
             "description": "Security incidents must be detected automatically",
         },
+        {
+            "id": "HIPAA-164.312-c-2",
+            "requirement": "Integrity Monitoring: Baseline tamper detection",
+            "check": "integrity_monitoring",
+            "description": "Critical configuration files should be monitored for tampering",
+        },
     ],
     "soc2": [
         {
@@ -128,6 +134,12 @@ FRAMEWORK_CHECKS: dict[str, list[dict[str, str]]] = {
             "requirement": "Change Management: Authorize and track changes",
             "check": "policy_versioning_available",
             "description": "Policy changes must be versioned",
+        },
+        {
+            "id": "SOC2-CC7.5",
+            "requirement": "Integrity Monitoring: Detect unauthorized changes",
+            "check": "integrity_monitoring",
+            "description": "Configuration integrity baseline should be monitored",
         },
     ],
     "eu_ai_act": [
@@ -186,6 +198,12 @@ FRAMEWORK_CHECKS: dict[str, list[dict[str, str]]] = {
             "requirement": "AI risk management roles assigned",
             "check": "alerts_configured",
             "description": "Alert recipients must be assigned",
+        },
+        {
+            "id": "NIST-MANAGE-2.4",
+            "requirement": "Integrity monitoring of safety-critical artifacts",
+            "check": "integrity_monitoring",
+            "description": "Security baselines should detect policy/config tampering",
         },
     ],
     "owasp_asi": [
@@ -533,6 +551,39 @@ class ComplianceEngine:
             "partial",
             f"No explicit policy version field; integrity={integrity}",
             "Add policy_version metadata",
+        )
+
+    def _check_integrity_monitoring(self, policy: dict[str, Any]) -> ComplianceCheck:
+        _ = policy
+        baseline_path = self._integrity_baseline_path()
+        if not baseline_path.exists():
+            return self._result(
+                "integrity_monitoring",
+                "fail",
+                "Integrity baseline not found",
+                "Run 'orchesis integrity init' and schedule checks",
+            )
+        updated_at: datetime | None = None
+        try:
+            payload = json.loads(baseline_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                raw_updated = payload.get("updated_at")
+                if isinstance(raw_updated, str) and raw_updated.strip():
+                    updated_at = datetime.fromisoformat(raw_updated.replace("Z", "+00:00"))
+                    if updated_at.tzinfo is None:
+                        updated_at = updated_at.replace(tzinfo=timezone.utc)
+        except Exception:
+            updated_at = None
+        if updated_at is None:
+            updated_at = datetime.fromtimestamp(baseline_path.stat().st_mtime, tz=timezone.utc)
+        age = datetime.now(timezone.utc) - updated_at
+        if age.days <= 7:
+            return self._result("integrity_monitoring", "pass", f"Baseline fresh ({age.days}d old)", "")
+        return self._result(
+            "integrity_monitoring",
+            "partial",
+            f"Baseline stale ({age.days}d old)",
+            "Update integrity baseline at least weekly",
         )
 
     def _check_decision_explanations_available(self, policy: dict[str, Any]) -> ComplianceCheck:
@@ -936,9 +987,13 @@ class ComplianceEngine:
     def _integrity_monitoring_status(self, policy: dict[str, Any]) -> str:
         if bool(policy.get("integrity_checks")):
             return "enabled"
-        if Path(".orchesis/integrity.json").exists():
+        if self._integrity_baseline_path().exists():
             return "baseline_present"
         return "disabled"
+
+    def _integrity_baseline_path(self) -> Path:
+        policy_parent = Path(self._policy_path).resolve().parent
+        return policy_parent / ".orchesis" / "integrity.json"
 
     def _rules(self, policy: dict[str, Any]) -> list[dict[str, Any]]:
         rules = policy.get("rules")

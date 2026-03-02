@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -170,3 +171,81 @@ def test_compliance_cli_all(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert "Framework" in result.output and "Score" in result.output
     assert "Overall:" in result.output
+
+
+def _write_integrity_baseline(base_dir: Path, *, updated_at: datetime, files_count: int = 2) -> None:
+    integrity_dir = base_dir / ".orchesis"
+    integrity_dir.mkdir(parents=True, exist_ok=True)
+    files = {
+        str(base_dir / f"file_{idx}.yaml"): {
+            "sha256": "a" * 64,
+            "size": 10,
+            "permissions": "0600",
+            "last_modified": updated_at.isoformat().replace("+00:00", "Z"),
+            "file_type": "config",
+        }
+        for idx in range(files_count)
+    }
+    payload = {
+        "version": "1.0",
+        "created_at": updated_at.isoformat().replace("+00:00", "Z"),
+        "updated_at": updated_at.isoformat().replace("+00:00", "Z"),
+        "files": files,
+    }
+    (integrity_dir / "integrity.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_soc2_integrity_check_pass_fresh_baseline(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    _write_policy(policy_path, _strong_policy())
+    _write_integrity_baseline(tmp_path, updated_at=datetime.now(timezone.utc))
+    report = ComplianceEngine(policy_path=str(policy_path)).check("soc2")
+    check = next(item for item in report.checks if item.id == "SOC2-CC7.5")
+    assert check.status == "pass"
+
+
+def test_soc2_integrity_check_partial_stale_baseline(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    _write_policy(policy_path, _strong_policy())
+    old_ts = datetime.now(timezone.utc) - timedelta(days=9)
+    _write_integrity_baseline(tmp_path, updated_at=old_ts)
+    report = ComplianceEngine(policy_path=str(policy_path)).check("soc2")
+    check = next(item for item in report.checks if item.id == "SOC2-CC7.5")
+    assert check.status == "partial"
+
+
+def test_soc2_integrity_check_fail_without_baseline(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    _write_policy(policy_path, _strong_policy())
+    report = ComplianceEngine(policy_path=str(policy_path)).check("soc2")
+    check = next(item for item in report.checks if item.id == "SOC2-CC7.5")
+    assert check.status == "fail"
+
+
+def test_nist_integrity_check_logic(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    _write_policy(policy_path, _strong_policy())
+    _write_integrity_baseline(tmp_path, updated_at=datetime.now(timezone.utc))
+    report = ComplianceEngine(policy_path=str(policy_path)).check("nist_ai_rmf")
+    check = next(item for item in report.checks if item.id == "NIST-MANAGE-2.4")
+    assert check.status == "pass"
+
+
+def test_compliance_output_includes_integrity_summary_when_baseline_exists(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    _write_policy(policy_path, _strong_policy())
+    _write_integrity_baseline(tmp_path, updated_at=datetime.now(timezone.utc), files_count=3)
+    runner = CliRunner()
+    result = runner.invoke(main, ["compliance", "all", "--policy", str(policy_path)])
+    assert result.exit_code == 0
+    assert "Integrity Monitoring Status:" in result.output
+    assert "Files monitored: 3" in result.output
+
+
+def test_compliance_output_not_configured_without_baseline(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    _write_policy(policy_path, _strong_policy())
+    runner = CliRunner()
+    result = runner.invoke(main, ["compliance", "hipaa", "--policy", str(policy_path)])
+    assert result.exit_code == 0
+    assert "Integrity monitoring: not configured" in result.output

@@ -5,10 +5,10 @@ rule SupplyChainIndicators {
         category = "supply_chain"
         author = "Orchesis"
     strings:
-        $latest = "@latest" nocase
-        $wildcard = "*" 
+        $latest = "@latest" nocase ascii
+        $wildcard = "*" ascii
         $curl_pipe = /curl\s+[^|]+\|\s*(bash|sh)/ nocase
-        $npm_preinstall = "preinstall" nocase
+        $npm_preinstall = "preinstall" nocase fullword ascii
     condition:
-        any of ($curl_pipe, $npm_preinstall) or all of ($latest, $wildcard)
+        filesize < 5MB and (any of ($curl_pipe, $npm_preinstall) or all of ($latest, $wildcard))
 }
