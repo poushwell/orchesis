@@ -59,7 +59,7 @@ orchesis = "orchesis.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-orchesis = ["marketplace/packs/*.yaml"]
+orchesis = ["marketplace/packs/*.yaml", "yara_rules/*.yar"]
 
 [tool.ruff]
 line-length = 100

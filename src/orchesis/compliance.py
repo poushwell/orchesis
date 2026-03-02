@@ -513,11 +513,27 @@ class ComplianceEngine:
         return self._result("anomaly_detection_enabled", "partial", "anomaly_detection not configured", "Enable anomaly_detection")
 
     def _check_policy_versioning_available(self, policy: dict[str, Any]) -> ComplianceCheck:
+        integrity = self._integrity_monitoring_status(policy)
         if isinstance(policy.get("policy_version"), str):
-            return self._result("policy_versioning_available", "pass", "policy_version field present", "")
+            return self._result(
+                "policy_versioning_available",
+                "pass",
+                f"policy_version field present; integrity={integrity}",
+                "",
+            )
         if isinstance(policy.get("version"), str):
-            return self._result("policy_versioning_available", "pass", "version field present", "")
-        return self._result("policy_versioning_available", "partial", "No explicit policy version field", "Add policy_version metadata")
+            return self._result(
+                "policy_versioning_available",
+                "pass",
+                f"version field present; integrity={integrity}",
+                "",
+            )
+        return self._result(
+            "policy_versioning_available",
+            "partial",
+            f"No explicit policy version field; integrity={integrity}",
+            "Add policy_version metadata",
+        )
 
     def _check_decision_explanations_available(self, policy: dict[str, Any]) -> ComplianceCheck:
         if policy.get("decision_explanations") is True:
@@ -533,9 +549,15 @@ class ComplianceEngine:
         return self._result("adversarial_testing_exists", "partial", "No THREAT_MODEL.md found", "Add adversarial testing evidence")
 
     def _check_metrics_available(self, policy: dict[str, Any]) -> ComplianceCheck:
+        integrity = self._integrity_monitoring_status(policy)
         if policy.get("metrics") is True or Path(".orchesis/metrics.json").exists():
-            return self._result("metrics_available", "pass", "Metrics configuration available", "")
-        return self._result("metrics_available", "partial", "Metrics not configured", "Enable metrics collection")
+            return self._result("metrics_available", "pass", f"Metrics configuration available; integrity={integrity}", "")
+        return self._result(
+            "metrics_available",
+            "partial",
+            f"Metrics not configured; integrity={integrity}",
+            "Enable metrics collection",
+        )
 
     # OWASP ASI
     def _check_asi_01_authorization_control(self, policy: dict[str, Any]) -> ComplianceCheck:
@@ -910,6 +932,13 @@ class ComplianceEngine:
     def _policy_hash(self, policy: dict[str, Any]) -> str:
         payload = yaml.dump(policy, sort_keys=True)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _integrity_monitoring_status(self, policy: dict[str, Any]) -> str:
+        if bool(policy.get("integrity_checks")):
+            return "enabled"
+        if Path(".orchesis/integrity.json").exists():
+            return "baseline_present"
+        return "disabled"
 
     def _rules(self, policy: dict[str, Any]) -> list[dict[str, Any]]:
         rules = policy.get("rules")

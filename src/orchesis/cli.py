@@ -48,7 +48,10 @@ from orchesis.llm_judge import LLMJudge
 from orchesis.rules_generator import generate_security_rules_from_policy
 from orchesis.scanner_server import run_scanner_http_server
 from orchesis.scenarios import AdversarialScenarios
+from orchesis.integrity import IntegrityMonitor, build_integrity_alert_callback
+from orchesis.yara_engine import load_yara_rules, scan_with_yara, YaraParser
 from orchesis.scanner import (
+    ScanFinding,
     ScanReport,
     discover_mcp_configs,
     format_report_markdown,
@@ -1477,6 +1480,7 @@ def _policy_guard_checks(policy: dict[str, Any]) -> dict[str, bool]:
 @click.option("--severity-threshold", "severity_threshold", default="medium")
 @click.option("--mcp", "scan_mcp_configs", is_flag=True, default=False)
 @click.option("--network", "scan_network", is_flag=True, default=False)
+@click.option("--yara", "yara_path", type=click.Path(), default=None)
 @click.option("--llm-judge", "use_llm_judge", is_flag=True, default=False)
 @click.option("--llm-model", "llm_model", default=None)
 def scan_command(
@@ -1485,6 +1489,7 @@ def scan_command(
     severity_threshold: str,
     scan_mcp_configs: bool,
     scan_network: bool,
+    yara_path: str | None,
     use_llm_judge: bool,
     llm_model: str | None,
 ) -> None:
@@ -1507,6 +1512,37 @@ def scan_command(
         reports = scan_path(target)
     elif not scan_network:
         raise click.ClickException("Provide <path> or use --mcp")
+
+    if yara_path is not None:
+        builtin_rules_dir = Path(__file__).resolve().parent / "yara_rules"
+        rules = load_yara_rules(yara_path, builtin_rules_dir=builtin_rules_dir)
+        for report in reports:
+            try:
+                content = Path(report.target).read_text(encoding="utf-8")
+            except Exception:
+                content = ""
+            if not content:
+                continue
+            yara_matches = scan_with_yara(content, rules)
+            for match in yara_matches:
+                severity = str(match.meta.get("severity", "medium")).lower()
+                category = str(match.meta.get("category", "yara"))
+                description = str(match.meta.get("description", f"YARA rule matched: {match.rule_name}"))
+                location = (
+                    f"offset {match.matched_strings[0].offset}"
+                    if match.matched_strings
+                    else "content"
+                )
+                evidence = match.matched_strings[0].matched_text if match.matched_strings else match.rule_name
+                report.findings.append(
+                    ScanFinding(
+                        severity=severity,
+                        category=f"yara:{category}",
+                        description=f"{description} (rule: {match.rule_name})",
+                        location=location,
+                        evidence=evidence,
+                    )
+                )
 
     llm_findings_by_target: dict[str, list[dict[str, Any]]] = {}
     if use_llm_judge:
@@ -1633,6 +1669,143 @@ def benchmark_scanner(iterations: int, input_size: int) -> None:
         f"Aho-Corasick: {fast_ms:.2f}ms avg | "
         f"Speedup: {speedup:.2f}x"
     )
+
+
+@main.group("integrity")
+def integrity_group() -> None:
+    """Manage file integrity baselines and tamper checks."""
+
+
+@integrity_group.command("init")
+@click.option("--paths", "paths", multiple=True)
+@click.option("--auto-discover", "auto_discover", is_flag=True, default=False)
+@click.option("--baseline", "baseline_path", default=".orchesis/integrity.json")
+def integrity_init(paths: tuple[str, ...], auto_discover: bool, baseline_path: str) -> None:
+    monitor = IntegrityMonitor(baseline_path=baseline_path)
+    selected = [item for item in paths if isinstance(item, str) and item.strip()]
+    if auto_discover:
+        selected.extend(monitor.auto_discover())
+    if not selected:
+        raise click.ClickException("Provide --paths or use --auto-discover")
+    report = monitor.init(selected)
+    click.echo(f"Baseline created: {report.files_count} files -> {report.baseline_path}")
+
+
+@integrity_group.command("check")
+@click.option("--strict", "strict_mode", is_flag=True, default=False)
+@click.option("--baseline", "baseline_path", default=".orchesis/integrity.json")
+def integrity_check(strict_mode: bool, baseline_path: str) -> None:
+    monitor = IntegrityMonitor(baseline_path=baseline_path)
+    report = monitor.check()
+    if report.has_changes:
+        click.echo(
+            "ALERT | "
+            f"{len(report.modified)} modified, {len(report.added)} added, "
+            f"{len(report.removed)} removed, {len(report.permission_changed)} permission_changed"
+        )
+    else:
+        click.echo(f"OK | {report.unchanged} files unchanged")
+    if strict_mode:
+        raise SystemExit(1 if report.has_changes else 0)
+
+
+@integrity_group.command("status")
+@click.option("--baseline", "baseline_path", default=".orchesis/integrity.json")
+def integrity_status(baseline_path: str) -> None:
+    monitor = IntegrityMonitor(baseline_path=baseline_path)
+    payload = monitor._load_baseline()  # noqa: SLF001
+    files = payload.get("files", {})
+    monitored = payload.get("monitored_paths", [])
+    click.echo(f"Baseline: {baseline_path}")
+    click.echo(f"Version: {payload.get('version', '1.0')}")
+    click.echo(f"Created: {payload.get('created_at', 'n/a')}")
+    click.echo(f"Updated: {payload.get('updated_at', 'n/a')}")
+    click.echo(f"Monitored paths: {len(monitored) if isinstance(monitored, list) else 0}")
+    click.echo(f"Files tracked: {len(files) if isinstance(files, dict) else 0}")
+
+
+@integrity_group.command("update")
+@click.option("--path", "paths", multiple=True)
+@click.option("--baseline", "baseline_path", default=".orchesis/integrity.json")
+def integrity_update(paths: tuple[str, ...], baseline_path: str) -> None:
+    monitor = IntegrityMonitor(baseline_path=baseline_path)
+    selected = [item for item in paths if isinstance(item, str) and item.strip()]
+    report = monitor.update(selected if selected else None)
+    click.echo(f"Baseline updated: {report.files_count} files")
+
+
+@integrity_group.command("watch")
+@click.option("--interval", type=int, default=300)
+@click.option("--alert", "alert_enabled", is_flag=True, default=False)
+@click.option("--policy", "policy_path", default="policy.yaml")
+@click.option("--baseline", "baseline_path", default=".orchesis/integrity.json")
+def integrity_watch(interval: int, alert_enabled: bool, policy_path: str, baseline_path: str) -> None:
+    monitor = IntegrityMonitor(baseline_path=baseline_path)
+    alert_callback = None
+    if alert_enabled:
+        try:
+            policy = load_policy(policy_path)
+            alert_callback = build_integrity_alert_callback(policy)
+        except Exception as error:  # noqa: BLE001
+            raise click.ClickException(f"Failed to load policy for alerts: {error}") from error
+    try:
+        while True:
+            report = monitor.check()
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if report.has_changes:
+                click.echo(
+                    f"{ts} | ALERT | {len(report.modified)} modified, "
+                    f"{len(report.added)} added, {len(report.removed)} removed"
+                )
+                if alert_callback is not None:
+                    alert_callback(report)
+            else:
+                click.echo(f"{ts} | OK | {report.unchanged} files unchanged")
+            time.sleep(max(1, int(interval)))
+    except KeyboardInterrupt:
+        click.echo("Integrity watch stopped.")
+
+
+@main.group("yara")
+def yara_group() -> None:
+    """Manage YARA subset rules."""
+
+
+@yara_group.command("list")
+@click.option("--rules-dir", "rules_dir", default=None)
+def yara_list(rules_dir: str | None) -> None:
+    builtin_rules_dir = Path(__file__).resolve().parent / "yara_rules"
+    rules = load_yara_rules(rules_dir, builtin_rules_dir=builtin_rules_dir)
+    if not rules:
+        click.echo("(no rules loaded)")
+        return
+    for rule in rules:
+        sev = rule.meta.get("severity", "MEDIUM")
+        cat = rule.meta.get("category", "yara")
+        click.echo(f"{rule.name} [{sev}] ({cat})")
+
+
+@yara_group.command("validate")
+@click.argument("rule_path", type=click.Path(exists=True))
+def yara_validate(rule_path: str) -> None:
+    parser = YaraParser()
+    rules = parser.parse_file(rule_path)
+    if not rules:
+        raise click.ClickException("No rules found")
+    click.echo(f"OK: {len(rules)} rule(s) parsed")
+
+
+@yara_group.command("test")
+@click.argument("rule_path", type=click.Path(exists=True))
+@click.argument("target_path", type=click.Path(exists=True))
+def yara_test(rule_path: str, target_path: str) -> None:
+    parser = YaraParser()
+    rules = parser.parse_file(rule_path)
+    content = Path(target_path).read_text(encoding="utf-8")
+    matches = scan_with_yara(content, rules)
+    click.echo(f"Matches: {len(matches)}")
+    for match in matches:
+        click.echo(f"- {match.rule_name}")
 
 
 @main.command("scan-remote")
