@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\llm_judge.py
+# hypothesis_version: 6.151.9
+
+[500, '/', 'Authorization', 'Content-Type', 'POST', 'application/json', 'category', 'choices', 'content', 'description', 'findings', 'gpt-4o', 'json_object', 'llm-judge', 'message', 'messages', 'model', 'recommendation', 'response_format', 'role', 'severity', 'source', 'system', 'temperature', 'type', 'user', 'utf-8']

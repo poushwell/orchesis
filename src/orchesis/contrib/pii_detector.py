@@ -6,6 +6,7 @@ import re
 from copy import deepcopy
 from typing import Any
 
+from orchesis.fast_scanner import FastPIIDetector
 from orchesis.plugins import PluginInfo
 
 PII_PATTERNS: dict[str, tuple[re.Pattern[str], str, str]] = {
@@ -95,14 +96,17 @@ class PiiDetector:
         custom_patterns: dict[str, tuple[re.Pattern[str], str, str]] | None = None,
         ignore_patterns: list[str] | None = None,
         severity_threshold: str = "medium",
+        use_fast_matching: bool = True,
     ):
         self._patterns = dict(patterns or PII_PATTERNS)
         if custom_patterns:
             self._patterns.update(custom_patterns)
         self._ignored = set(ignore_patterns or [])
         self._threshold = _SEVERITY_RANK.get(severity_threshold, _SEVERITY_RANK["medium"])
+        self._use_fast_matching = bool(use_fast_matching)
+        self._fast_detector = FastPIIDetector(self._patterns)
 
-    def scan_text(self, text: str) -> list[dict[str, Any]]:
+    def _scan_text_sequential(self, text: str) -> list[dict[str, Any]]:
         findings: list[dict[str, Any]] = []
         for pattern_name, (compiled, severity, description) in self._patterns.items():
             if pattern_name in self._ignored:
@@ -121,6 +125,17 @@ class PiiDetector:
                     }
                 )
         return findings
+
+    def scan_text(self, text: str) -> list[dict[str, Any]]:
+        if self._use_fast_matching:
+            return self._fast_detector.scan(
+                text,
+                threshold_rank=self._threshold,
+                ignored_patterns=self._ignored,
+                mask_fn=self._mask,
+                severity_rank=_SEVERITY_RANK,
+            )
+        return self._scan_text_sequential(text)
 
     def scan_dict(self, data: dict[str, Any], path: str = "") -> list[dict[str, Any]]:
         findings: list[dict[str, Any]] = []

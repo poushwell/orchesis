@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from orchesis.fast_scanner import FastSecretScanner
+
 # Pattern registry: name -> (regex, severity, description)
 SECRET_PATTERNS: dict[str, tuple[re.Pattern[str], str, str]] = {
     # API Keys
@@ -144,6 +146,7 @@ class SecretScanner:
         patterns: dict[str, tuple[re.Pattern[str], str, str]] | None = None,
         custom_patterns: dict[str, tuple[re.Pattern[str], str, str]] | None = None,
         ignore_patterns: list[str] | None = None,
+        use_fast_matching: bool = True,
     ):
         self._patterns = dict(patterns or SECRET_PATTERNS)
         if custom_patterns:
@@ -151,11 +154,11 @@ class SecretScanner:
         if ignore_patterns:
             for name in ignore_patterns:
                 self._patterns.pop(name, None)
+        self._use_fast_matching = bool(use_fast_matching)
+        self._fast_scanner = FastSecretScanner(self._patterns)
 
-    def scan_text(self, text: str) -> list[dict[str, Any]]:
+    def _scan_text_sequential(self, text: str) -> list[dict[str, Any]]:
         findings: list[dict[str, Any]] = []
-        if not isinstance(text, str) or not text:
-            return findings
         for pattern_name, (pattern, severity, description) in self._patterns.items():
             for match in pattern.finditer(text):
                 raw_value = match.group(0)
@@ -170,6 +173,13 @@ class SecretScanner:
                     }
                 )
         return sorted(findings, key=lambda item: int(item.get("position", 0)))
+
+    def scan_text(self, text: str) -> list[dict[str, Any]]:
+        if not isinstance(text, str) or not text:
+            return []
+        if self._use_fast_matching:
+            return self._fast_scanner.scan(text)
+        return self._scan_text_sequential(text)
 
     def scan_dict(self, data: dict[str, Any], path: str = "") -> list[dict[str, Any]]:
         findings: list[dict[str, Any]] = []

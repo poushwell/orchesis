@@ -43,6 +43,8 @@ from orchesis.policy_store import PolicyStore
 from orchesis.plugins import load_plugins_for_policy
 from orchesis.replay import ReplayEngine, read_events_from_jsonl
 from orchesis.reliability import ReliabilityReportGenerator
+from orchesis.llm_config import load_llm_config
+from orchesis.llm_judge import LLMJudge
 from orchesis.rules_generator import generate_security_rules_from_policy
 from orchesis.scanner_server import run_scanner_http_server
 from orchesis.scenarios import AdversarialScenarios
@@ -1475,12 +1477,16 @@ def _policy_guard_checks(policy: dict[str, Any]) -> dict[str, bool]:
 @click.option("--severity-threshold", "severity_threshold", default="medium")
 @click.option("--mcp", "scan_mcp_configs", is_flag=True, default=False)
 @click.option("--network", "scan_network", is_flag=True, default=False)
+@click.option("--llm-judge", "use_llm_judge", is_flag=True, default=False)
+@click.option("--llm-model", "llm_model", default=None)
 def scan_command(
     path_arg: str | None,
     output_format: str,
     severity_threshold: str,
     scan_mcp_configs: bool,
     scan_network: bool,
+    use_llm_judge: bool,
+    llm_model: str | None,
 ) -> None:
     """Static scan for skills, MCP configs, and policy files."""
     reports: list[ScanReport] = []
@@ -1502,8 +1508,68 @@ def scan_command(
     elif not scan_network:
         raise click.ClickException("Provide <path> or use --mcp")
 
+    llm_findings_by_target: dict[str, list[dict[str, Any]]] = {}
+    if use_llm_judge:
+        llm_config = load_llm_config(llm_model)
+        if llm_config is None:
+            click.echo("Warning: --llm-judge requested but ORCHESIS_LLM_API_KEY is not set; skipping LLM analysis.")
+        else:
+            judge = LLMJudge(
+                api_key=llm_config.api_key,
+                model=llm_config.model,
+                base_url=llm_config.base_url,
+                timeout=llm_config.timeout,
+                max_retries=llm_config.max_retries,
+            )
+            for report in reports:
+                target_path = Path(report.target)
+                findings: list[dict[str, Any]] = []
+                try:
+                    content = target_path.read_text(encoding="utf-8")
+                except Exception:
+                    content = ""
+                if report.target_type == "skill_md" and content:
+                    findings = judge.analyze_skill(content)
+                elif report.target_type == "policy_yaml" and content:
+                    findings = judge.analyze_policy(content)
+                elif report.target_type == "mcp_config":
+                    tools_payload: list[dict[str, Any]] = []
+                    if content:
+                        try:
+                            loaded = json.loads(content)
+                            servers = loaded.get("mcpServers") if isinstance(loaded, dict) else None
+                            if isinstance(servers, dict):
+                                for server_name, server_cfg in servers.items():
+                                    if not isinstance(server_name, str) or not isinstance(server_cfg, dict):
+                                        continue
+                                    tools_payload.append(
+                                        {
+                                            "name": server_name,
+                                            "description": str(server_cfg.get("description", "")),
+                                            "parameters": {"tools": server_cfg.get("tools", [])},
+                                        }
+                                    )
+                        except Exception:
+                            tools_payload = []
+                    if tools_payload:
+                        findings = judge.batch_analyze_tools(tools_payload)
+                if findings:
+                    deduped: dict[tuple[str, str], dict[str, Any]] = {}
+                    for item in findings:
+                        category = str(item.get("category", "")).strip()
+                        description = str(item.get("description", "")).strip()
+                        if not category or not description:
+                            continue
+                        key = (category, description)
+                        deduped[key] = item
+                    llm_findings_by_target[report.target] = list(deduped.values())
+
     if output_format == "json":
-        payload = [report_to_dict(item) for item in reports]
+        payload = []
+        for item in reports:
+            report_payload = report_to_dict(item)
+            report_payload["llm_findings"] = llm_findings_by_target.get(item.target, [])
+            payload.append(report_payload)
         if network_findings:
             payload.append(
                 {
@@ -1523,10 +1589,50 @@ def scan_command(
             click.echo(format_report_markdown(report, threshold=severity_threshold))
         else:
             click.echo(format_report_text(report, threshold=severity_threshold))
+        llm_findings = llm_findings_by_target.get(report.target, [])
+        if llm_findings:
+            click.echo("LLM Judge Findings:")
+            for finding in llm_findings:
+                click.echo(
+                    f"  [{str(finding.get('severity', 'MEDIUM')).upper():<8}] "
+                    f"{finding.get('category', 'llm_judge')}: {finding.get('description', '')}"
+                )
+                recommendation = finding.get("recommendation")
+                if isinstance(recommendation, str) and recommendation.strip():
+                    click.echo(f"    -> recommendation: {recommendation}")
         click.echo("")
     if network_findings:
         click.echo(_format_network_scan_text(network_findings))
         click.echo("")
+
+
+@main.command("benchmark-scanner")
+@click.option("--iterations", type=int, default=1000)
+@click.option("--input-size", type=int, default=10000)
+def benchmark_scanner(iterations: int, input_size: int) -> None:
+    """Benchmark sequential regex vs Aho-Corasick prefilter scanner."""
+    from orchesis.contrib.secret_scanner import SecretScanner
+
+    total_iterations = max(1, int(iterations))
+    size = max(512, int(input_size))
+    sample = ("safe_text_" * (size // 10))[:size]
+    sample += " sk-abcdefghijklmnopqrstuvwxyz123456 AKIAABCDEFGHIJKLMNOP user@example.com"
+    seq = SecretScanner(use_fast_matching=False)
+    fast = SecretScanner(use_fast_matching=True)
+    seq_started = time.perf_counter()
+    for _ in range(total_iterations):
+        _ = seq.scan_text(sample)
+    seq_ms = (time.perf_counter() - seq_started) * 1000.0 / total_iterations
+    fast_started = time.perf_counter()
+    for _ in range(total_iterations):
+        _ = fast.scan_text(sample)
+    fast_ms = (time.perf_counter() - fast_started) * 1000.0 / total_iterations
+    speedup = (seq_ms / fast_ms) if fast_ms > 0 else float("inf")
+    click.echo(
+        f"Sequential regex: {seq_ms:.2f}ms avg | "
+        f"Aho-Corasick: {fast_ms:.2f}ms avg | "
+        f"Speedup: {speedup:.2f}x"
+    )
 
 
 @main.command("scan-remote")
