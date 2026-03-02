@@ -270,18 +270,29 @@ GitHub Actions example:
 
 ## Comparison
 
-| Feature | Orchesis | SecureClaw | mcp-scan | Lakera | IronClaw |
-|---|---|---|---|---|---|
-| Runtime enforcement | ✅ | ❌ audit only | ❌ scan only | ✅ prompts only | ✅ single agent |
-| Agent-agnostic | ✅ | ❌ OpenClaw | ❌ MCP only | ✅ | ❌ NEAR AI |
-| Policy-as-code | ✅ YAML | ❌ | ❌ | ❌ | ❌ |
-| Tool allowlist | ✅ | ❌ | ❌ | ❌ | ✅ |
-| Compliance reports | ✅ 9 frameworks | ❌ | ❌ | ❌ | ❌ |
-| Secret scanning | ✅ | ❌ | ❌ | ✅ | ✅ |
-| PII detection | ✅ | ❌ | ❌ | ✅ | ❌ |
-| IoC database | ✅ | ✅ | ❌ | ❌ | ❌ |
-| Open source | ✅ MIT | ✅ | ✅ | ❌ | Partial |
-| Self-hosted | ✅ | ✅ | ✅ | ❌ | ❌ |
+> These projects solve related but different problems at different layers of the AI agent security stack.
+
+| Feature | Orchesis | SecureClaw | Cisco MCP Scanner | IronClaw |
+|---------|---------|------------|-------------------|----------|
+| **What it is** | Security runtime (policy proxy) | Audit + hardening plugin | MCP server scanner | Full agent runtime (Rust) |
+| **Approach** | Intercepts every tool call, evaluates YAML policy, blocks before execution | Scans config, applies fixes, loads behavioral rules into agent context | Scans MCP server tool descriptions with YARA + LLM + Cisco API | WASM sandbox with capability-based permissions per tool |
+| Runtime enforcement | ✅ fail-closed proxy | ⚠️ prompt-level rules | ❌ scan-time only | ✅ WASM isolation |
+| Agent-agnostic | ✅ any agent via HTTP/MCP | ❌ OpenClaw family only | ✅ any MCP server | ❌ IronClaw only |
+| Policy-as-code (YAML) | ✅ | ❌ | ❌ | ❌ |
+| Tool allowlist/denylist | ✅ | ❌ | ❌ | ✅ endpoint allowlist |
+| Compliance reports | ✅ 9 frameworks | ❌ | ❌ | ❌ |
+| Secret scanning | ✅ 20+ patterns | ⚠️ config-level checks | ❌ | ✅ 22 patterns (Aho-Corasick) |
+| PII detection | ✅ 15+ patterns | ❌ | ❌ | ⚠️ leak detection |
+| IoC database | ✅ | ✅ | ⚠️ YARA rules | ❌ |
+| WASM/TEE sandbox | ❌ | ❌ | ❌ | ✅ |
+| Prompt-level defense | ❌ | ✅ 12 context rules | ❌ | ✅ sanitizer + policy |
+| LLM-based scanning | ❌ | ❌ | ✅ LLM-as-a-judge | ❌ |
+| Open source | ✅ MIT | ✅ | ✅ Apache-2.0 | ✅ Apache-2.0 + MIT |
+| Self-hosted | ✅ | ✅ | ✅ | ✅ |
+
+Legend: ✅ = yes, ❌ = no, ⚠️ = partial or different scope
+
+See also: [Lakera Guard](https://lakera.ai) (commercial prompt firewall), [Invariant mcp-scan](https://github.com/invariantlabs-ai/mcp-scan) (MCP config scanner).
 
 ## Project Stats
 
