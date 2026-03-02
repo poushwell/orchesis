@@ -6,11 +6,6 @@ import base64
 import json
 from pathlib import Path
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
-
-
 def _canonical_payload(entry: dict[str, object]) -> bytes:
     payload = {
         "timestamp": entry.get("timestamp"),
@@ -22,8 +17,25 @@ def _canonical_payload(entry: dict[str, object]) -> bytes:
     return canonical.encode("utf-8")
 
 
+def _load_crypto() -> tuple[object, object, object, object]:
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PrivateKey,
+            Ed25519PublicKey,
+        )
+    except ModuleNotFoundError as error:
+        raise RuntimeError(
+            "Cryptography dependency is required for signing features. "
+            "Run: pip install orchesis[crypto]"
+        ) from error
+    return InvalidSignature, serialization, Ed25519PrivateKey, Ed25519PublicKey
+
+
 def generate_keypair(keys_dir: str | Path) -> tuple[Path, Path]:
     """Generate Ed25519 private/public key pair and store as PEM files."""
+    _InvalidSignature, serialization, Ed25519PrivateKey, _Ed25519PublicKey = _load_crypto()
     target_dir = Path(keys_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -51,6 +63,7 @@ def generate_keypair(keys_dir: str | Path) -> tuple[Path, Path]:
 
 def sign_entry(entry: dict[str, object], private_key_path: str | Path) -> str:
     """Create base64 Ed25519 signature for canonical decision fields."""
+    _InvalidSignature, serialization, Ed25519PrivateKey, _Ed25519PublicKey = _load_crypto()
     private_key_bytes = Path(private_key_path).read_bytes()
     private_key = serialization.load_pem_private_key(private_key_bytes, password=None)
     if not isinstance(private_key, Ed25519PrivateKey):
@@ -63,6 +76,7 @@ def verify_entry(
     entry: dict[str, object], signature_b64: str, public_key_path: str | Path
 ) -> bool:
     """Verify base64 Ed25519 signature against canonical decision fields."""
+    InvalidSignature, serialization, _Ed25519PrivateKey, Ed25519PublicKey = _load_crypto()
     public_key_bytes = Path(public_key_path).read_bytes()
     public_key = serialization.load_pem_public_key(public_key_bytes)
     if not isinstance(public_key, Ed25519PublicKey):
