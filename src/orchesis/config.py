@@ -15,6 +15,7 @@ from orchesis.identity import AgentIdentity, AgentRegistry, TrustTier
 _TOOL_RATE_LIMIT_PATTERN = re.compile(r"^\s*(\d+)\s*/\s*(second|minute|hour)\s*$", re.IGNORECASE)
 _RATE_LIMIT_WINDOW_SECONDS = {"second": 1, "minute": 60, "hour": 3600}
 _LOGGER = logging.getLogger(__name__)
+_CAPABILITY_CONSTRAINT_KEYS = {"paths", "domains", "commands"}
 
 
 class PolicyError(ValueError):
@@ -250,6 +251,75 @@ def _normalize_proxy_config(policy: dict[str, Any]) -> None:
         proxy_cfg["upstream"] = {}
 
 
+def _normalize_capability_constraints(raw: Any, *, key: str, index: int, section: str) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise PolicyError(f"capabilities[{index}].{section}.{key} must be a list of strings")
+    normalized: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            raise PolicyError(f"capabilities[{index}].{section}.{key} entries must be non-empty strings")
+        normalized.append(item.strip())
+    return normalized
+
+
+def _normalize_capability_rule(raw: Any, *, index: int, section: str) -> dict[str, list[str]]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise PolicyError(f"capabilities[{index}].{section} must be a mapping")
+    normalized: dict[str, list[str]] = {}
+    for key, value in raw.items():
+        if key not in _CAPABILITY_CONSTRAINT_KEYS:
+            raise PolicyError(
+                f"capabilities[{index}].{section} has unsupported key '{key}' "
+                f"(allowed: {sorted(_CAPABILITY_CONSTRAINT_KEYS)})"
+            )
+        normalized[key] = _normalize_capability_constraints(value, key=key, index=index, section=section)
+    return normalized
+
+
+def _normalize_capabilities(policy: dict[str, Any]) -> None:
+    default_action_raw = policy.get("default_action")
+    if default_action_raw is None:
+        policy["default_action"] = "allow"
+    elif isinstance(default_action_raw, str):
+        normalized_action = default_action_raw.strip().lower()
+        if normalized_action not in {"allow", "deny"}:
+            raise PolicyError("default_action must be either 'allow' or 'deny'")
+        policy["default_action"] = normalized_action
+    else:
+        raise PolicyError("default_action must be a string: 'allow' or 'deny'")
+
+    raw_capabilities = policy.get("capabilities")
+    if raw_capabilities is None:
+        policy["capabilities"] = []
+        return
+    if not isinstance(raw_capabilities, list):
+        raise PolicyError("capabilities must be a list")
+
+    normalized_caps: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_capabilities):
+        if not isinstance(item, dict):
+            raise PolicyError(f"capabilities[{index}] must be a mapping")
+        raw_tool = item.get("tool")
+        if not isinstance(raw_tool, str) or not raw_tool.strip():
+            raise PolicyError(f"capabilities[{index}].tool must be a non-empty string")
+        tool = raw_tool.strip()
+        if tool != "*":
+            tool = _normalize_tool_name(tool)
+        if not tool:
+            raise PolicyError(f"capabilities[{index}].tool is invalid after normalization")
+        allow = _normalize_capability_rule(item.get("allow"), index=index, section="allow")
+        deny = _normalize_capability_rule(item.get("deny"), index=index, section="deny")
+        if not allow and not deny:
+            raise PolicyError(f"capabilities[{index}] must define 'allow' and/or 'deny'")
+        normalized_caps.append({"tool": tool, "allow": allow, "deny": deny})
+
+    policy["capabilities"] = normalized_caps
+
+
 def _is_number(value: Any) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool)
 
@@ -270,6 +340,7 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     _normalize_tool_access_rate_limits(loaded)
     _normalize_cost_controls(loaded)
     _normalize_proxy_config(loaded)
+    _normalize_capabilities(loaded)
     return loaded
 
 

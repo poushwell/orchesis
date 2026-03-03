@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from orchesis.config import load_policy, validate_policy
+from orchesis.config import PolicyError, load_policy, validate_policy
 
 
 def _write_yaml(tmp_path: Path, name: str, content: str) -> Path:
@@ -90,3 +90,78 @@ def test_validate_policy_checks_required_fields_per_known_rule() -> None:
     assert "rules[1] must define allowed_paths and/or denied_paths for file_access" in errors
     assert "rules[2].denied_operations is required for sql_restriction" in errors
     assert "rules[3].max_requests_per_minute is required for rate_limit" in errors
+
+
+def test_load_policy_normalizes_default_action_and_capabilities(tmp_path: Path) -> None:
+    policy_path = _write_yaml(
+        tmp_path,
+        "caps.yaml",
+        """
+default_action: deny
+capabilities:
+  - tool: READ_FILE
+    allow:
+      paths:
+        - /workspace/*
+  - tool: "*"
+    deny:
+      domains:
+        - "*.evil.com"
+rules: []
+""".strip(),
+    )
+    policy = load_policy(policy_path)
+    assert policy["default_action"] == "deny"
+    assert policy["capabilities"][0]["tool"] == "read_file"
+    assert policy["capabilities"][1]["tool"] == "*"
+
+
+def test_load_policy_defaults_to_allow_when_default_action_missing(tmp_path: Path) -> None:
+    policy_path = _write_yaml(tmp_path, "default-action.yaml", "rules: []")
+    policy = load_policy(policy_path)
+    assert policy["default_action"] == "allow"
+    assert policy["capabilities"] == []
+
+
+def test_load_policy_raises_on_invalid_default_action(tmp_path: Path) -> None:
+    policy_path = _write_yaml(
+        tmp_path,
+        "bad-default-action.yaml",
+        """
+default_action: block
+rules: []
+""".strip(),
+    )
+    with pytest.raises(PolicyError, match="default_action"):
+        load_policy(policy_path)
+
+
+def test_load_policy_raises_on_invalid_capability_structure(tmp_path: Path) -> None:
+    policy_path = _write_yaml(
+        tmp_path,
+        "bad-capability.yaml",
+        """
+default_action: deny
+capabilities:
+  - tool: read_file
+    allow: "/workspace/*"
+rules: []
+""".strip(),
+    )
+    with pytest.raises(PolicyError, match="capabilities\\[0\\]\\.allow"):
+        load_policy(policy_path)
+
+
+def test_load_policy_raises_on_capability_without_allow_or_deny(tmp_path: Path) -> None:
+    policy_path = _write_yaml(
+        tmp_path,
+        "empty-capability.yaml",
+        """
+default_action: deny
+capabilities:
+  - tool: read_file
+rules: []
+""".strip(),
+    )
+    with pytest.raises(PolicyError, match="must define 'allow' and/or 'deny'"):
+        load_policy(policy_path)
