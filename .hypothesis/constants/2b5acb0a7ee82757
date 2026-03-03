@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\integrity.py
+# hypothesis_version: 6.151.9
+
+[384, 8192, '*', '+00:00', '.', '.clawdbot', '.config', '.cursor', '.env', '.git', '.json', '.md', '.moltbot', '.openclaw', '.orchesis', '.pytest_cache', '.toml', '.yaml', '.yml', '1.0', 'HIGH', 'MEDIUM', 'Z', '__pycache__', 'alerts', 'bot_token', 'chat_id', 'claude', 'config', 'created_at', 'file_type', 'files', 'hash', 'last_modified', 'mcp.json', 'monitored_paths', 'permissions', 'policy', 'policy.yaml', 'policy.yml', 'rb', 'sha256', 'size', 'slack', 'telegram', 'updated_at', 'utf-8', 'version', 'webhook_url']

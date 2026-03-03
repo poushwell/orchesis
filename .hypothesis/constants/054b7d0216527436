@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\yara_engine.py
+# hypothesis_version: 6.151.9
+
+[1024, '!=', '"', '#', '$', '(', '(\\d+)(KB|MB|GB)?', ')', '*.yar', ',', '/', '<', '<=', '=', '==', '>', '>=', '@', 'GB', 'KB', 'MB', '\\', 'all', 'and', 'any', 'condition', 'filesize', 'fullword', 'i', 'meta', 'nocase', 'not', 'of', 'or', 'strings', 'them', 'utf-8', 'wide', '{', '}']
