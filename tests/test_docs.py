@@ -76,7 +76,7 @@ def test_api_reference_covers_all_endpoints() -> None:
 
 def test_package_builds_cleanly(tmp_path: Path) -> None:
     try:
-        importlib.import_module("build")
+        importlib.import_module("build.__main__")
     except Exception:
         pytest.skip("build package not available")
 
