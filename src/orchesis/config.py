@@ -251,6 +251,36 @@ def _normalize_proxy_config(policy: dict[str, Any]) -> None:
         proxy_cfg["upstream"] = {}
 
 
+def _normalize_kill_switch(policy: dict[str, Any]) -> None:
+    raw = policy.get("kill_switch")
+    if raw is None:
+        policy["kill_switch"] = {"enabled": False, "auto_triggers": {}, "resume_token": "orchesis-resume-2024"}
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("kill_switch must be a mapping")
+
+    raw["enabled"] = bool(raw.get("enabled", False))
+    resume_token = raw.get("resume_token", "orchesis-resume-2024")
+    if isinstance(resume_token, str) and resume_token.strip():
+        raw["resume_token"] = resume_token.strip()
+    else:
+        raw["resume_token"] = "orchesis-resume-2024"
+
+    auto = raw.get("auto_triggers")
+    if auto is None:
+        auto = {}
+    if not isinstance(auto, dict):
+        raise PolicyError("kill_switch.auto_triggers must be a mapping")
+    cost_multiplier = auto.get("cost_multiplier", 5)
+    secrets_threshold = auto.get("secrets_threshold", 3)
+    loops_threshold = auto.get("loops_threshold", 5)
+    auto["cost_multiplier"] = float(cost_multiplier) if _is_number(cost_multiplier) and float(cost_multiplier) > 0 else 5.0
+    auto["secrets_threshold"] = int(secrets_threshold) if _is_number(secrets_threshold) and int(secrets_threshold) > 0 else 3
+    auto["loops_threshold"] = int(loops_threshold) if _is_number(loops_threshold) and int(loops_threshold) > 0 else 5
+    raw["auto_triggers"] = auto
+    policy["kill_switch"] = raw
+
+
 def _normalize_capability_constraints(raw: Any, *, key: str, index: int, section: str) -> list[str]:
     if raw is None:
         return []
@@ -340,6 +370,7 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     _normalize_tool_access_rate_limits(loaded)
     _normalize_cost_controls(loaded)
     _normalize_proxy_config(loaded)
+    _normalize_kill_switch(loaded)
     _normalize_capabilities(loaded)
     return loaded
 

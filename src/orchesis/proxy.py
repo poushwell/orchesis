@@ -1297,6 +1297,17 @@ class LLMHTTPProxy:
             secret_patterns=SECRET_PATTERNS,
             scan_secrets=self._scan_response,
         )
+        kill_cfg = self._policy.get("kill_switch")
+        self._kill_cfg = kill_cfg if isinstance(kill_cfg, dict) else {}
+        self._kill_enabled = bool(self._kill_cfg.get("enabled", False))
+        auto_cfg = self._kill_cfg.get("auto_triggers")
+        self._kill_auto_cfg = auto_cfg if isinstance(auto_cfg, dict) else {}
+        self._resume_token = str(self._kill_cfg.get("resume_token", "orchesis-resume-2024"))
+        self._killed = False
+        self._kill_reason = ""
+        self._kill_time = ""
+        self._secret_trigger_hits = 0
+        self._loop_trigger_hits = 0
         self._server: HTTPServer | None = None
         self._stats_lock = threading.Lock()
         self._stats = {
@@ -1304,6 +1315,7 @@ class LLMHTTPProxy:
             "blocked": 0,
             "allowed": 0,
             "errors": 0,
+            "kill_switch_activations": 0,
             "started_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -1315,6 +1327,14 @@ class LLMHTTPProxy:
         payload["cost_by_tool"] = self._cost_tracker.get_tool_costs()
         if self._loop_detector is not None:
             payload["loop_stats"] = self._loop_detector.get_stats()
+        payload["kill_switch"] = {
+            "enabled": self._kill_enabled,
+            "killed": self._killed,
+            "reason": self._kill_reason,
+            "killed_at": self._kill_time,
+            "secret_trigger_hits": self._secret_trigger_hits,
+            "loop_trigger_hits": self._loop_trigger_hits,
+        }
         return payload
 
     @property
@@ -1376,6 +1396,9 @@ class LLMHTTPProxy:
                     "stats": self.stats,
                     "model_routing": self._router is not None,
                     "loop_detection": self._loop_detector is not None,
+                    "killed": self._killed,
+                    "kill_reason": self._kill_reason,
+                    "killed_at": self._kill_time,
                 },
             )
             return
@@ -1388,6 +1411,27 @@ class LLMHTTPProxy:
         self._inc("requests")
         proc_result: dict[str, Any] = {"cost": 0.0}
         try:
+            if handler.path == "/kill":
+                self._handle_kill(handler)
+                return
+            if handler.path == "/resume":
+                self._handle_resume(handler)
+                return
+            if self._killed:
+                self._inc("blocked")
+                self._send_json(
+                    handler,
+                    503,
+                    {
+                        "error": {
+                            "type": "kill_switch",
+                            "message": self._kill_reason or "Emergency kill switch is active",
+                            "killed_at": self._kill_time,
+                        }
+                    },
+                )
+                return
+
             length = int(handler.headers.get("Content-Length", "0") or "0")
             raw_body = handler.rfile.read(max(0, length))
             try:
@@ -1403,6 +1447,21 @@ class LLMHTTPProxy:
 
             if self._budget_cfg:
                 budget_status = self._cost_tracker.check_budget(self._budget_cfg)
+                if self._kill_enabled and self._should_kill_for_cost(budget_status):
+                    self._activate_kill_switch("auto-kill: emergency budget multiplier exceeded")
+                    self._inc("blocked")
+                    self._send_json(
+                        handler,
+                        503,
+                        {
+                            "error": {
+                                "type": "kill_switch",
+                                "message": self._kill_reason,
+                                "killed_at": self._kill_time,
+                            }
+                        },
+                    )
+                    return
                 if bool(budget_status.get("over_budget", False)):
                     self._inc("blocked")
                     self._send_json(
@@ -1440,6 +1499,22 @@ class LLMHTTPProxy:
                     estimated_cost = float(self._tool_costs.get(call.name, 0.001))
                     loop_state = self._loop_detector.check(call.name, call.params, cost_per_call=estimated_cost)
                     if loop_state.get("action") == "block":
+                        self._loop_trigger_hits += 1
+                        if self._kill_enabled and self._should_kill_for_loops():
+                            self._activate_kill_switch("auto-kill: loop threshold reached")
+                            self._inc("blocked")
+                            self._send_json(
+                                handler,
+                                503,
+                                {
+                                    "error": {
+                                        "type": "kill_switch",
+                                        "message": self._kill_reason,
+                                        "killed_at": self._kill_time,
+                                    }
+                                },
+                            )
+                            return
                         self._inc("blocked")
                         self._send_json(
                             handler,
@@ -1460,6 +1535,22 @@ class LLMHTTPProxy:
             if self._scan_outbound and parsed_req.content_text:
                 for pattern, secret_type in SECRET_PATTERNS:
                     if pattern.search(parsed_req.content_text):
+                        self._secret_trigger_hits += 1
+                        if self._kill_enabled and self._should_kill_for_secrets():
+                            self._activate_kill_switch("auto-kill: secrets detection threshold reached")
+                            self._inc("blocked")
+                            self._send_json(
+                                handler,
+                                503,
+                                {
+                                    "error": {
+                                        "type": "kill_switch",
+                                        "message": self._kill_reason,
+                                        "killed_at": self._kill_time,
+                                    }
+                                },
+                            )
+                            return
                         self._inc("blocked")
                         self._send_json(
                             handler,
@@ -1535,6 +1626,83 @@ class LLMHTTPProxy:
             _HTTP_PROXY_LOGGER.exception("proxy runtime error")
             self._inc("errors")
             self._send_json(handler, 500, {"error": {"type": "proxy_error", "message": str(error)}})
+
+    def _handle_kill(self, handler: BaseHTTPRequestHandler) -> None:
+        payload = self._read_json_body(handler)
+        reason = "manual emergency shutdown"
+        if isinstance(payload, dict):
+            raw_reason = payload.get("reason")
+            if isinstance(raw_reason, str) and raw_reason.strip():
+                reason = raw_reason.strip()
+        self._activate_kill_switch(reason)
+        self._send_json(
+            handler,
+            200,
+            {"status": "killed", "reason": self._kill_reason, "killed_at": self._kill_time},
+        )
+
+    def _handle_resume(self, handler: BaseHTTPRequestHandler) -> None:
+        payload = self._read_json_body(handler)
+        token = ""
+        if isinstance(payload, dict):
+            raw_token = payload.get("token")
+            if isinstance(raw_token, str):
+                token = raw_token
+        if token != self._resume_token:
+            self._send_json(
+                handler,
+                403,
+                {"error": {"type": "invalid_resume_token", "message": "Resume token is invalid"}},
+            )
+            return
+        self._killed = False
+        self._kill_reason = ""
+        self._kill_time = ""
+        self._secret_trigger_hits = 0
+        self._loop_trigger_hits = 0
+        self._send_json(handler, 200, {"status": "resumed"})
+
+    def _activate_kill_switch(self, reason: str) -> None:
+        self._killed = True
+        self._kill_reason = reason
+        self._kill_time = datetime.now(timezone.utc).isoformat()
+        self._inc("kill_switch_activations")
+
+    def _read_json_body(self, handler: BaseHTTPRequestHandler) -> dict[str, Any] | None:
+        try:
+            length = int(handler.headers.get("Content-Length", "0") or "0")
+        except Exception:
+            return None
+        if length <= 0:
+            return None
+        try:
+            body = handler.rfile.read(length)
+            loaded = json.loads(body.decode("utf-8"))
+            if isinstance(loaded, dict):
+                return loaded
+        except Exception:
+            return None
+        return None
+
+    def _should_kill_for_cost(self, budget_status: dict[str, Any]) -> bool:
+        multiplier_raw = self._kill_auto_cfg.get("cost_multiplier", 5)
+        multiplier = float(multiplier_raw) if isinstance(multiplier_raw, int | float) else 5.0
+        daily_budget = self._budget_cfg.get("daily")
+        if not isinstance(daily_budget, int | float) or daily_budget <= 0:
+            return False
+        spent = budget_status.get("daily_spent", 0.0)
+        safe_spent = float(spent) if isinstance(spent, int | float) else 0.0
+        return safe_spent >= float(daily_budget) * multiplier
+
+    def _should_kill_for_secrets(self) -> bool:
+        threshold_raw = self._kill_auto_cfg.get("secrets_threshold", 3)
+        threshold = int(threshold_raw) if isinstance(threshold_raw, int | float) else 3
+        return self._secret_trigger_hits >= max(1, threshold)
+
+    def _should_kill_for_loops(self) -> bool:
+        threshold_raw = self._kill_auto_cfg.get("loops_threshold", 5)
+        threshold = int(threshold_raw) if isinstance(threshold_raw, int | float) else 5
+        return self._loop_trigger_hits >= max(1, threshold)
 
     def _build_forward_headers(self, source: Any, payload: bytes) -> dict[str, str]:
         headers: dict[str, str] = {"Content-Type": "application/json", "Content-Length": str(len(payload))}

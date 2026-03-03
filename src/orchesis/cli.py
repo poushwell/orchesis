@@ -13,6 +13,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from random import Random
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request as UrlRequest, urlopen
 
 import click
 import yaml
@@ -789,6 +791,49 @@ def proxy_command(
     except KeyboardInterrupt:
         proxy.stop()
         click.echo("\nProxy stopped.")
+
+
+def _post_proxy_control(port: int, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    req = UrlRequest(
+        f"http://127.0.0.1:{max(1, int(port))}{path}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=5) as response:
+            parsed = json.loads(response.read().decode("utf-8"))
+            return parsed if isinstance(parsed, dict) else {"status": "ok"}
+    except HTTPError as error:
+        try:
+            body = error.read().decode("utf-8")
+            parsed_error = json.loads(body)
+            message = parsed_error.get("error") if isinstance(parsed_error, dict) else body
+            raise click.ClickException(f"Proxy returned HTTP {error.code}: {message}") from error
+        except Exception:
+            raise click.ClickException(f"Proxy returned HTTP {error.code}") from error
+    except URLError as error:
+        raise click.ClickException(f"Failed to reach proxy on port {port}: {error}") from error
+
+
+@main.command("kill")
+@click.option("--port", type=int, default=8100)
+@click.option("--reason", type=str, default="emergency")
+def kill_command(port: int, reason: str) -> None:
+    """Trigger emergency kill switch on running proxy."""
+    payload = _post_proxy_control(port, "/kill", {"reason": reason})
+    click.echo(f"Kill switch activated on :{port}")
+    click.echo(f"Reason: {payload.get('reason', reason)}")
+    click.echo(f"Killed at: {payload.get('killed_at', 'unknown')}")
+
+
+@main.command("resume")
+@click.option("--port", type=int, default=8100)
+@click.option("--token", type=str, required=True)
+def resume_command(port: int, token: str) -> None:
+    """Resume proxy after kill switch activation."""
+    payload = _post_proxy_control(port, "/resume", {"token": token})
+    click.echo(f"Proxy resumed on :{port} ({payload.get('status', 'ok')})")
 
 
 @main.command("mcp-proxy")
