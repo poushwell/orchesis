@@ -125,6 +125,90 @@ def _normalize_policy_paths(policy: dict[str, Any]) -> None:
                 )
 
 
+def _normalize_cost_controls(policy: dict[str, Any]) -> None:
+    budgets = policy.get("budgets")
+    if not isinstance(budgets, dict):
+        budgets = {}
+        policy["budgets"] = budgets
+    daily = budgets.get("daily")
+    if isinstance(daily, int | float):
+        budgets["daily"] = float(daily)
+    elif daily is not None:
+        budgets.pop("daily", None)
+    per_tool = budgets.get("per_tool")
+    if isinstance(per_tool, dict):
+        normalized_per_tool: dict[str, float] = {}
+        for tool, value in per_tool.items():
+            if isinstance(tool, str) and isinstance(value, int | float):
+                normalized_per_tool[tool.strip()] = float(value)
+        budgets["per_tool"] = normalized_per_tool
+    elif per_tool is not None:
+        budgets["per_tool"] = {}
+    per_task = budgets.get("per_task")
+    if isinstance(per_task, int | float):
+        budgets["per_task"] = float(per_task)
+    elif per_task is not None:
+        budgets.pop("per_task", None)
+    soft_limit_percent = budgets.get("soft_limit_percent", 80)
+    if isinstance(soft_limit_percent, int | float):
+        budgets["soft_limit_percent"] = float(max(0, min(100, soft_limit_percent)))
+    else:
+        budgets["soft_limit_percent"] = 80.0
+    on_soft_limit = str(budgets.get("on_soft_limit", "notify")).strip().lower()
+    if on_soft_limit not in {"notify", "downgrade_model", "throttle", "block"}:
+        on_soft_limit = "notify"
+    budgets["on_soft_limit"] = on_soft_limit
+    on_hard_limit = str(budgets.get("on_hard_limit", "block")).strip().lower()
+    if on_hard_limit not in {"block", "notify"}:
+        on_hard_limit = "block"
+    budgets["on_hard_limit"] = on_hard_limit
+
+    tool_costs = policy.get("tool_costs")
+    if isinstance(tool_costs, dict):
+        normalized_costs: dict[str, float] = {}
+        for tool, value in tool_costs.items():
+            if isinstance(tool, str) and isinstance(value, int | float):
+                normalized_costs[tool.strip()] = float(value)
+        policy["tool_costs"] = normalized_costs
+    elif tool_costs is not None:
+        policy["tool_costs"] = {}
+
+    loop_detection = policy.get("loop_detection")
+    if not isinstance(loop_detection, dict):
+        loop_detection = {}
+        policy["loop_detection"] = loop_detection
+    loop_detection["enabled"] = bool(loop_detection.get("enabled", False))
+    warn_threshold = loop_detection.get("warn_threshold", 5)
+    block_threshold = loop_detection.get("block_threshold", 10)
+    window_seconds = loop_detection.get("window_seconds", 300)
+    loop_detection["warn_threshold"] = int(warn_threshold) if isinstance(warn_threshold, int | float) else 5
+    loop_detection["block_threshold"] = int(block_threshold) if isinstance(block_threshold, int | float) else 10
+    loop_detection["window_seconds"] = float(window_seconds) if isinstance(window_seconds, int | float) else 300.0
+    loop_detection["similarity_check"] = bool(loop_detection.get("similarity_check", True))
+
+    model_routing = policy.get("model_routing")
+    if not isinstance(model_routing, dict):
+        model_routing = {}
+        policy["model_routing"] = model_routing
+    model_routing["enabled"] = bool(model_routing.get("enabled", False))
+    model_routing["default"] = str(model_routing.get("default", "gpt-4o"))
+    rules = model_routing.get("rules")
+    if isinstance(rules, list):
+        normalized_rules: list[dict[str, str]] = []
+        for item in rules:
+            if not isinstance(item, dict):
+                continue
+            complexity = item.get("complexity")
+            model = item.get("model")
+            if isinstance(complexity, str) and isinstance(model, str):
+                normalized_rules.append(
+                    {"complexity": complexity.strip().lower(), "model": model.strip()}
+                )
+        model_routing["rules"] = normalized_rules
+    else:
+        model_routing["rules"] = []
+
+
 def _is_number(value: Any) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool)
 
@@ -143,6 +227,7 @@ def load_policy(path: str | Path) -> dict[str, Any]:
 
     _normalize_policy_paths(loaded)
     _normalize_tool_access_rate_limits(loaded)
+    _normalize_cost_controls(loaded)
     return loaded
 
 

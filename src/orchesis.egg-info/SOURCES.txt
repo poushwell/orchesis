@@ -36,6 +36,8 @@ src/orchesis/client.py
 src/orchesis/compliance.py
 src/orchesis/config.py
 src/orchesis/corpus.py
+src/orchesis/cost_reporter.py
+src/orchesis/cost_tracker.py
 src/orchesis/coverage.py
 src/orchesis/credential_injector.py
 src/orchesis/credential_vault.py
@@ -52,9 +54,11 @@ src/orchesis/invariants.py
 src/orchesis/llm_config.py
 src/orchesis/llm_judge.py
 src/orchesis/logger.py
+src/orchesis/loop_detector.py
 src/orchesis/mcp_config.py
 src/orchesis/mcp_proxy.py
 src/orchesis/metrics.py
+src/orchesis/model_router.py
 src/orchesis/models.py
 src/orchesis/mutations.py
 src/orchesis/otel.py
@@ -131,6 +135,8 @@ tests/test_compliance.py
 tests/test_config.py
 tests/test_corpus.py
 tests/test_corpus_regression.py
+tests/test_cost_reporter.py
+tests/test_cost_tracker.py
 tests/test_coverage.py
 tests/test_credentials.py
 tests/test_debug_mode.py
@@ -156,11 +162,13 @@ tests/test_ioc_database.py
 tests/test_llm_judge.py
 tests/test_load.py
 tests/test_logger.py
+tests/test_loop_detector.py
 tests/test_marketplace.py
 tests/test_mcp_interceptor.py
 tests/test_mcp_proxy.py
 tests/test_mcp_real_server.py
 tests/test_metrics.py
+tests/test_model_router.py
 tests/test_models.py
 tests/test_mutations.py
 tests/test_network_scanner.py

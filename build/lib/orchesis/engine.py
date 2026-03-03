@@ -16,9 +16,12 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 import yaml
+from orchesis.cost_tracker import CostTracker, DEFAULT_TOOL_COSTS
 from orchesis.contrib.pii_detector import PiiDetector
 from orchesis.contrib.secret_scanner import SecretScanner
 from orchesis.identity import AgentIdentity, AgentRegistry, TrustTier, check_capability
+from orchesis.loop_detector import LoopDetector
+from orchesis.model_router import ModelRouter
 from orchesis.models import Decision
 from orchesis.plugins import PluginRegistry
 from orchesis.state import DEFAULT_SESSION_ID, GLOBAL_AGENT_ID, RateLimitTracker
@@ -46,6 +49,11 @@ _SECRET_SCANNER = SecretScanner()
 _PII_DETECTOR = PiiDetector()
 _TOOL_RATE_LIMIT_PATTERN = re.compile(r"^\s*(\d+)\s*/\s*(second|minute|hour)\s*$", re.IGNORECASE)
 _RATE_LIMIT_WINDOW_SECONDS = {"second": 1, "minute": 60, "hour": 3600}
+_COST_TRACKER = CostTracker()
+_LOOP_DETECTORS: dict[str, LoopDetector] = {}
+_LOOP_DETECTOR_LOCK = threading.Lock()
+_MODEL_ROUTERS: dict[str, ModelRouter] = {}
+_MODEL_ROUTER_LOCK = threading.Lock()
 
 
 class EvaluationGuarantees:
@@ -57,6 +65,70 @@ class EvaluationGuarantees:
     UNKNOWN_FIELD_SAFE = True
     THREAD_SAFE = True
     EVALUATION_ORDER = RULE_EVALUATION_ORDER
+
+
+def get_cost_tracker() -> CostTracker:
+    return _COST_TRACKER
+
+
+def reset_cost_tracker_daily() -> None:
+    _COST_TRACKER.reset_daily()
+
+
+def get_loop_detector_stats() -> dict[str, Any]:
+    with _LOOP_DETECTOR_LOCK:
+        detectors = list(_LOOP_DETECTORS.values())
+    total_saved = 0.0
+    total_detected = 0
+    total_warned = 0
+    total_blocked = 0
+    for detector in detectors:
+        stats = detector.get_stats()
+        total_saved += float(stats.get("total_saved_usd", 0.0))
+        total_detected += int(stats.get("total_loops_detected", 0))
+        total_warned += int(stats.get("loops_warned", 0))
+        total_blocked += int(stats.get("loops_blocked", 0))
+    return {
+        "total_saved_usd": round(total_saved, 4),
+        "total_loops_detected": total_detected,
+        "loops_warned": total_warned,
+        "loops_blocked": total_blocked,
+    }
+
+
+def _loop_detector_for_config(config: dict[str, Any] | None) -> LoopDetector:
+    safe_config = config if isinstance(config, dict) else {}
+    key = json.dumps(
+        {
+            "warn_threshold": int(safe_config.get("warn_threshold", 5)),
+            "block_threshold": int(safe_config.get("block_threshold", 10)),
+            "window_seconds": float(safe_config.get("window_seconds", 300.0)),
+            "similarity_check": bool(safe_config.get("similarity_check", True)),
+        },
+        sort_keys=True,
+    )
+    with _LOOP_DETECTOR_LOCK:
+        detector = _LOOP_DETECTORS.get(key)
+        if detector is None:
+            detector = LoopDetector(
+                warn_threshold=int(safe_config.get("warn_threshold", 5)),
+                block_threshold=int(safe_config.get("block_threshold", 10)),
+                window_seconds=float(safe_config.get("window_seconds", 300.0)),
+                similarity_check=bool(safe_config.get("similarity_check", True)),
+            )
+            _LOOP_DETECTORS[key] = detector
+    return detector
+
+
+def _router_for_config(config: dict[str, Any] | None) -> ModelRouter:
+    safe_config = config if isinstance(config, dict) else {}
+    key = json.dumps(safe_config, sort_keys=True, default=str)
+    with _MODEL_ROUTER_LOCK:
+        router = _MODEL_ROUTERS.get(key)
+        if router is None:
+            router = ModelRouter(safe_config)
+            _MODEL_ROUTERS[key] = router
+    return router
 
 
 class ToolRateLimiter:
@@ -1854,7 +1926,95 @@ def evaluate(
         if isinstance(rule_name, str):
             rules_checked.append(f"unknown_rule:{rule_name}:skipped")
 
+    safe_params = request.get("params") if isinstance(request.get("params"), dict) else {}
+    normalized_tool, _invalid_tool_name = _normalize_tool_name(request.get("tool"))
+    policy_budget_cfg = policy.get("budgets") if isinstance(policy, dict) and isinstance(policy.get("budgets"), dict) else None
+    policy_tool_costs = policy.get("tool_costs") if isinstance(policy, dict) and isinstance(policy.get("tool_costs"), dict) else {}
+    policy_loop_cfg = policy.get("loop_detection") if isinstance(policy, dict) and isinstance(policy.get("loop_detection"), dict) else None
+    policy_model_routing_cfg = (
+        policy.get("model_routing") if isinstance(policy, dict) and isinstance(policy.get("model_routing"), dict) else None
+    )
+    current_tool_cost = (
+        float(policy_tool_costs.get(normalized_tool))
+        if isinstance(policy_tool_costs.get(normalized_tool), int | float)
+        else float(DEFAULT_TOOL_COSTS.get(normalized_tool, DEFAULT_TOOL_COSTS["default"]))
+    )
+
     allowed = len(reasons) == 0
+    if allowed and isinstance(policy_loop_cfg, dict) and bool(policy_loop_cfg.get("enabled", False)):
+        rules_checked.append("loop_detection")
+        try:
+            loop_detector = _loop_detector_for_config(policy_loop_cfg)
+            loop_result = loop_detector.check(
+                normalized_tool,
+                safe_params if isinstance(safe_params, dict) else {},
+                cost_per_call=current_tool_cost,
+            )
+            action = loop_result.get("action")
+            if action == "block":
+                reasons.append(str(loop_result.get("message", "loop_detection: blocked")))
+                allowed = False
+                decision_reason = "loop_detection"
+            elif action == "warn":
+                reasons.append(f"warning: {loop_result.get('message', 'loop risk detected')}")
+        except Exception:
+            reasons.append("warning: loop detection unavailable")
+
+    if allowed and isinstance(policy_budget_cfg, dict) and policy_budget_cfg:
+        rules_checked.append("cost_budget")
+        try:
+            budget_status = _COST_TRACKER.check_budget(policy_budget_cfg)
+            per_tool_status = budget_status.get("per_tool_status", {})
+            if isinstance(per_tool_status, dict):
+                status = per_tool_status.get(normalized_tool)
+                if isinstance(status, dict) and bool(status.get("over", False)):
+                    reasons.append(f"cost_budget: per-tool budget exceeded for {normalized_tool}")
+                    allowed = False
+                    decision_reason = "cost_budget"
+            if allowed and bool(budget_status.get("over_budget", False)):
+                on_hard = str(policy_budget_cfg.get("on_hard_limit", "block")).strip().lower()
+                if on_hard == "block":
+                    reasons.append("cost_budget: daily budget exceeded")
+                    allowed = False
+                    decision_reason = "cost_budget"
+                else:
+                    reasons.append("warning: daily budget exceeded")
+            if allowed and bool(budget_status.get("soft_limit_reached", False)):
+                on_soft = str(policy_budget_cfg.get("on_soft_limit", "notify")).strip().lower()
+                percent = budget_status.get("daily_percent", 0)
+                if on_soft == "block":
+                    reasons.append("cost_budget: soft budget limit reached")
+                    allowed = False
+                    decision_reason = "cost_budget"
+                elif on_soft == "downgrade_model":
+                    if isinstance(policy_model_routing_cfg, dict) and bool(policy_model_routing_cfg.get("enabled", False)):
+                        router = _router_for_config(policy_model_routing_cfg)
+                        prompt_text = ""
+                        if isinstance(safe_params, dict):
+                            prompt_value = safe_params.get("prompt")
+                            if isinstance(prompt_value, str):
+                                prompt_text = prompt_value
+                        route = router.route(prompt_text, tool_name=normalized_tool)
+                        reasons.append(
+                            f"warning: budget at {percent}%, suggested model fallback to {route['model']}"
+                        )
+                    else:
+                        reasons.append(f"warning: budget at {percent}%")
+                elif on_soft == "throttle":
+                    reasons.append(f"warning: budget at {percent}%, throttling recommended")
+                else:
+                    reasons.append(f"warning: budget at {percent}%")
+
+            per_task_budget = policy_budget_cfg.get("per_task")
+            task_id = safe_params.get("_task_id") if isinstance(safe_params, dict) else None
+            if allowed and isinstance(per_task_budget, int | float) and isinstance(task_id, str) and task_id:
+                if _COST_TRACKER.get_task_cost(task_id) >= float(per_task_budget):
+                    reasons.append(f"cost_budget: per-task budget exceeded for task '{task_id}'")
+                    allowed = False
+                    decision_reason = "cost_budget"
+        except Exception:
+            reasons.append("warning: cost budget evaluation unavailable")
+
     if allowed:
         cost = _coerce_cost(request.get("cost"))
         if cost is not None and cost > 0:
@@ -1883,6 +2043,24 @@ def evaluate(
                 allowed = False
 
     decision = Decision(allowed=allowed, reasons=reasons, rules_checked=rules_checked)
+    if decision.allowed:
+        task_id = safe_params.get("_task_id") if isinstance(safe_params, dict) and isinstance(safe_params.get("_task_id"), str) else None
+        model = safe_params.get("_model") if isinstance(safe_params, dict) and isinstance(safe_params.get("_model"), str) else None
+        tokens_in = safe_params.get("_tokens_input") if isinstance(safe_params, dict) else 0
+        tokens_out = safe_params.get("_tokens_output") if isinstance(safe_params, dict) else 0
+        safe_tokens_in = int(tokens_in) if isinstance(tokens_in, int | float) else 0
+        safe_tokens_out = int(tokens_out) if isinstance(tokens_out, int | float) else 0
+        try:
+            _COST_TRACKER.record_call(
+                normalized_tool,
+                task_id=task_id,
+                model=model,
+                tokens_input=safe_tokens_in,
+                tokens_output=safe_tokens_out,
+                cost_override=current_tool_cost if model is None else None,
+            )
+        except Exception:
+            pass
     _attach_debug_trace(decision)
     _emit_event(
         emitter=emitter,

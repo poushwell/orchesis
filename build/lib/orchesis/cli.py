@@ -31,7 +31,8 @@ from orchesis.config import (
     validate_policy,
     validate_policy_warnings,
 )
-from orchesis.engine import evaluate
+from orchesis.cost_reporter import CostReporter
+from orchesis.engine import evaluate, get_cost_tracker, get_loop_detector_stats, reset_cost_tracker_daily
 from orchesis.forensics import ForensicsEngine
 from orchesis.drift import DriftDetector
 from orchesis.fuzzer import SyntheticFuzzer, update_fuzz_metadata
@@ -1811,6 +1812,54 @@ def yara_test(rule_path: str, target_path: str) -> None:
     click.echo(f"Matches: {len(matches)}")
     for match in matches:
         click.echo(f"- {match.rule_name}")
+
+
+@main.group("cost")
+def cost_group() -> None:
+    """Inspect and manage runtime cost tracking."""
+
+
+class _LoopStatsAdapter:
+    def get_stats(self) -> dict[str, Any]:
+        return get_loop_detector_stats()
+
+
+@cost_group.command("report")
+@click.option("--day", "day", default=None)
+@click.option("--format", "output_format", type=click.Choice(["console", "markdown", "json"]), default="console")
+def cost_report(day: str | None, output_format: str) -> None:
+    reporter = CostReporter(get_cost_tracker(), loop_detector=_LoopStatsAdapter())
+    summary = reporter.daily_summary(day=day)
+    if output_format == "json":
+        click.echo(json.dumps(summary, ensure_ascii=False, indent=2))
+    elif output_format == "markdown":
+        click.echo(reporter.format_markdown(summary))
+    else:
+        click.echo(reporter.format_console(summary))
+
+
+@cost_group.command("status")
+@click.option("--policy", "policy_path", default="policy.yaml")
+def cost_status(policy_path: str) -> None:
+    tracker = get_cost_tracker()
+    if not Path(policy_path).exists():
+        click.echo("Policy not found; showing totals only.")
+        click.echo(f"Today spent: ${tracker.get_daily_total():.4f}")
+        return
+    policy = load_policy(policy_path)
+    budgets = policy.get("budgets") if isinstance(policy.get("budgets"), dict) else {}
+    if not budgets:
+        click.echo("No budgets configured in policy.")
+        click.echo(f"Today spent: ${tracker.get_daily_total():.4f}")
+        return
+    status = tracker.check_budget(budgets)
+    click.echo(json.dumps(status, ensure_ascii=False, indent=2))
+
+
+@cost_group.command("reset")
+def cost_reset() -> None:
+    reset_cost_tracker_daily()
+    click.echo("Cost tracker daily counters reset.")
 
 
 @main.command("scan-remote")
