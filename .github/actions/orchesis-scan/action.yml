@@ -1,0 +1,41 @@
+name: "Orchesis Security Scan"
+description: "Scan MCP server configs and agent policies for security issues"
+inputs:
+  config-path:
+    description: "Path to MCP config file (auto-detects if not set)"
+    required: false
+    default: ""
+  policy-path:
+    description: "Path to Orchesis policy file"
+    required: false
+    default: ""
+  severity:
+    description: "Minimum severity to fail: critical, high, medium, low"
+    required: false
+    default: "high"
+  format:
+    description: "Output format: text, json, sarif"
+    required: false
+    default: "text"
+  fail-on-findings:
+    description: "Fail the workflow if issues found at or above severity"
+    required: false
+    default: "true"
+outputs:
+  findings-count:
+    description: "Number of findings"
+  critical-count:
+    description: "Number of critical findings"
+  report-path:
+    description: "Path to scan report file"
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      run: |
+        python3 "${{ github.action_path }}/scan_runner.py" \
+          --config "${{ inputs.config-path }}" \
+          --policy "${{ inputs.policy-path }}" \
+          --severity "${{ inputs.severity }}" \
+          --format "${{ inputs.format }}" \
+          --fail-on-findings "${{ inputs.fail-on-findings }}"

@@ -1,0 +1,16 @@
+name: Orchesis Security Scan
+on: [push, pull_request]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/orchesis-scan
+        with:
+          severity: high
+          format: sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: orchesis-report.sarif
