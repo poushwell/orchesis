@@ -89,20 +89,38 @@ _CRITICAL_PATTERNS = {"ssn", "credit_card_visa", "credit_card_mc", "credit_card_
 
 
 def preprocess_for_pii(text: str) -> list[str]:
+    if not isinstance(text, str):
+        try:
+            text = str(text, "utf-8", errors="replace")  # type: ignore[arg-type]
+        except Exception:
+            text = repr(text)
+    if not text:
+        return [text]
+
     versions: list[str] = [text]
-    cleaned = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", text)
-    if cleaned != text:
-        versions.append(cleaned)
-    normalized = unicodedata.normalize("NFKC", cleaned)
-    if normalized != cleaned:
-        versions.append(normalized)
+    cleaned = text
+    try:
+        cleaned = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", text)
+        if cleaned != text:
+            versions.append(cleaned)
+    except Exception:
+        cleaned = text
+    try:
+        normalized = unicodedata.normalize("NFKC", cleaned)
+        if normalized != cleaned:
+            versions.append(normalized)
+    except Exception:
+        pass
     deduped: list[str] = []
     seen: set[str] = set()
     for item in versions:
-        if item not in seen:
-            seen.add(item)
-            deduped.append(item)
-    return deduped
+        try:
+            if item not in seen:
+                seen.add(item)
+                deduped.append(item)
+        except Exception:
+            continue
+    return deduped or [text]
 
 
 class PiiDetector:

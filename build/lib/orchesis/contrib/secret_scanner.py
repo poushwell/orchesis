@@ -143,92 +143,131 @@ def _redact_value(value: str) -> str:
 
 
 def preprocess_for_scanning(text: str) -> list[str]:
+    if not isinstance(text, str):
+        try:
+            text = str(text, "utf-8", errors="replace")  # type: ignore[arg-type]
+        except Exception:
+            text = repr(text)
+    if not text:
+        return [text]
+
     versions: list[str] = [text]
-    zero_width = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", text)
-    if zero_width != text:
-        versions.append(zero_width)
+    cleaned = text
+    try:
+        cleaned = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", text)
+        if cleaned != text:
+            versions.append(cleaned)
+    except Exception:
+        cleaned = text
 
-    normalized = unicodedata.normalize("NFKC", zero_width)
-    if normalized != zero_width:
-        versions.append(normalized)
+    try:
+        normalized = unicodedata.normalize("NFKC", cleaned)
+        if normalized != cleaned:
+            versions.append(normalized)
+    except Exception:
+        pass
 
-    no_newlines = re.sub(r"[\n\r]", "", zero_width)
-    if no_newlines != zero_width:
-        versions.append(no_newlines)
+    try:
+        no_newlines = re.sub(r"[\n\r]", "", cleaned)
+        if no_newlines != cleaned:
+            versions.append(no_newlines)
+    except Exception:
+        pass
 
-    url_decoded = unquote(text)
-    if url_decoded != text:
-        versions.append(url_decoded)
+    try:
+        url_decoded = unquote(text)
+        if url_decoded != text:
+            versions.append(url_decoded)
+    except Exception:
+        pass
 
-    for match in re.finditer(r"[A-Za-z0-9+/]{20,}={0,2}", text):
-        chunk = match.group(0)
-        try:
-            decoded = base64.b64decode(chunk, validate=False).decode("utf-8", errors="ignore")
-        except Exception:
-            continue
-        if decoded:
-            versions.append(decoded)
+    try:
+        for match in re.finditer(r"[A-Za-z0-9+/]{20,}={0,2}", text):
+            chunk = match.group(0)
+            try:
+                decoded = base64.b64decode(chunk, validate=False).decode("utf-8", errors="ignore")
+            except Exception:
+                continue
+            if decoded:
+                versions.append(decoded)
+    except Exception:
+        pass
 
-    for match in re.finditer(r"(?:\\x[0-9a-fA-F]{2}){4,}", text):
-        chunk = match.group(0)
-        try:
-            decoded = bytes.fromhex(chunk.replace("\\x", "")).decode("utf-8", errors="ignore")
-        except Exception:
-            continue
-        if decoded:
-            versions.append(decoded)
+    try:
+        for match in re.finditer(r"(?:\\x[0-9a-fA-F]{2}){4,}", text):
+            chunk = match.group(0)
+            try:
+                decoded = bytes.fromhex(chunk.replace("\\x", "")).decode("utf-8", errors="ignore")
+            except Exception:
+                continue
+            if decoded:
+                versions.append(decoded)
+    except Exception:
+        pass
 
-    for match in re.finditer(r"(?:\\u[0-9a-fA-F]{4}){4,}", text):
-        chunk = match.group(0)
-        try:
-            decoded = chunk.encode("utf-8").decode("unicode_escape")
-        except Exception:
-            continue
-        if decoded:
-            versions.append(decoded)
+    try:
+        for match in re.finditer(r"(?:\\u[0-9a-fA-F]{4}){4,}", text):
+            chunk = match.group(0)
+            try:
+                decoded = chunk.encode("utf-8").decode("unicode_escape")
+            except Exception:
+                continue
+            if decoded:
+                versions.append(decoded)
+    except Exception:
+        pass
 
-    rot13 = codecs.decode(text, "rot_13")
-    if rot13:
-        versions.append(rot13)
+    try:
+        rot13 = codecs.decode(text, "rot_13")
+        if rot13:
+            versions.append(rot13)
+    except Exception:
+        pass
 
-    homoglyph_map = {
-        "\u0430": "a",
-        "\u0435": "e",
-        "\u043e": "o",
-        "\u0440": "p",
-        "\u0441": "c",
-        "\u0443": "y",
-        "\u0445": "x",
-        "\u0456": "i",
-        "\u0458": "j",
-        "\u04bb": "h",
-        "\u0455": "s",
-        "\u04c0": "l",
-        "\u0410": "A",
-        "\u0412": "B",
-        "\u0415": "E",
-        "\u041a": "K",
-        "\u041c": "M",
-        "\u041d": "H",
-        "\u041e": "O",
-        "\u0420": "P",
-        "\u0421": "C",
-        "\u0422": "T",
-        "\u0425": "X",
-    }
-    dehomoglyphed = text
-    for cyrillic, latin in homoglyph_map.items():
-        dehomoglyphed = dehomoglyphed.replace(cyrillic, latin)
-    if dehomoglyphed != text:
-        versions.append(dehomoglyphed)
+    try:
+        homoglyph_map = {
+            "\u0430": "a",
+            "\u0435": "e",
+            "\u043e": "o",
+            "\u0440": "p",
+            "\u0441": "c",
+            "\u0443": "y",
+            "\u0445": "x",
+            "\u0456": "i",
+            "\u0458": "j",
+            "\u04bb": "h",
+            "\u0455": "s",
+            "\u04c0": "l",
+            "\u0410": "A",
+            "\u0412": "B",
+            "\u0415": "E",
+            "\u041a": "K",
+            "\u041c": "M",
+            "\u041d": "H",
+            "\u041e": "O",
+            "\u0420": "P",
+            "\u0421": "C",
+            "\u0422": "T",
+            "\u0425": "X",
+        }
+        dehomoglyphed = text
+        for cyrillic, latin in homoglyph_map.items():
+            dehomoglyphed = dehomoglyphed.replace(cyrillic, latin)
+        if dehomoglyphed != text:
+            versions.append(dehomoglyphed)
+    except Exception:
+        pass
 
     deduped: list[str] = []
     seen: set[str] = set()
     for item in versions:
-        if item and item not in seen:
-            seen.add(item)
-            deduped.append(item)
-    return deduped
+        try:
+            if item not in seen:
+                seen.add(item)
+                deduped.append(item)
+        except Exception:
+            continue
+    return deduped or [text]
 
 
 class SecretScanner:
