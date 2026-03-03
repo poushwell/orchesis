@@ -735,60 +735,59 @@ def serve(port: int, policy_path: str, plugin_modules: tuple[str, ...]) -> None:
 
 
 @main.command("proxy")
-@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
+@click.option("--policy", "policy_path", type=click.Path(), default=None)
 @click.option("--port", type=int, default=8100)
 @click.option("--host", "listen_host", type=str, default="127.0.0.1")
-@click.option("--upstream", "upstream_url", type=str, required=True)
-@click.option(
-    "--mode",
-    "intercept_mode",
-    type=click.Choice(["tool_call", "all", "passthrough"]),
-    default="tool_call",
-)
-@click.option("--buffer-responses/--no-buffer-responses", default=True)
+@click.option("--upstream-anthropic", "upstream_anthropic", type=str, default="https://api.anthropic.com")
+@click.option("--upstream-openai", "upstream_openai", type=str, default="https://api.openai.com")
+@click.option("--timeout", "timeout_seconds", type=float, default=300.0)
+@click.option("--verbose", is_flag=True, default=False)
 def proxy_command(
-    policy_path: str,
+    policy_path: str | None,
     port: int,
     listen_host: str,
-    upstream_url: str,
-    intercept_mode: str,
-    buffer_responses: bool,
+    upstream_anthropic: str,
+    upstream_openai: str,
+    timeout_seconds: float,
+    verbose: bool,
 ) -> None:
-    """Run transparent HTTP proxy interceptor."""
-    _uvicorn, _create_api_app, OrchesisProxy, ProxyConfig = _load_server_runtime()
-    policy = load_policy(policy_path)
-    tracker = RateLimitTracker(persist_path=None)
-    config = ProxyConfig(
-        listen_host=listen_host,
-        listen_port=max(1, int(port)),
-        upstream_url=upstream_url,
-        intercept_mode=intercept_mode,
-        buffer_responses=bool(buffer_responses),
+    """Run stdlib HTTP proxy for Anthropic/OpenAI-compatible APIs."""
+    from orchesis.proxy import HTTPProxyConfig, LLMHTTPProxy
+
+    if verbose:
+        import logging
+
+        logging.basicConfig(level=logging.DEBUG)
+
+    safe_policy_path = None
+    if isinstance(policy_path, str) and policy_path.strip():
+        candidate = Path(policy_path).expanduser()
+        if not candidate.exists():
+            raise click.ClickException(f"Policy file not found: {candidate}")
+        safe_policy_path = str(candidate)
+
+    proxy_config = HTTPProxyConfig(
+        host=listen_host.strip() if isinstance(listen_host, str) and listen_host.strip() else "127.0.0.1",
+        port=max(1, int(port)),
+        timeout=max(1.0, float(timeout_seconds)),
+        upstream={
+            "anthropic": upstream_anthropic.strip(),
+            "openai": upstream_openai.strip(),
+        },
     )
-
-    def _engine(request_payload: dict[str, Any]):
-        return evaluate(request_payload, policy, state=tracker)
-
-    proxy = OrchesisProxy(engine=_engine, config=config, policy=policy)
+    proxy = LLMHTTPProxy(policy_path=safe_policy_path, config=proxy_config)
     click.echo("Orchesis Proxy starting...")
-    click.echo(f"Policy: {policy_path}")
-    click.echo(f"Mode: {intercept_mode}")
+    click.echo(f"Policy: {safe_policy_path or 'none (passthrough policy mode)'}")
     click.echo(f"Listening: http://{listen_host}:{port}")
-    click.echo(f"Upstream: {upstream_url}")
+    click.echo(f"Anthropic upstream: {proxy_config.upstream['anthropic']}")
+    click.echo(f"OpenAI upstream: {proxy_config.upstream['openai']}")
+    click.echo(f"Timeout: {proxy_config.timeout:.1f}s")
     click.echo("")
     click.echo("Press Ctrl+C to stop.")
-
-    async def _run() -> None:
-        await proxy.start()
-        try:
-            while True:
-                await asyncio.sleep(1.0)
-        finally:
-            await proxy.stop()
-
     try:
-        asyncio.run(_run())
+        proxy.start(blocking=True)
     except KeyboardInterrupt:
+        proxy.stop()
         click.echo("\nProxy stopped.")
 
 

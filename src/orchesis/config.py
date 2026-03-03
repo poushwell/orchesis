@@ -209,6 +209,47 @@ def _normalize_cost_controls(policy: dict[str, Any]) -> None:
         model_routing["rules"] = []
 
 
+def _normalize_proxy_config(policy: dict[str, Any]) -> None:
+    proxy_cfg = policy.get("proxy")
+    if not isinstance(proxy_cfg, dict):
+        return
+
+    port = proxy_cfg.get("port")
+    if isinstance(port, int | float):
+        proxy_cfg["port"] = int(max(1, min(65535, int(port))))
+    elif port is not None:
+        proxy_cfg.pop("port", None)
+
+    host = proxy_cfg.get("host")
+    if isinstance(host, str):
+        proxy_cfg["host"] = host.strip() or "127.0.0.1"
+    elif host is not None:
+        proxy_cfg.pop("host", None)
+
+    timeout = proxy_cfg.get("timeout")
+    if isinstance(timeout, int | float):
+        proxy_cfg["timeout"] = float(max(1.0, timeout))
+    elif timeout is not None:
+        proxy_cfg.pop("timeout", None)
+
+    cors = proxy_cfg.get("cors")
+    if isinstance(cors, bool):
+        proxy_cfg["cors"] = cors
+    elif cors is not None:
+        proxy_cfg["cors"] = bool(cors)
+
+    upstream = proxy_cfg.get("upstream")
+    if isinstance(upstream, dict):
+        normalized_upstream: dict[str, str] = {}
+        for key in ("anthropic", "openai"):
+            value = upstream.get(key)
+            if isinstance(value, str) and value.strip():
+                normalized_upstream[key] = value.strip()
+        proxy_cfg["upstream"] = normalized_upstream
+    elif upstream is not None:
+        proxy_cfg["upstream"] = {}
+
+
 def _is_number(value: Any) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool)
 
@@ -228,6 +269,7 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     _normalize_policy_paths(loaded)
     _normalize_tool_access_rate_limits(loaded)
     _normalize_cost_controls(loaded)
+    _normalize_proxy_config(loaded)
     return loaded
 
 

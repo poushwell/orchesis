@@ -3,18 +3,34 @@
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import json
+import logging
 import os
 import threading
 import time
 from typing import Any
 from urllib.parse import urlsplit
+from urllib.request import Request as UrlRequest, urlopen
+from urllib.error import HTTPError, URLError
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-import httpx
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+try:
+    import httpx
+except ModuleNotFoundError:  # pragma: no cover - optional dependency path
+    httpx = None  # type: ignore[assignment]
+
+try:
+    from fastapi import FastAPI, Request
+    from fastapi.responses import JSONResponse, Response
+except ModuleNotFoundError:  # pragma: no cover - optional dependency path
+    FastAPI = Any  # type: ignore[assignment]
+    Request = Any  # type: ignore[assignment]
+    JSONResponse = Any  # type: ignore[assignment]
+    Response = Any  # type: ignore[assignment]
 
 from orchesis.auth import AgentAuthenticator, CredentialStore
+from orchesis.cost_tracker import CostTracker
 from orchesis.credential_injector import CredentialInjector
 from orchesis.credential_vault import CredentialNotFoundError, build_vault_from_policy
 from orchesis.contrib.pii_detector import PiiDetector
@@ -25,13 +41,19 @@ from orchesis.events import EventBus
 from orchesis.forensics import Incident
 from orchesis.integrations import SlackEmitter, SlackNotifier, TelegramEmitter, TelegramNotifier
 from orchesis.integrations.forensics_emitter import ForensicsEmitter
+from orchesis.loop_detector import LoopDetector
 from orchesis.metrics import MetricsCollector
+from orchesis.model_router import ModelRouter
 from orchesis.otel import OTelEmitter, TraceContext
 from orchesis.policy_store import PolicyStore
 from orchesis.state import RateLimitTracker
 from orchesis.structured_log import StructuredLogger
 from orchesis.telemetry import JsonlEmitter
 from orchesis.webhooks import WebhookConfig, WebhookEmitter
+from orchesis.request_parser import parse_request, parse_response
+from orchesis.response_handler import ResponseProcessor, SECRET_PATTERNS
+
+_HTTP_PROXY_LOGGER = logging.getLogger("orchesis.http_proxy")
 
 
 @dataclass
@@ -1211,3 +1233,358 @@ def build_app_from_env() -> FastAPI:
 
 
 app = build_app_from_env()
+
+
+@dataclass
+class HTTPProxyConfig:
+    """Configuration for stdlib HTTP LLM proxy."""
+
+    host: str = "127.0.0.1"
+    port: int = 8100
+    timeout: float = 300.0
+    cors: bool = True
+    upstream: dict[str, str] = field(
+        default_factory=lambda: {
+            "anthropic": "https://api.anthropic.com",
+            "openai": "https://api.openai.com",
+        }
+    )
+
+
+class LLMHTTPProxy:
+    """HTTP proxy server for LLM APIs using stdlib HTTPServer."""
+
+    def __init__(
+        self,
+        *,
+        policy_path: str | None = None,
+        config: HTTPProxyConfig | None = None,
+    ) -> None:
+        self._config = config if isinstance(config, HTTPProxyConfig) else HTTPProxyConfig()
+        self._policy_path = policy_path
+        self._policy: dict[str, Any] = {}
+        if isinstance(policy_path, str) and policy_path.strip():
+            try:
+                self._policy = load_policy(policy_path)
+            except Exception:
+                self._policy = {}
+        budgets = self._policy.get("budgets")
+        self._budget_cfg = budgets if isinstance(budgets, dict) else {}
+        tool_costs = self._policy.get("tool_costs")
+        self._tool_costs = tool_costs if isinstance(tool_costs, dict) else {}
+        self._state_tracker = RateLimitTracker(persist_path=None)
+        self._cost_tracker = CostTracker(tool_costs=self._tool_costs)
+        loop_cfg = self._policy.get("loop_detection")
+        self._loop_cfg = loop_cfg if isinstance(loop_cfg, dict) else {}
+        self._loop_detector = None
+        if bool(self._loop_cfg.get("enabled", False)):
+            self._loop_detector = LoopDetector(
+                warn_threshold=int(self._loop_cfg.get("warn_threshold", 5)),
+                block_threshold=int(self._loop_cfg.get("block_threshold", 10)),
+                window_seconds=float(self._loop_cfg.get("window_seconds", 300)),
+                similarity_check=bool(self._loop_cfg.get("similarity_check", True)),
+            )
+        routing_cfg = self._policy.get("model_routing")
+        self._routing_cfg = routing_cfg if isinstance(routing_cfg, dict) else {}
+        self._router = ModelRouter(self._routing_cfg) if bool(self._routing_cfg.get("enabled", False)) else None
+        secret_cfg = self._policy.get("secret_scanning")
+        if not isinstance(secret_cfg, dict):
+            secret_cfg = self._policy.get("secrets") if isinstance(self._policy.get("secrets"), dict) else {}
+        self._scan_outbound = bool(secret_cfg.get("scan_outbound", True))
+        self._scan_response = bool(secret_cfg.get("scan_response", True))
+        self._response_processor = ResponseProcessor(
+            cost_tracker=self._cost_tracker,
+            secret_patterns=SECRET_PATTERNS,
+            scan_secrets=self._scan_response,
+        )
+        self._server: HTTPServer | None = None
+        self._stats_lock = threading.Lock()
+        self._stats = {
+            "requests": 0,
+            "blocked": 0,
+            "allowed": 0,
+            "errors": 0,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    @property
+    def stats(self) -> dict[str, Any]:
+        with self._stats_lock:
+            payload = dict(self._stats)
+        payload["cost_today"] = round(self._cost_tracker.get_daily_total(), 4)
+        payload["cost_by_tool"] = self._cost_tracker.get_tool_costs()
+        if self._loop_detector is not None:
+            payload["loop_stats"] = self._loop_detector.get_stats()
+        return payload
+
+    @property
+    def cost_tracker(self) -> CostTracker:
+        return self._cost_tracker
+
+    def start(self, blocking: bool = True) -> threading.Thread | None:
+        proxy = self
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                proxy._handle_post(self)
+
+            def do_GET(self) -> None:  # noqa: N802
+                proxy._handle_get(self)
+
+            def do_OPTIONS(self) -> None:  # noqa: N802
+                self.send_response(200)
+                if proxy._config.cors:
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+                    self.send_header("Access-Control-Allow-Headers", "*")
+                self.end_headers()
+
+            def log_message(self, fmt: str, *args: Any) -> None:
+                _HTTP_PROXY_LOGGER.debug("proxy %s - " + fmt, self.address_string(), *args)
+
+        self._server = HTTPServer((self._config.host, self._config.port), _Handler)
+        if blocking:
+            try:
+                self._server.serve_forever()
+            finally:
+                self._state_tracker.flush()
+            return None
+        thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        thread.start()
+        return thread
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+        self._state_tracker.flush()
+
+    def _inc(self, field: str) -> None:
+        with self._stats_lock:
+            self._stats[field] = int(self._stats.get(field, 0)) + 1
+
+    def _handle_get(self, handler: BaseHTTPRequestHandler) -> None:
+        if handler.path in {"/", "/health"}:
+            self._send_json(
+                handler,
+                200,
+                {
+                    "status": "ok",
+                    "proxy": f"{self._config.host}:{self._config.port}",
+                    "policy": self._policy_path or "none",
+                    "stats": self.stats,
+                    "model_routing": self._router is not None,
+                    "loop_detection": self._loop_detector is not None,
+                },
+            )
+            return
+        if handler.path == "/stats":
+            self._send_json(handler, 200, self.stats)
+            return
+        self._send_json(handler, 404, {"error": "Not found"})
+
+    def _handle_post(self, handler: BaseHTTPRequestHandler) -> None:
+        self._inc("requests")
+        proc_result: dict[str, Any] = {"cost": 0.0}
+        try:
+            length = int(handler.headers.get("Content-Length", "0") or "0")
+            raw_body = handler.rfile.read(max(0, length))
+            try:
+                body = json.loads(raw_body.decode("utf-8"))
+            except Exception:
+                self._send_json(handler, 400, {"error": "Invalid JSON in request body"})
+                return
+            if not isinstance(body, dict):
+                self._send_json(handler, 400, {"error": "Request body must be a JSON object"})
+                return
+
+            parsed_req = parse_request(body, handler.path)
+
+            if self._budget_cfg:
+                budget_status = self._cost_tracker.check_budget(self._budget_cfg)
+                if bool(budget_status.get("over_budget", False)):
+                    self._inc("blocked")
+                    self._send_json(
+                        handler,
+                        429,
+                        {
+                            "error": {
+                                "type": "budget_exceeded",
+                                "message": (
+                                    f"Daily budget exceeded. Spent ${budget_status.get('daily_spent', 0):.4f}"
+                                ),
+                            }
+                        },
+                    )
+                    return
+
+            for call in parsed_req.tool_calls:
+                eval_request = {
+                    "tool": call.name,
+                    "params": call.params if isinstance(call.params, dict) else {},
+                    "context": {"path": handler.path, "provider": parsed_req.provider},
+                }
+                decision = evaluate(eval_request, self._policy, state=self._state_tracker)
+                if not decision.allowed:
+                    self._inc("blocked")
+                    reason = decision.reasons[0] if decision.reasons else "blocked_by_policy"
+                    self._send_json(
+                        handler,
+                        403,
+                        {"error": {"type": "policy_violation", "message": f"Tool '{call.name}' blocked: {reason}"}},
+                    )
+                    return
+
+                if self._loop_detector is not None:
+                    estimated_cost = float(self._tool_costs.get(call.name, 0.001))
+                    loop_state = self._loop_detector.check(call.name, call.params, cost_per_call=estimated_cost)
+                    if loop_state.get("action") == "block":
+                        self._inc("blocked")
+                        self._send_json(
+                            handler,
+                            429,
+                            {"error": {"type": "loop_detected", "message": str(loop_state.get("message", "loop"))}},
+                        )
+                        return
+
+            if self._router is not None and parsed_req.content_text:
+                route = self._router.route(
+                    parsed_req.content_text,
+                    tool_name=parsed_req.tool_calls[0].name if parsed_req.tool_calls else None,
+                )
+                routed_model = route.get("model")
+                if isinstance(routed_model, str) and routed_model and routed_model != parsed_req.model:
+                    body["model"] = routed_model
+
+            if self._scan_outbound and parsed_req.content_text:
+                for pattern, secret_type in SECRET_PATTERNS:
+                    if pattern.search(parsed_req.content_text):
+                        self._inc("blocked")
+                        self._send_json(
+                            handler,
+                            403,
+                            {
+                                "error": {
+                                    "type": "secret_detected",
+                                    "message": f"Request contains potential {secret_type}",
+                                }
+                            },
+                        )
+                        return
+
+            provider = self._detect_provider(parsed_req.provider, handler.headers)
+            upstream_base = self._get_upstream(provider, handler.headers)
+            upstream_url = f"{upstream_base.rstrip('/')}{handler.path}"
+            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            upstream_headers = self._build_forward_headers(handler.headers, payload)
+            req = UrlRequest(upstream_url, data=payload, headers=upstream_headers, method="POST")
+
+            resp_status = 200
+            resp_headers: dict[str, str] = {}
+            resp_body: bytes = b""
+            try:
+                with urlopen(req, timeout=self._config.timeout) as upstream_resp:
+                    resp_status = int(getattr(upstream_resp, "status", 200))
+                    resp_headers = dict(upstream_resp.headers.items())
+                    resp_body = upstream_resp.read()
+            except HTTPError as error:
+                resp_status = int(error.code)
+                resp_headers = dict(error.headers.items()) if error.headers is not None else {}
+                resp_body = error.read()
+            except URLError as error:
+                self._inc("errors")
+                self._send_json(
+                    handler,
+                    502,
+                    {"error": {"type": "upstream_error", "message": f"Failed to connect to upstream: {error}"}},
+                )
+                return
+
+            try:
+                decoded = json.loads(resp_body.decode("utf-8"))
+                if isinstance(decoded, dict):
+                    parsed_resp = parse_response(decoded, provider)
+                    proc_result = self._response_processor.process(parsed_resp)
+                    if not proc_result.get("allowed", True):
+                        self._inc("blocked")
+                        self._send_json(
+                            handler,
+                            403,
+                            {
+                                "error": {
+                                    "type": "secret_detected_in_response",
+                                    "message": proc_result.get("reason", "response contains secrets"),
+                                }
+                            },
+                        )
+                        return
+            except Exception:
+                proc_result = {"cost": 0.0}
+
+            handler.send_response(resp_status)
+            self._copy_upstream_headers(handler, resp_headers, len(resp_body))
+            handler.send_header("X-Orchesis-Cost", str(round(float(proc_result.get("cost", 0.0)), 6)))
+            handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
+            if self._config.cors:
+                handler.send_header("Access-Control-Allow-Origin", "*")
+            handler.end_headers()
+            handler.wfile.write(resp_body)
+            self._inc("allowed")
+        except Exception as error:  # noqa: BLE001
+            _HTTP_PROXY_LOGGER.exception("proxy runtime error")
+            self._inc("errors")
+            self._send_json(handler, 500, {"error": {"type": "proxy_error", "message": str(error)}})
+
+    def _build_forward_headers(self, source: Any, payload: bytes) -> dict[str, str]:
+        headers: dict[str, str] = {"Content-Type": "application/json", "Content-Length": str(len(payload))}
+        pass_headers = {
+            "authorization",
+            "x-api-key",
+            "anthropic-version",
+            "anthropic-beta",
+            "openai-organization",
+            "openai-project",
+        }
+        for key in source.keys():
+            lowered = str(key).lower()
+            if lowered in pass_headers:
+                value = source.get(key)
+                if isinstance(value, str):
+                    headers[str(key)] = value
+        return headers
+
+    @staticmethod
+    def _copy_upstream_headers(handler: BaseHTTPRequestHandler, headers: dict[str, str], body_len: int) -> None:
+        skip = {"transfer-encoding", "connection", "content-length"}
+        for key, value in headers.items():
+            if str(key).lower() in skip:
+                continue
+            handler.send_header(str(key), str(value))
+        handler.send_header("Content-Length", str(body_len))
+
+    def _get_upstream(self, provider: str, headers: Any) -> str:
+        custom = headers.get("X-Orchesis-Upstream")
+        if isinstance(custom, str) and custom.strip():
+            return custom.strip().rstrip("/")
+        return self._config.upstream.get(provider, self._config.upstream.get("openai", "https://api.openai.com"))
+
+    @staticmethod
+    def _detect_provider(parsed_provider: str, headers: Any) -> str:
+        anthropic_header = headers.get("x-api-key") or headers.get("Anthropic-Version")
+        if anthropic_header:
+            return "anthropic"
+        auth = headers.get("Authorization")
+        if isinstance(auth, str) and auth.startswith("Bearer "):
+            return "openai"
+        return parsed_provider if parsed_provider in {"anthropic", "openai"} else "openai"
+
+    def _send_json(self, handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        handler.send_response(status)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
+        if self._config.cors:
+            handler.send_header("Access-Control-Allow-Origin", "*")
+        handler.end_headers()
+        handler.wfile.write(body)
