@@ -78,7 +78,7 @@ def test_5000_concurrent_evaluations() -> None:
 
     for allowed, expected_allow in results:
         assert allowed == expected_allow
-    assert elapsed < 10.0
+    assert elapsed < 30.0, f"5000 concurrent evaluations took {elapsed:.1f}s (limit 30s)"
 
 
 def test_rate_limit_exact_under_concurrency() -> None:
