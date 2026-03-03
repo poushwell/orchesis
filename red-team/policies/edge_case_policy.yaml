@@ -1,0 +1,29 @@
+version: "1.0"
+name: "red-team-edge-cases"
+tool_access:
+  mode: allowlist
+  default: deny
+  allowed:
+    - read_file
+    - Read_File
+    - " shell_execute "
+  denied:
+    - shell_execute
+    - read_file
+  rate_limits:
+    read_file: 1/second
+    web_search: 100/hour
+denied_paths:
+  - /etc
+  - "/etc/../etc"
+  - "../../../../etc"
+rules:
+  - effect: allow
+    tool_name: read_file
+    resource: "*"
+  - effect: deny
+    tool_name: read_file
+    resource: "/etc/*"
+  - effect: "on"
+  - effect: 1
+  - effect: null

@@ -1,0 +1,32 @@
+version: "1.0"
+name: "red-team-strict"
+tool_access:
+  mode: allowlist
+  default: deny
+  allowed:
+    - read_file
+    - web_search
+  denied:
+    - shell_execute
+    - run_command
+    - bash
+    - eval
+  rate_limits:
+    read_file: 5/minute
+    web_search: 3/minute
+denied_paths:
+  - /etc
+  - /etc/passwd
+  - /etc/shadow
+  - ~/.ssh
+  - ~/.aws
+  - ~/.env
+  - /root
+secret_scanning:
+  enabled: true
+  block_on_detection: true
+pii_detection:
+  enabled: true
+  auto_redact: true
+rate_limit_per_minute: 30
+daily_budget: 10.00

@@ -1,0 +1,5 @@
+version: "1.0"
+name: "red-team-permissive"
+tool_access:
+  mode: denylist
+  default: allow
