@@ -1,0 +1,617 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Free MCP Security Scanner. Paste MCP config JSON and get a security score with findings.">
+  <title>Is Your MCP Server Safe? | MCP Security Scanner</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --panel-soft: #1f2937;
+      --border: #334155;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --blue: #3b82f6;
+      --green: #16a34a;
+      --yellow: #ca8a04;
+      --orange: #ea580c;
+      --red: #dc2626;
+      --radius: 14px;
+      --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      background: radial-gradient(circle at top right, #16264f 0%, var(--bg) 40%);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+
+    .container {
+      width: min(1100px, 92vw);
+      margin: 0 auto;
+      padding: 28px 0 48px;
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+
+    .logo {
+      font-weight: 800;
+      letter-spacing: 0.4px;
+      color: #bfdbfe;
+      font-size: 14px;
+      text-transform: uppercase;
+      border: 1px solid #1e3a8a;
+      background: #172554;
+      border-radius: 999px;
+      padding: 6px 12px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(26px, 3vw, 42px);
+      line-height: 1.1;
+    }
+
+    .tagline {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: clamp(14px, 2vw, 18px);
+    }
+
+    .privacy-banner {
+      margin: 18px 0 20px;
+      border: 1px solid #1d4ed8;
+      background: linear-gradient(180deg, #172554 0%, #111827 100%);
+      border-radius: var(--radius);
+      padding: 12px 14px;
+      color: #dbeafe;
+      font-weight: 600;
+    }
+
+    .panel {
+      background: rgba(17, 24, 39, 0.92);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .input-panel { padding: 18px; }
+    .input-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+    .input-title {
+      font-size: 18px;
+      font-weight: 700;
+    }
+    .hint {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 320px;
+      resize: vertical;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 14px;
+      background: #0b1222;
+      color: #dbeafe;
+      font-size: 13px;
+      line-height: 1.5;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+    textarea:focus {
+      outline: none;
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.25);
+    }
+
+    .buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 12px;
+      align-items: center;
+    }
+    button {
+      border: 1px solid #3b82f6;
+      background: #1d4ed8;
+      color: white;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 120ms ease, filter 120ms ease, background 120ms ease;
+    }
+    button:hover { filter: brightness(1.06); }
+    button:active { transform: translateY(1px); }
+    .btn-secondary {
+      background: #1f2937;
+      border-color: #475569;
+      color: #d1d5db;
+    }
+    .btn-share {
+      background: #065f46;
+      border-color: #047857;
+    }
+    .btn-inline {
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+
+    .error {
+      display: none;
+      margin-top: 10px;
+      border: 1px solid #7f1d1d;
+      background: #1f1418;
+      color: #fecaca;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 13px;
+    }
+
+    .results {
+      display: none;
+      margin-top: 18px;
+      padding: 18px;
+      animation: rise 250ms ease;
+    }
+
+    @keyframes rise {
+      from { transform: translateY(6px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+
+    .results-top {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      gap: 18px;
+      align-items: stretch;
+    }
+    @media (max-width: 800px) {
+      .results-top { grid-template-columns: 1fr; }
+    }
+
+    .score-card {
+      border: 1px solid #334155;
+      border-radius: 12px;
+      background: #0b1222;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 16px;
+    }
+
+    .score-ring {
+      width: 140px;
+      height: 140px;
+      border-radius: 50%;
+      border: 8px solid #334155;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      transition: border-color 180ms ease;
+    }
+    .score-value { font-size: 34px; font-weight: 800; line-height: 1; }
+    .score-letter { font-size: 14px; color: var(--muted); }
+
+    .summary-card {
+      border: 1px solid #334155;
+      border-radius: 12px;
+      background: #0b1222;
+      padding: 14px;
+    }
+    .summary-title { margin: 0 0 10px; font-size: 16px; }
+    .summary-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .pill {
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      border: 1px solid transparent;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+    }
+    .pill-critical { background: #2b1115; color: #fecaca; border-color: #7f1d1d; }
+    .pill-high { background: #311a10; color: #fed7aa; border-color: #9a3412; }
+    .pill-medium { background: #2e250c; color: #fde68a; border-color: #854d0e; }
+    .pill-low { background: #102038; color: #bfdbfe; border-color: #1d4ed8; }
+    .pill-info { background: #1e293b; color: #cbd5e1; border-color: #334155; }
+
+    .findings {
+      margin-top: 14px;
+      display: grid;
+      gap: 10px;
+    }
+    .finding {
+      border: 1px solid #334155;
+      border-radius: 12px;
+      overflow: hidden;
+      background: #0b1222;
+    }
+    .finding-head {
+      width: 100%;
+      background: transparent;
+      border: 0;
+      color: inherit;
+      text-align: left;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      cursor: pointer;
+    }
+    .finding-head:hover { background: #111c33; }
+    .finding-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+    }
+    .badge {
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.3px;
+    }
+    .finding-body {
+      border-top: 1px solid #233047;
+      padding: 12px 14px;
+      display: none;
+      color: #cbd5e1;
+      font-size: 14px;
+    }
+    .finding.open .finding-body { display: block; }
+    .finding small { color: var(--muted); display: block; margin-top: 8px; }
+
+    .cta {
+      margin-top: 16px;
+      border: 1px solid #1d4ed8;
+      background: linear-gradient(180deg, rgba(30, 64, 175, 0.2), rgba(17, 24, 39, 0.9));
+      border-radius: 12px;
+      padding: 14px;
+      color: #dbeafe;
+    }
+    .cta a { color: #93c5fd; font-weight: 700; }
+
+    footer {
+      margin-top: 24px;
+      color: var(--muted);
+      font-size: 13px;
+      border-top: 1px solid #1e293b;
+      padding-top: 14px;
+    }
+    footer a { color: #93c5fd; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div>
+        <h1>Is Your MCP Server Safe?</h1>
+        <div class="tagline">Free MCP Security Scanner</div>
+      </div>
+      <div class="logo">ORCHESIS</div>
+    </header>
+
+    <div class="privacy-banner">Privacy first: your config never leaves your browser. Zero data collection.</div>
+
+    <section class="panel input-panel">
+      <div class="input-top">
+        <div class="input-title">Paste MCP config JSON</div>
+        <div class="hint">Tip: press Ctrl+Enter to scan</div>
+      </div>
+      <textarea id="configInput" spellcheck="false" placeholder='{
+  "mcpServers": {
+    "docs-search": {
+      "command": "uvx",
+      "args": ["mcp-docs-search==1.3.2"],
+      "description": "Search docs",
+      "allowedTools": ["search_docs"]
+    }
+  }
+}'></textarea>
+      <div class="buttons">
+        <button id="scanBtn">Scan Configuration</button>
+        <button id="loadVulnBtn" class="btn-secondary btn-inline">Try vulnerable example</button>
+        <button id="loadSecureBtn" class="btn-secondary btn-inline">Try secure example</button>
+        <button id="loadModerateBtn" class="btn-secondary btn-inline">Try moderate example</button>
+      </div>
+      <div id="errorBox" class="error"></div>
+    </section>
+
+    <section id="results" class="panel results">
+      <div class="results-top">
+        <div class="score-card">
+          <div id="scoreRing" class="score-ring">
+            <div>
+              <div id="scoreValue" class="score-value">0</div>
+              <div id="scoreLetter" class="score-letter">Grade -</div>
+            </div>
+          </div>
+          <div id="scoreLabel" style="color: var(--muted); font-size: 14px;">Not scanned yet</div>
+        </div>
+        <div class="summary-card">
+          <h3 class="summary-title">Security findings summary</h3>
+          <div id="summaryBar" class="summary-bar"></div>
+          <div class="buttons" style="margin-top: 12px;">
+            <button id="shareBtn" class="btn-share">Copy share text</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="findingsList" class="findings"></div>
+
+      <div class="cta">
+        Powered by <strong>Orchesis</strong> - open-source AI agent security runtime.
+        Harden runtime policy, proxy enforcement, red-team tests and compliance mapping in one stack.
+        <a href="https://github.com/poushwell/orchesis" target="_blank" rel="noopener noreferrer">View on GitHub</a>.
+      </div>
+    </section>
+
+    <footer>
+      <div>Powered by Orchesis - Open-source AI agent security runtime.</div>
+      <div>All analysis runs locally in your browser. No config data is sent to any server.</div>
+    </footer>
+  </div>
+
+  <script src="./scanner-engine.js"></script>
+  <script>
+    const EXAMPLES = {
+      vulnerable: {
+        "mcpServers": {
+          "shell-access": {
+            "command": "bash",
+            "args": ["-c", "node server.js; echo $SECRET"],
+            "env": {
+              "OPENAI_API_KEY": "sk-proj-abc123def456ghi789jkl012mno345pqr678stu901vwx234yz",
+              "DATABASE_URL": "postgresql://admin:password123@db.example.com:5432/prod"
+            }
+          },
+          "risky-fetch": {
+            "command": "npx",
+            "args": ["mcp-server-fetch"],
+            "env": {}
+          },
+          "remote-unencrypted": {
+            "transport": "sse",
+            "url": "http://remote-server.example.com:8080/mcp"
+          },
+          "filesystem-full": {
+            "command": "npx",
+            "args": ["mcp-server-filesystem", "/"],
+            "allowedDirectories": ["/"]
+          },
+          "disabled-old": {
+            "command": "node",
+            "args": ["old-server.js"],
+            "disabled": true
+          }
+        }
+      },
+      moderate: {
+        "mcpServers": {
+          "search": {
+            "command": "npx",
+            "args": ["-y", "mcp-server-brave-search@1.2.0"],
+            "env": { "BRAVE_API_KEY": "" }
+          },
+          "filesystem": {
+            "command": "npx",
+            "args": ["-y", "mcp-server-filesystem@1.0.0", "./workspace"],
+            "description": "Access workspace files only"
+          },
+          "remote-api": {
+            "transport": "sse",
+            "url": "https://api.example.com/mcp",
+            "description": "Remote API access"
+          }
+        }
+      },
+      secure: {
+        "mcpServers": {
+          "docs-search": {
+            "command": "uvx",
+            "args": ["mcp-docs-search==1.3.2"],
+            "description": "Search project documentation",
+            "env": {},
+            "allowedTools": ["search_docs", "get_doc"]
+          },
+          "git-helper": {
+            "command": "npx",
+            "args": ["-y", "@company/mcp-git-helper@2.1.0", "--readonly"],
+            "description": "Read-only git operations",
+            "allowedTools": ["git_log", "git_diff", "git_blame"],
+            "env": {}
+          }
+        }
+      }
+    };
+
+    const scanner = new MCPSecurityScanner();
+    const input = document.getElementById("configInput");
+    const scanBtn = document.getElementById("scanBtn");
+    const errorBox = document.getElementById("errorBox");
+    const results = document.getElementById("results");
+    const scoreRing = document.getElementById("scoreRing");
+    const scoreValue = document.getElementById("scoreValue");
+    const scoreLetter = document.getElementById("scoreLetter");
+    const scoreLabel = document.getElementById("scoreLabel");
+    const summaryBar = document.getElementById("summaryBar");
+    const findingsList = document.getElementById("findingsList");
+    const shareBtn = document.getElementById("shareBtn");
+
+    function setError(message) {
+      errorBox.textContent = message || "";
+      errorBox.style.display = message ? "block" : "none";
+    }
+
+    function severityBadgeClass(label) {
+      if (label === "CRITICAL") return "pill-critical";
+      if (label === "HIGH") return "pill-high";
+      if (label === "MEDIUM") return "pill-medium";
+      if (label === "LOW") return "pill-low";
+      return "pill-info";
+    }
+
+    function animateScore(target, color) {
+      const start = Number(scoreValue.textContent) || 0;
+      const diff = target - start;
+      const duration = 700;
+      const started = performance.now();
+      function tick(now) {
+        const p = Math.min(1, (now - started) / duration);
+        const eased = 1 - Math.pow(1 - p, 3);
+        scoreValue.textContent = String(Math.round(start + diff * eased));
+        if (p < 1) {
+          requestAnimationFrame(tick);
+        }
+      }
+      scoreRing.style.borderColor = color;
+      requestAnimationFrame(tick);
+    }
+
+    function renderSummary(summary) {
+      summaryBar.innerHTML = "";
+      const entries = [
+        ["CRITICAL", summary.CRITICAL || 0],
+        ["HIGH", summary.HIGH || 0],
+        ["MEDIUM", summary.MEDIUM || 0],
+        ["LOW", summary.LOW || 0],
+        ["INFO", summary.INFO || 0]
+      ];
+      entries.forEach(([label, count]) => {
+        const el = document.createElement("span");
+        el.className = `pill ${severityBadgeClass(label)}`;
+        el.textContent = `${count} ${label}`;
+        summaryBar.appendChild(el);
+      });
+    }
+
+    function renderFindings(findings) {
+      findingsList.innerHTML = "";
+      if (!findings.length) {
+        const box = document.createElement("div");
+        box.className = "finding open";
+        box.innerHTML = `
+          <button class="finding-head" type="button">
+            <span class="finding-title"><span class="badge pill-info">INFO</span> No findings</span>
+            <span>Safe baseline</span>
+          </button>
+          <div class="finding-body" style="display:block;">
+            No obvious issues were detected in this config.
+          </div>
+        `;
+        findingsList.appendChild(box);
+        return;
+      }
+
+      findings.forEach((finding) => {
+        const wrapper = document.createElement("div");
+        wrapper.className = "finding";
+        const label = finding.severity.label;
+        wrapper.innerHTML = `
+          <button class="finding-head" type="button">
+            <span class="finding-title">
+              <span class="badge ${severityBadgeClass(label)}">${label}</span>
+              ${finding.title}
+            </span>
+            <span>Details</span>
+          </button>
+          <div class="finding-body">
+            <div>${finding.description}</div>
+            <small><strong>Remediation:</strong> ${finding.remediation}</small>
+          </div>
+        `;
+        const head = wrapper.querySelector(".finding-head");
+        head.addEventListener("click", () => {
+          wrapper.classList.toggle("open");
+        });
+        findingsList.appendChild(wrapper);
+      });
+    }
+
+    function scanNow() {
+      setError("");
+      const text = input.value.trim();
+      if (!text) {
+        setError("Paste MCP config JSON first.");
+        return;
+      }
+
+      const result = scanner.scan(text);
+      if (result.score === 0 && result.findings.length === 1 && result.findings[0].title === "Invalid JSON") {
+        setError(result.findings[0].description);
+        return;
+      }
+
+      results.style.display = "block";
+      animateScore(result.score, result.grade.color);
+      scoreLetter.textContent = `Grade ${result.grade.letter} - ${result.grade.label}`;
+      scoreLabel.textContent = `Scanned at ${new Date(result.scannedAt).toLocaleString()}`;
+      renderSummary(result.summary);
+      renderFindings(result.findings);
+      results.scrollIntoView({ behavior: "smooth", block: "start" });
+
+      shareBtn.onclick = async () => {
+        const shareText = `My MCP security score: ${result.score}/100 — scanned with Orchesis (orchesis.dev)`;
+        try {
+          await navigator.clipboard.writeText(shareText);
+          shareBtn.textContent = "Copied";
+          setTimeout(() => { shareBtn.textContent = "Copy share text"; }, 1300);
+        } catch (err) {
+          setError("Clipboard unavailable. You can copy manually: " + shareText);
+        }
+      };
+    }
+
+    scanBtn.addEventListener("click", scanNow);
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && event.ctrlKey) {
+        event.preventDefault();
+        scanNow();
+      }
+    });
+
+    document.getElementById("loadVulnBtn").addEventListener("click", () => {
+      input.value = JSON.stringify(EXAMPLES.vulnerable, null, 2);
+      setError("");
+    });
+    document.getElementById("loadSecureBtn").addEventListener("click", () => {
+      input.value = JSON.stringify(EXAMPLES.secure, null, 2);
+      setError("");
+    });
+    document.getElementById("loadModerateBtn").addEventListener("click", () => {
+      input.value = JSON.stringify(EXAMPLES.moderate, null, 2);
+      setError("");
+    });
+  </script>
+</body>
+</html>
+

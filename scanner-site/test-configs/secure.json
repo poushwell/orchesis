@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "docs-search": {
+      "command": "uvx",
+      "args": ["mcp-docs-search==1.3.2"],
+      "description": "Search project documentation",
+      "env": {},
+      "allowedTools": ["search_docs", "get_doc"]
+    },
+    "git-helper": {
+      "command": "npx",
+      "args": ["-y", "@company/mcp-git-helper@2.1.0", "--readonly"],
+      "description": "Read-only git operations",
+      "allowedTools": ["git_log", "git_diff", "git_blame"],
+      "env": {}
+    }
+  }
+}
+

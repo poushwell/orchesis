@@ -1,0 +1,67 @@
+{
+  "examples": [
+    {
+      "name": "Local docs + git helper",
+      "notes": "Generally secure local workflow with pinned versions.",
+      "config": {
+        "mcpServers": {
+          "docs-search": {
+            "command": "uvx",
+            "args": ["mcp-docs-search==1.3.2"],
+            "description": "Search docs",
+            "allowedTools": ["search_docs"]
+          },
+          "git-helper": {
+            "command": "npx",
+            "args": ["-y", "@company/mcp-git-helper@2.1.0", "--readonly"],
+            "description": "Read-only git",
+            "allowedTools": ["git_log", "git_diff"]
+          }
+        }
+      }
+    },
+    {
+      "name": "Remote HTTP server with weak defaults",
+      "notes": "Shows plaintext transport and broad permissions.",
+      "config": {
+        "mcpServers": {
+          "remote-toolkit": {
+            "transport": "sse",
+            "url": "http://mcp.example.org:8080/mcp",
+            "allowedTools": ["*"]
+          }
+        }
+      }
+    },
+    {
+      "name": "Filesystem helper with root access",
+      "notes": "Common risky setup copied from snippets.",
+      "config": {
+        "mcpServers": {
+          "filesystem": {
+            "command": "npx",
+            "args": ["mcp-server-filesystem", "/"],
+            "allowedDirectories": ["/"]
+          }
+        }
+      }
+    },
+    {
+      "name": "Hardcoded secrets in env",
+      "notes": "Typical migration mistake from local experiments.",
+      "config": {
+        "mcpServers": {
+          "api-client": {
+            "command": "node",
+            "args": ["server.js"],
+            "env": {
+              "OPENAI_API_KEY": "sk-proj-REPLACE-ME-EXAMPLE-ONLY-0123456789",
+              "GITHUB_TOKEN": "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+            }
+          }
+        }
+      }
+    }
+  ]
+}
+
