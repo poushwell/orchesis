@@ -140,6 +140,13 @@ def _load_mcp_proxy_runtime() -> tuple[Any, Any, Any]:
     return McpStdioProxy, McpProxySettings, run_stdio_proxy
 
 
+def _load_mcp_server_runtime() -> tuple[Any, Any]:
+    from orchesis.mcp_server import MCPServer
+    from orchesis.mcp_tools import build_tool_registry
+
+    return MCPServer, build_tool_registry
+
+
 def _load_auth_stack(credentials_file: str, mode: str = "enforce") -> tuple[CredentialStore, AgentAuthenticator]:
     store = CredentialStore(credentials_file)
     credentials = store.load() if store.exists() else {}
@@ -834,6 +841,33 @@ def mcp_proxy_command(
         sync_poll_interval_seconds=max(1, sync_poll_interval),
     )
     asyncio.run(run_stdio_proxy(settings))
+
+
+@main.group("mcp")
+def mcp_group() -> None:
+    """Run Orchesis as an MCP server and inspect exposed tools."""
+
+
+@mcp_group.command("serve")
+@click.option("--policy", "policy_path", type=click.Path(), default=None)
+def mcp_serve(policy_path: str | None) -> None:
+    """Serve Orchesis MCP tools over stdio JSON-RPC."""
+    MCPServer, build_tool_registry = _load_mcp_server_runtime()
+    registry = build_tool_registry(policy_path=policy_path)
+    server = MCPServer(registry)
+    server.run()
+
+
+@mcp_group.command("tools")
+@click.option("--policy", "policy_path", type=click.Path(), default=None)
+def mcp_tools_command(policy_path: str | None) -> None:
+    """List available MCP tool names and descriptions."""
+    _MCPServer, build_tool_registry = _load_mcp_server_runtime()
+    registry = build_tool_registry(policy_path=policy_path)
+    click.echo("Available MCP tools:")
+    for name, tool in sorted(registry.items(), key=lambda item: item[0]):
+        description = str(tool.get("description", ""))
+        click.echo(f"- {name}: {description}")
 
 
 @main.command("nodes")
