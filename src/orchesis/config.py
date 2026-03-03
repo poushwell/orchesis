@@ -281,6 +281,199 @@ def _normalize_kill_switch(policy: dict[str, Any]) -> None:
     policy["kill_switch"] = raw
 
 
+def _normalize_cascade(policy: dict[str, Any]) -> None:
+    raw = policy.get("cascade")
+    if raw is None:
+        policy["cascade"] = {"enabled": False, "levels": {}, "auto_escalate": {}, "cache": {}}
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("cascade must be a mapping")
+
+    raw["enabled"] = bool(raw.get("enabled", False))
+    allowed_models = {
+        "gpt-4o",
+        "gpt-4o-mini",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "gpt-4.1-nano",
+        "claude-opus-4",
+        "claude-sonnet-4",
+        "claude-haiku-4",
+    }
+
+    levels = raw.get("levels")
+    if levels is None:
+        levels = {}
+    if not isinstance(levels, dict):
+        raise PolicyError("cascade.levels must be a mapping")
+    normalized_levels: dict[str, dict[str, Any]] = {}
+    for level_name in ("trivial", "simple", "medium", "complex"):
+        level_cfg = levels.get(level_name)
+        if not isinstance(level_cfg, dict):
+            continue
+        normalized_level: dict[str, Any] = {}
+        action = level_cfg.get("action")
+        if isinstance(action, str) and action.strip():
+            normalized_level["action"] = action.strip().lower()
+        model = level_cfg.get("model")
+        if isinstance(model, str) and model.strip():
+            model_name = model.strip()
+            if model_name not in allowed_models:
+                raise PolicyError(f"cascade.levels.{level_name}.model is unsupported: {model_name}")
+            normalized_level["model"] = model_name
+        max_tokens = level_cfg.get("max_tokens")
+        if _is_number(max_tokens):
+            normalized_level["max_tokens"] = int(max(1, int(max_tokens)))
+        normalized_levels[level_name] = normalized_level
+    raw["levels"] = normalized_levels
+
+    auto = raw.get("auto_escalate")
+    if auto is None:
+        auto = {}
+    if not isinstance(auto, dict):
+        raise PolicyError("cascade.auto_escalate must be a mapping")
+    auto["enabled"] = bool(auto.get("enabled", True))
+    auto["on_error"] = bool(auto.get("on_error", True))
+    auto["on_low_confidence"] = bool(auto.get("on_low_confidence", True))
+    raw["auto_escalate"] = auto
+
+    cache = raw.get("cache")
+    if cache is None:
+        cache = {}
+    if not isinstance(cache, dict):
+        raise PolicyError("cascade.cache must be a mapping")
+    cache["enabled"] = bool(cache.get("enabled", True))
+    ttl_seconds = cache.get("ttl_seconds", 300)
+    max_entries = cache.get("max_entries", 1000)
+    cache["ttl_seconds"] = int(ttl_seconds) if _is_number(ttl_seconds) and int(ttl_seconds) > 0 else 300
+    cache["max_entries"] = int(max_entries) if _is_number(max_entries) and int(max_entries) > 0 else 1000
+    raw["cache"] = cache
+
+    policy["cascade"] = raw
+
+
+def _normalize_circuit_breaker(policy: dict[str, Any]) -> None:
+    raw = policy.get("circuit_breaker")
+    if raw is None:
+        policy["circuit_breaker"] = {
+            "enabled": False,
+            "error_threshold": 5,
+            "window_seconds": 60,
+            "cooldown_seconds": 30,
+            "max_cooldown_seconds": 300,
+            "half_open_max_requests": 1,
+            "fallback_status": 503,
+            "fallback_message": "Service temporarily unavailable. Circuit breaker is open.",
+        }
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("circuit_breaker must be a mapping")
+
+    raw["enabled"] = bool(raw.get("enabled", False))
+    error_threshold = raw.get("error_threshold", 5)
+    window_seconds = raw.get("window_seconds", 60)
+    cooldown_seconds = raw.get("cooldown_seconds", 30)
+    max_cooldown_seconds = raw.get("max_cooldown_seconds", 300)
+    half_open_max_requests = raw.get("half_open_max_requests", 1)
+    fallback_status = raw.get("fallback_status", 503)
+    fallback_message = raw.get("fallback_message", "Service temporarily unavailable. Circuit breaker is open.")
+
+    if not _is_number(error_threshold) or int(error_threshold) <= 0:
+        raise PolicyError("circuit_breaker.error_threshold must be > 0")
+    if not _is_number(window_seconds) or float(window_seconds) <= 0:
+        raise PolicyError("circuit_breaker.window_seconds must be > 0")
+    if not _is_number(cooldown_seconds) or float(cooldown_seconds) <= 0:
+        raise PolicyError("circuit_breaker.cooldown_seconds must be > 0")
+    if not _is_number(max_cooldown_seconds) or float(max_cooldown_seconds) <= 0:
+        raise PolicyError("circuit_breaker.max_cooldown_seconds must be > 0")
+    if not _is_number(half_open_max_requests) or int(half_open_max_requests) <= 0:
+        raise PolicyError("circuit_breaker.half_open_max_requests must be > 0")
+    if not _is_number(fallback_status) or int(fallback_status) <= 0:
+        raise PolicyError("circuit_breaker.fallback_status must be > 0")
+
+    raw["error_threshold"] = int(error_threshold)
+    raw["window_seconds"] = int(window_seconds)
+    raw["cooldown_seconds"] = int(cooldown_seconds)
+    raw["max_cooldown_seconds"] = int(max_cooldown_seconds)
+    raw["half_open_max_requests"] = int(half_open_max_requests)
+    raw["fallback_status"] = int(fallback_status)
+    raw["fallback_message"] = str(fallback_message)
+    policy["circuit_breaker"] = raw
+
+
+def _normalize_loop_detection(policy: dict[str, Any]) -> None:
+    raw = policy.get("loop_detection")
+    if raw is None:
+        policy["loop_detection"] = {
+            "enabled": False,
+            "exact": {"threshold": 5, "window_seconds": 120, "action": "warn"},
+            "fuzzy": {"threshold": 8, "window_seconds": 300, "action": "block"},
+            "on_detect": {"notify": True, "log": True, "max_cost_saved": True},
+            "warn_threshold": 5,
+            "block_threshold": 8,
+            "window_seconds": 300.0,
+            "similarity_check": True,
+        }
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("loop_detection must be a mapping")
+
+    raw["enabled"] = bool(raw.get("enabled", False))
+    allowed_actions = {"warn", "block", "downgrade_model"}
+
+    legacy_warn = raw.get("warn_threshold", 5)
+    legacy_block = raw.get("block_threshold", 10)
+    legacy_window = raw.get("window_seconds", 300)
+
+    exact = raw.get("exact") if isinstance(raw.get("exact"), dict) else {}
+    fuzzy = raw.get("fuzzy") if isinstance(raw.get("fuzzy"), dict) else {}
+    on_detect = raw.get("on_detect") if isinstance(raw.get("on_detect"), dict) else {}
+
+    exact_threshold = exact.get("threshold", legacy_warn)
+    exact_window = exact.get("window_seconds", legacy_window)
+    exact_action = str(exact.get("action", "warn")).lower()
+    if not _is_number(exact_threshold) or int(exact_threshold) <= 0:
+        raise PolicyError("loop_detection.exact.threshold must be > 0")
+    if not _is_number(exact_window) or float(exact_window) <= 0:
+        raise PolicyError("loop_detection.exact.window_seconds must be > 0")
+    if exact_action not in allowed_actions:
+        raise PolicyError("loop_detection.exact.action must be warn|block|downgrade_model")
+    raw["exact"] = {
+        "threshold": int(exact_threshold),
+        "window_seconds": float(exact_window),
+        "action": exact_action,
+    }
+
+    fuzzy_threshold = fuzzy.get("threshold", legacy_block)
+    fuzzy_window = fuzzy.get("window_seconds", legacy_window)
+    fuzzy_action = str(fuzzy.get("action", "block")).lower()
+    if not _is_number(fuzzy_threshold) or int(fuzzy_threshold) <= 0:
+        raise PolicyError("loop_detection.fuzzy.threshold must be > 0")
+    if not _is_number(fuzzy_window) or float(fuzzy_window) <= 0:
+        raise PolicyError("loop_detection.fuzzy.window_seconds must be > 0")
+    if fuzzy_action not in allowed_actions:
+        raise PolicyError("loop_detection.fuzzy.action must be warn|block|downgrade_model")
+    raw["fuzzy"] = {
+        "threshold": int(fuzzy_threshold),
+        "window_seconds": float(fuzzy_window),
+        "action": fuzzy_action,
+    }
+
+    raw["on_detect"] = {
+        "notify": bool(on_detect.get("notify", True)),
+        "log": bool(on_detect.get("log", True)),
+        "max_cost_saved": bool(on_detect.get("max_cost_saved", True)),
+    }
+
+    # Keep compatibility fields for legacy callers.
+    raw["warn_threshold"] = int(raw["exact"]["threshold"])
+    raw["block_threshold"] = int(raw["fuzzy"]["threshold"])
+    raw["window_seconds"] = float(max(raw["exact"]["window_seconds"], raw["fuzzy"]["window_seconds"]))
+    raw["similarity_check"] = bool(raw.get("similarity_check", True))
+
+    policy["loop_detection"] = raw
+
+
 def _normalize_capability_constraints(raw: Any, *, key: str, index: int, section: str) -> list[str]:
     if raw is None:
         return []
@@ -371,6 +564,9 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     _normalize_cost_controls(loaded)
     _normalize_proxy_config(loaded)
     _normalize_kill_switch(loaded)
+    _normalize_cascade(loaded)
+    _normalize_circuit_breaker(loaded)
+    _normalize_loop_detection(loaded)
     _normalize_capabilities(loaded)
     return loaded
 

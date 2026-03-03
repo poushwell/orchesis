@@ -31,6 +31,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency path
 
 from orchesis.auth import AgentAuthenticator, CredentialStore
 from orchesis.cost_tracker import CostTracker
+from orchesis.circuit_breaker import CircuitBreaker
 from orchesis.credential_injector import CredentialInjector
 from orchesis.credential_vault import CredentialNotFoundError, build_vault_from_policy
 from orchesis.contrib.pii_detector import PiiDetector
@@ -44,13 +45,14 @@ from orchesis.integrations.forensics_emitter import ForensicsEmitter
 from orchesis.loop_detector import LoopDetector
 from orchesis.metrics import MetricsCollector
 from orchesis.model_router import ModelRouter
+from orchesis.cascade import CascadeDecision, CascadeLevel, CascadeRouter
 from orchesis.otel import OTelEmitter, TraceContext
 from orchesis.policy_store import PolicyStore
 from orchesis.state import RateLimitTracker
 from orchesis.structured_log import StructuredLogger
 from orchesis.telemetry import JsonlEmitter
 from orchesis.webhooks import WebhookConfig, WebhookEmitter
-from orchesis.request_parser import parse_request, parse_response
+from orchesis.request_parser import ParsedResponse, parse_request, parse_response
 from orchesis.response_handler import ResponseProcessor, SECRET_PATTERNS
 
 _HTTP_PROXY_LOGGER = logging.getLogger("orchesis.http_proxy")
@@ -1278,15 +1280,30 @@ class LLMHTTPProxy:
         self._loop_cfg = loop_cfg if isinstance(loop_cfg, dict) else {}
         self._loop_detector = None
         if bool(self._loop_cfg.get("enabled", False)):
-            self._loop_detector = LoopDetector(
-                warn_threshold=int(self._loop_cfg.get("warn_threshold", 5)),
-                block_threshold=int(self._loop_cfg.get("block_threshold", 10)),
-                window_seconds=float(self._loop_cfg.get("window_seconds", 300)),
-                similarity_check=bool(self._loop_cfg.get("similarity_check", True)),
-            )
+            self._loop_detector = LoopDetector(config=self._loop_cfg)
+        circuit_cfg = self._policy.get("circuit_breaker")
+        self._circuit_cfg = circuit_cfg if isinstance(circuit_cfg, dict) else {}
+        self._circuit_breaker = CircuitBreaker(
+            enabled=bool(self._circuit_cfg.get("enabled", False)),
+            error_threshold=int(self._circuit_cfg.get("error_threshold", 5)),
+            window_seconds=int(self._circuit_cfg.get("window_seconds", 60)),
+            cooldown_seconds=int(self._circuit_cfg.get("cooldown_seconds", 30)),
+            max_cooldown_seconds=int(self._circuit_cfg.get("max_cooldown_seconds", 300)),
+            half_open_max_requests=int(self._circuit_cfg.get("half_open_max_requests", 1)),
+            fallback_status=int(self._circuit_cfg.get("fallback_status", 503)),
+            fallback_message=str(
+                self._circuit_cfg.get(
+                    "fallback_message",
+                    "Service temporarily unavailable. Circuit breaker is open.",
+                )
+            ),
+        )
         routing_cfg = self._policy.get("model_routing")
         self._routing_cfg = routing_cfg if isinstance(routing_cfg, dict) else {}
         self._router = ModelRouter(self._routing_cfg) if bool(self._routing_cfg.get("enabled", False)) else None
+        cascade_cfg = self._policy.get("cascade")
+        self._cascade_cfg = cascade_cfg if isinstance(cascade_cfg, dict) else {}
+        self._cascade_router = CascadeRouter(self._cascade_cfg) if bool(self._cascade_cfg.get("enabled", False)) else None
         secret_cfg = self._policy.get("secret_scanning")
         if not isinstance(secret_cfg, dict):
             secret_cfg = self._policy.get("secrets") if isinstance(self._policy.get("secrets"), dict) else {}
@@ -1316,6 +1333,7 @@ class LLMHTTPProxy:
             "allowed": 0,
             "errors": 0,
             "kill_switch_activations": 0,
+            "cascade_requests_by_level": {"simple": 0, "medium": 0, "complex": 0},
             "started_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -1325,8 +1343,24 @@ class LLMHTTPProxy:
             payload = dict(self._stats)
         payload["cost_today"] = round(self._cost_tracker.get_daily_total(), 4)
         payload["cost_by_tool"] = self._cost_tracker.get_tool_costs()
+        payload["cascade_savings_today_usd"] = round(self._cost_tracker.get_cascade_savings_today(), 8)
         if self._loop_detector is not None:
             payload["loop_stats"] = self._loop_detector.get_stats()
+            payload["loop_detector"] = {
+                "exact_detections": payload["loop_stats"].get("exact_detections", 0),
+                "fuzzy_detections": payload["loop_stats"].get("fuzzy_detections", 0),
+                "total_cost_saved_usd": payload["loop_stats"].get("total_cost_saved_usd", 0.0),
+                "active_patterns_count": payload["loop_stats"].get("active_patterns_count", 0),
+            }
+        payload["circuit_breaker"] = self._circuit_breaker.get_stats()
+        if self._cascade_router is not None:
+            cascade_stats = self._cascade_router.get_stats()
+            payload["cascade_requests_by_level"] = cascade_stats.get("requests_by_level", {})
+            payload["cascade_hits_by_level"] = cascade_stats.get("hits_by_level", {})
+            payload["cache_hit_rate_percent"] = cascade_stats.get("cache_hit_rate_percent", 0.0)
+            payload["cache_entries_count"] = cascade_stats.get("cache_entries_count", 0)
+            payload["cache_hit_rate"] = cascade_stats.get("cache_hit_rate_percent", 0.0)
+            payload["cascade_savings_today"] = payload["cascade_savings_today_usd"]
         payload["kill_switch"] = {
             "enabled": self._kill_enabled,
             "killed": self._killed,
@@ -1410,6 +1444,8 @@ class LLMHTTPProxy:
     def _handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         self._inc("requests")
         proc_result: dict[str, Any] = {"cost": 0.0}
+        loop_warning_header = ""
+        circuit_state_header = self._circuit_breaker.get_state().lower().replace("_", "-")
         try:
             if handler.path == "/kill":
                 self._handle_kill(handler)
@@ -1444,6 +1480,114 @@ class LLMHTTPProxy:
                 return
 
             parsed_req = parse_request(body, handler.path)
+            task_id = body.get("task_id")
+            cascade_context = {"task_id": task_id} if isinstance(task_id, str) and task_id else {}
+            cascade_decision: CascadeDecision | None = None
+            cascade_level_name = "simple"
+            cascade_cache_state = "miss"
+            original_model = parsed_req.model or str(body.get("model", ""))
+
+            if self._cascade_router is not None:
+                pre_level = self._cascade_router.classify(parsed_req, context=cascade_context)
+                pre_level_name = self._cascade_router.level_name(pre_level)
+                pre_model = parsed_req.model or str(
+                    self._cascade_cfg.get("levels", {}).get(pre_level_name, {}).get("model", "")
+                )
+                cache_key = self._cascade_router.make_cache_key(parsed_req, pre_model or "")
+                cached_payload = self._cascade_router.get_cache(cache_key, pre_level)
+                if cached_payload is not None:
+                    handler.send_response(200)
+                    handler.send_header("Content-Type", "application/json")
+                    handler.send_header("Content-Length", str(len(cached_payload)))
+                    handler.send_header("X-Orchesis-Cost", "0.0")
+                    handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
+                    handler.send_header("X-Orchesis-Cascade-Level", pre_level_name)
+                    handler.send_header("X-Orchesis-Cascade-Model", pre_model or "")
+                    handler.send_header("X-Orchesis-Cache", "hit")
+                    if self._config.cors:
+                        handler.send_header("Access-Control-Allow-Origin", "*")
+                    handler.end_headers()
+                    handler.wfile.write(cached_payload)
+                    self._inc("allowed")
+                    return
+
+                cascade_decision = self._cascade_router.route(parsed_req, context=cascade_context)
+                cascade_level_name = self._cascade_router.level_name(cascade_decision.cascade_level)
+                cascade_cache_state = "miss"
+                if cascade_decision.model:
+                    body["model"] = cascade_decision.model
+                if cascade_decision.max_tokens > 0:
+                    body["max_tokens"] = cascade_decision.max_tokens
+
+            if not self._circuit_breaker.should_allow():
+                self._inc("blocked")
+                fallback = {
+                    "error": {
+                        "type": "circuit_open",
+                        "message": self._circuit_breaker.fallback_message,
+                    }
+                }
+                payload_fb = json.dumps(fallback, ensure_ascii=False).encode("utf-8")
+                handler.send_response(self._circuit_breaker.fallback_status)
+                handler.send_header("Content-Type", "application/json")
+                handler.send_header("Content-Length", str(len(payload_fb)))
+                handler.send_header("X-Orchesis-Circuit", "open")
+                if self._config.cors:
+                    handler.send_header("Access-Control-Allow-Origin", "*")
+                handler.end_headers()
+                handler.wfile.write(payload_fb)
+                return
+            circuit_state_header = self._circuit_breaker.get_state().lower().replace("_", "-")
+
+            if self._loop_detector is not None:
+                loop_decision = self._loop_detector.check_request(
+                    {
+                        "model": body.get("model", parsed_req.model),
+                        "messages": parsed_req.messages,
+                        "tool_calls": parsed_req.tool_calls,
+                        "content_text": parsed_req.content_text,
+                    }
+                )
+                if loop_decision.action == "block":
+                    self._loop_trigger_hits += 1
+                    if self._kill_enabled and self._should_kill_for_loops():
+                        self._activate_kill_switch("auto-kill: loop threshold reached")
+                        self._inc("blocked")
+                        self._send_json(
+                            handler,
+                            503,
+                            {
+                                "error": {
+                                    "type": "kill_switch",
+                                    "message": self._kill_reason,
+                                    "killed_at": self._kill_time,
+                                }
+                            },
+                        )
+                        return
+                    self._inc("blocked")
+                    payload_lb = {
+                        "error": {
+                            "type": "loop_detected",
+                            "message": loop_decision.reason or "Fuzzy loop threshold exceeded",
+                        }
+                    }
+                    body_lb = json.dumps(payload_lb, ensure_ascii=False).encode("utf-8")
+                    handler.send_response(429)
+                    handler.send_header("Content-Type", "application/json")
+                    handler.send_header("Content-Length", str(len(body_lb)))
+                    handler.send_header("X-Orchesis-Loop-Blocked", loop_decision.reason or "Fuzzy loop threshold exceeded")
+                    handler.send_header("X-Orchesis-Loop-Saved", f"${loop_decision.estimated_cost_saved:.2f}")
+                    handler.send_header("X-Orchesis-Circuit", circuit_state_header)
+                    if self._config.cors:
+                        handler.send_header("Access-Control-Allow-Origin", "*")
+                    handler.end_headers()
+                    handler.wfile.write(body_lb)
+                    return
+                if loop_decision.action in {"warn", "downgrade_model"}:
+                    loop_warning_header = loop_decision.reason or "Loop warning"
+                    if loop_decision.action == "downgrade_model":
+                        body["model"] = "claude-haiku-4"
 
             if self._budget_cfg:
                 budget_status = self._cost_tracker.check_budget(self._budget_cfg)
@@ -1495,33 +1639,6 @@ class LLMHTTPProxy:
                     )
                     return
 
-                if self._loop_detector is not None:
-                    estimated_cost = float(self._tool_costs.get(call.name, 0.001))
-                    loop_state = self._loop_detector.check(call.name, call.params, cost_per_call=estimated_cost)
-                    if loop_state.get("action") == "block":
-                        self._loop_trigger_hits += 1
-                        if self._kill_enabled and self._should_kill_for_loops():
-                            self._activate_kill_switch("auto-kill: loop threshold reached")
-                            self._inc("blocked")
-                            self._send_json(
-                                handler,
-                                503,
-                                {
-                                    "error": {
-                                        "type": "kill_switch",
-                                        "message": self._kill_reason,
-                                        "killed_at": self._kill_time,
-                                    }
-                                },
-                            )
-                            return
-                        self._inc("blocked")
-                        self._send_json(
-                            handler,
-                            429,
-                            {"error": {"type": "loop_detected", "message": str(loop_state.get("message", "loop"))}},
-                        )
-                        return
 
             if self._router is not None and parsed_req.content_text:
                 route = self._router.route(
@@ -1584,6 +1701,7 @@ class LLMHTTPProxy:
                 resp_headers = dict(error.headers.items()) if error.headers is not None else {}
                 resp_body = error.read()
             except URLError as error:
+                self._circuit_breaker.record_failure()
                 self._inc("errors")
                 self._send_json(
                     handler,
@@ -1592,10 +1710,13 @@ class LLMHTTPProxy:
                 )
                 return
 
+            parsed_resp_obj: ParsedResponse | None = None
+
             try:
                 decoded = json.loads(resp_body.decode("utf-8"))
                 if isinstance(decoded, dict):
                     parsed_resp = parse_response(decoded, provider)
+                    parsed_resp_obj = parsed_resp
                     proc_result = self._response_processor.process(parsed_resp)
                     if not proc_result.get("allowed", True):
                         self._inc("blocked")
@@ -1613,10 +1734,72 @@ class LLMHTTPProxy:
             except Exception:
                 proc_result = {"cost": 0.0}
 
+            if 200 <= resp_status < 300:
+                self._circuit_breaker.record_success()
+            elif resp_status >= 500:
+                self._circuit_breaker.record_failure()
+
+            if (
+                self._cascade_router is not None
+                and cascade_decision is not None
+                and self._cascade_router.should_escalate(resp_status, parsed_resp_obj)
+                and cascade_decision.cascade_level < CascadeLevel.COMPLEX
+            ):
+                escalated_decision = self._cascade_router.escalate(cascade_decision)
+                if escalated_decision.model:
+                    body["model"] = escalated_decision.model
+                if escalated_decision.max_tokens > 0:
+                    body["max_tokens"] = escalated_decision.max_tokens
+                payload_retry = json.dumps(body, ensure_ascii=False).encode("utf-8")
+                req_retry = UrlRequest(
+                    upstream_url,
+                    data=payload_retry,
+                    headers=self._build_forward_headers(handler.headers, payload_retry),
+                    method="POST",
+                )
+                try:
+                    with urlopen(req_retry, timeout=self._config.timeout) as upstream_retry:
+                        resp_status = int(getattr(upstream_retry, "status", 200))
+                        resp_headers = dict(upstream_retry.headers.items())
+                        resp_body = upstream_retry.read()
+                except HTTPError as error:
+                    resp_status = int(error.code)
+                    resp_headers = dict(error.headers.items()) if error.headers is not None else {}
+                    resp_body = error.read()
+                cascade_decision = escalated_decision
+                cascade_level_name = self._cascade_router.level_name(cascade_decision.cascade_level)
+                try:
+                    decoded_retry = json.loads(resp_body.decode("utf-8"))
+                    if isinstance(decoded_retry, dict):
+                        parsed_resp_retry = parse_response(decoded_retry, provider)
+                        parsed_resp_obj = parsed_resp_retry
+                        proc_result = self._response_processor.process(parsed_resp_retry)
+                except Exception:
+                    pass
+
+            if self._cascade_router is not None and cascade_decision is not None and parsed_resp_obj is not None:
+                token_sum = int(getattr(parsed_resp_obj, "input_tokens", 0)) + int(
+                    getattr(parsed_resp_obj, "output_tokens", 0)
+                )
+                self._cost_tracker.record_cascade_savings(
+                    original_model=original_model or cascade_decision.model,
+                    actual_model=cascade_decision.model,
+                    tokens=token_sum,
+                )
+                if 200 <= resp_status < 300:
+                    self._cascade_router.record_result(cascade_decision, parsed_resp_obj)
+                    self._cascade_router.cache_response(cascade_decision, resp_body)
+
             handler.send_response(resp_status)
             self._copy_upstream_headers(handler, resp_headers, len(resp_body))
             handler.send_header("X-Orchesis-Cost", str(round(float(proc_result.get("cost", 0.0)), 6)))
             handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
+            handler.send_header("X-Orchesis-Cascade-Level", cascade_level_name)
+            handler.send_header("X-Orchesis-Cascade-Model", str(body.get("model", original_model)))
+            handler.send_header("X-Orchesis-Cache", cascade_cache_state)
+            handler.send_header("X-Orchesis-Circuit", self._circuit_breaker.get_state().lower().replace("_", "-"))
+            if loop_warning_header:
+                handler.send_header("X-Orchesis-Loop-Warning", loop_warning_header)
             if self._config.cors:
                 handler.send_header("Access-Control-Allow-Origin", "*")
             handler.end_headers()

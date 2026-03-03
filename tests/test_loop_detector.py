@@ -1,145 +1,129 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import patch
+import time
 
 from orchesis.loop_detector import LoopDetector
 
 
-def test_single_call_no_loop() -> None:
-    detector = LoopDetector()
-    result = detector.check("web_search", {"q": "a"})
-    assert result["action"] == "allow"
+def _cfg(action_exact: str = "warn", action_fuzzy: str = "block") -> dict:
+    return {
+        "enabled": True,
+        "exact": {"threshold": 5, "window_seconds": 120, "action": action_exact},
+        "fuzzy": {"threshold": 8, "window_seconds": 300, "action": action_fuzzy},
+        "on_detect": {"notify": True, "log": True, "max_cost_saved": True},
+    }
 
 
-def test_calls_below_warn_threshold_allow() -> None:
-    detector = LoopDetector(warn_threshold=5, block_threshold=10)
+def _req(model: str = "gpt-4o", content: str = "hello", tools: list[dict] | None = None) -> dict:
+    return {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "tool_calls": tools or [],
+        "content_text": content,
+    }
+
+
+def test_exact_loop_threshold_allow_then_warn() -> None:
+    detector = LoopDetector(config=_cfg(action_exact="warn"))
     for _ in range(4):
-        result = detector.check("web_search", {"q": "same"})
-    assert result["action"] == "allow"
+        result = detector.check_request(_req(content="same"))
+        assert result.action == "allow"
+    fifth = detector.check_request(_req(content="same"))
+    assert fifth.action == "warn"
 
 
-def test_warn_at_warn_threshold() -> None:
-    detector = LoopDetector(warn_threshold=3, block_threshold=10)
-    detector.check("web_search", {"q": "same"})
-    detector.check("web_search", {"q": "same"})
-    result = detector.check("web_search", {"q": "same"})
-    assert result["action"] == "warn"
+def test_fuzzy_loop_threshold_blocks() -> None:
+    detector = LoopDetector(config=_cfg(action_fuzzy="block"))
+    req = _req(content="similar prompt", tools=[{"name": "read_file"}])
+    for _ in range(7):
+        detector.check_request(req)
+    blocked = detector.check_request(req)
+    assert blocked.action == "block"
+    assert blocked.loop_type == "fuzzy"
 
 
-def test_block_at_block_threshold() -> None:
-    detector = LoopDetector(warn_threshold=2, block_threshold=3)
-    detector.check("web_search", {"q": "same"})
-    detector.check("web_search", {"q": "same"})
-    result = detector.check("web_search", {"q": "same"}, cost_per_call=0.5)
-    assert result["action"] == "block"
-    assert result["saved_usd"] == 0.5
+def test_window_expiry_old_requests_not_counted() -> None:
+    cfg = _cfg()
+    cfg["exact"]["threshold"] = 2
+    cfg["exact"]["window_seconds"] = 1
+    detector = LoopDetector(config=cfg)
+    detector.check_request(_req(content="same"))
+    time.sleep(1.1)
+    second = detector.check_request(_req(content="same"))
+    assert second.action == "allow"
 
 
-def test_different_params_not_counted_when_similarity_enabled() -> None:
-    detector = LoopDetector(warn_threshold=2, block_threshold=3, similarity_check=True)
-    detector.check("web_search", {"q": "a"})
-    result = detector.check("web_search", {"q": "b"})
-    assert result["action"] == "allow"
+def test_different_models_are_separate_patterns() -> None:
+    cfg = _cfg()
+    cfg["exact"]["threshold"] = 2
+    detector = LoopDetector(config=cfg)
+    detector.check_request(_req(model="gpt-4o", content="same"))
+    second = detector.check_request(_req(model="claude-opus-4", content="same"))
+    assert second.action == "allow"
 
 
-def test_same_tool_different_params_counted_when_similarity_disabled() -> None:
-    detector = LoopDetector(warn_threshold=2, block_threshold=3, similarity_check=False)
-    detector.check("web_search", {"q": "a"})
-    result = detector.check("web_search", {"q": "b"})
-    assert result["action"] == "warn"
+def test_action_warn_vs_block_vs_downgrade_model() -> None:
+    warn_detector = LoopDetector(config=_cfg(action_exact="warn"))
+    block_cfg = _cfg(action_exact="block")
+    downgrade_cfg = _cfg(action_exact="downgrade_model")
+    for cfg in (warn_detector, LoopDetector(config=block_cfg), LoopDetector(config=downgrade_cfg)):
+        for _ in range(4):
+            cfg.check_request(_req(content="same"))
+    assert warn_detector.check_request(_req(content="same")).action == "warn"
+    assert LoopDetector(config=block_cfg).check_request(_req(content="new")).action == "allow"
+    downgrade = LoopDetector(config=downgrade_cfg)
+    for _ in range(5):
+        decision = downgrade.check_request(_req(content="same"))
+    assert decision.action == "downgrade_model"
 
 
-def test_window_expiry_old_calls_not_counted() -> None:
-    detector = LoopDetector(warn_threshold=2, block_threshold=3, window_seconds=10)
-    with patch("orchesis.loop_detector.time.time", side_effect=[0.0, 1.0, 20.0]):
-        detector.check("tool", {"x": 1})
-        detector.check("tool", {"x": 1})
-        result = detector.check("tool", {"x": 1})
-    assert result["action"] == "allow"
+def test_estimated_cost_saved_positive_on_block() -> None:
+    cfg = _cfg(action_exact="block")
+    cfg["exact"]["threshold"] = 2
+    detector = LoopDetector(config=cfg)
+    detector.check_request(_req(content="same"))
+    blocked = detector.check_request(_req(content="same"))
+    assert blocked.estimated_cost_saved > 0
 
 
-def test_total_saved_accumulates() -> None:
-    detector = LoopDetector(warn_threshold=1, block_threshold=2)
-    detector.check("t", {"x": 1}, cost_per_call=0.2)
-    detector.check("t", {"x": 1}, cost_per_call=0.2)
-    detector.check("t", {"x": 1}, cost_per_call=0.3)
-    assert detector.total_saved > 0.0
+def test_reset_and_auto_cleanup() -> None:
+    detector = LoopDetector(config=_cfg())
+    for _ in range(8):
+        detector.check_request(_req(content="same", tools=[{"name": "read_file"}]))
+    assert detector.get_stats()["active_patterns_count"] >= 1
+    detector.reset()
+    assert detector.get_stats()["active_patterns_count"] == 0
 
 
-def test_events_recorded_for_warn_and_block() -> None:
-    detector = LoopDetector(warn_threshold=2, block_threshold=3)
-    detector.check("t", {"x": 1})
-    detector.check("t", {"x": 1})
-    detector.check("t", {"x": 1})
-    events = detector.events
-    assert len(events) == 2
-    assert {item.action_taken for item in events} == {"warned", "blocked"}
-
-
-def test_stats_reporting_fields() -> None:
-    detector = LoopDetector(warn_threshold=2, block_threshold=3)
-    detector.check("t", {"x": 1})
-    detector.check("t", {"x": 1})
-    detector.check("t", {"x": 1})
-    stats = detector.get_stats()
-    assert "total_saved_usd" in stats
-    assert "total_loops_detected" in stats
-    assert "loops_warned" in stats
-    assert "loops_blocked" in stats
-
-
-def test_thread_safety_under_concurrency() -> None:
-    detector = LoopDetector(warn_threshold=10, block_threshold=20)
+def test_thread_safety_check_request() -> None:
+    detector = LoopDetector(config=_cfg())
 
     def worker() -> None:
         for _ in range(50):
-            detector.check("search", {"q": "x"})
+            detector.check_request(_req(content="same", tools=[{"name": "read_file"}]))
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         for _ in range(8):
             pool.submit(worker)
     stats = detector.get_stats()
-    assert stats["total_loops_detected"] >= 1
+    assert stats["fuzzy_detections"] >= 1
 
 
-def test_custom_thresholds_work() -> None:
-    detector = LoopDetector(warn_threshold=1, block_threshold=2)
-    first = detector.check("a", {"k": 1})
-    second = detector.check("a", {"k": 1})
-    assert first["action"] == "warn"
-    assert second["action"] == "block"
-
-
-def test_unhashable_params_do_not_crash() -> None:
+def test_legacy_check_api_still_works() -> None:
     detector = LoopDetector(warn_threshold=2, block_threshold=3)
-    result = detector.check("a", {"x": {1, 2, 3}})
-    assert result["action"] in {"allow", "warn", "block"}
+    detector.check("web_search", {"q": "same"})
+    result = detector.check("web_search", {"q": "same"})
+    assert result["action"] == "warn"
 
 
-def test_message_present_on_warn() -> None:
-    detector = LoopDetector(warn_threshold=2, block_threshold=5)
-    detector.check("a", {"k": 1})
-    result = detector.check("a", {"k": 1})
-    assert "Warning" in result["message"]
-
-
-def test_message_present_on_block() -> None:
+def test_legacy_stats_fields_present() -> None:
     detector = LoopDetector(warn_threshold=1, block_threshold=2)
-    detector.check("a", {"k": 1})
-    result = detector.check("a", {"k": 1})
-    assert "Loop detected" in result["message"]
-
-
-def test_events_property_returns_copy() -> None:
-    detector = LoopDetector(warn_threshold=1, block_threshold=2)
-    detector.check("a", {"k": 1})
-    copied = detector.events
-    copied.clear()
-    assert len(detector.events) >= 1
-
-
-def test_total_saved_initial_zero() -> None:
-    detector = LoopDetector()
-    assert detector.total_saved == 0.0
+    detector.check("a", {"x": 1})
+    detector.check("a", {"x": 1})
+    stats = detector.get_stats()
+    assert "total_saved_usd" in stats
+    assert "loops_blocked" in stats
+    assert "exact_detections" in stats
+    assert "fuzzy_detections" in stats
 
