@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from copy import deepcopy
 from typing import Any
 
@@ -87,6 +88,23 @@ _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 _CRITICAL_PATTERNS = {"ssn", "credit_card_visa", "credit_card_mc", "credit_card_amex"}
 
 
+def preprocess_for_pii(text: str) -> list[str]:
+    versions: list[str] = [text]
+    cleaned = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", text)
+    if cleaned != text:
+        versions.append(cleaned)
+    normalized = unicodedata.normalize("NFKC", cleaned)
+    if normalized != cleaned:
+        versions.append(normalized)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in versions:
+        if item not in seen:
+            seen.add(item)
+            deduped.append(item)
+    return deduped
+
+
 class PiiDetector:
     """Detect PII and sensitive data in text and structured data."""
 
@@ -127,15 +145,33 @@ class PiiDetector:
         return findings
 
     def scan_text(self, text: str) -> list[dict[str, Any]]:
-        if self._use_fast_matching:
-            return self._fast_detector.scan(
-                text,
-                threshold_rank=self._threshold,
-                ignored_patterns=self._ignored,
-                mask_fn=self._mask,
-                severity_rank=_SEVERITY_RANK,
+        all_findings: list[dict[str, Any]] = []
+        for version in preprocess_for_pii(text):
+            if self._use_fast_matching:
+                all_findings.extend(
+                    self._fast_detector.scan(
+                        version,
+                        threshold_rank=self._threshold,
+                        ignored_patterns=self._ignored,
+                        mask_fn=self._mask,
+                        severity_rank=_SEVERITY_RANK,
+                    )
+                )
+            else:
+                all_findings.extend(self._scan_text_sequential(version))
+        deduped: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, int]] = set()
+        for finding in sorted(all_findings, key=lambda item: int(item.get("position", 0))):
+            signature = (
+                str(finding.get("pattern", "")),
+                str(finding.get("match", "")),
+                int(finding.get("position", 0)),
             )
-        return self._scan_text_sequential(text)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            deduped.append(finding)
+        return deduped
 
     def scan_dict(self, data: dict[str, Any], path: str = "") -> list[dict[str, Any]]:
         findings: list[dict[str, Any]] = []

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import codecs
 import re
+import unicodedata
+from urllib.parse import unquote
 from typing import Any
 
 from orchesis.fast_scanner import FastSecretScanner
@@ -31,7 +35,7 @@ SECRET_PATTERNS: dict[str, tuple[re.Pattern[str], str, str]] = {
         "AWS Secret Access Key",
     ),
     "github_token": (
-        re.compile(r"gh[ps]_[A-Za-z0-9_]{36,}"),
+        re.compile(r"gh[ps]_[A-Za-z0-9_]{30,}"),
         "critical",
         "GitHub Personal Access Token",
     ),
@@ -138,6 +142,95 @@ def _redact_value(value: str) -> str:
     return f"{value[:4]}...{value[-4:]}"
 
 
+def preprocess_for_scanning(text: str) -> list[str]:
+    versions: list[str] = [text]
+    zero_width = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", text)
+    if zero_width != text:
+        versions.append(zero_width)
+
+    normalized = unicodedata.normalize("NFKC", zero_width)
+    if normalized != zero_width:
+        versions.append(normalized)
+
+    no_newlines = re.sub(r"[\n\r]", "", zero_width)
+    if no_newlines != zero_width:
+        versions.append(no_newlines)
+
+    url_decoded = unquote(text)
+    if url_decoded != text:
+        versions.append(url_decoded)
+
+    for match in re.finditer(r"[A-Za-z0-9+/]{20,}={0,2}", text):
+        chunk = match.group(0)
+        try:
+            decoded = base64.b64decode(chunk, validate=False).decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+        if decoded:
+            versions.append(decoded)
+
+    for match in re.finditer(r"(?:\\x[0-9a-fA-F]{2}){4,}", text):
+        chunk = match.group(0)
+        try:
+            decoded = bytes.fromhex(chunk.replace("\\x", "")).decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+        if decoded:
+            versions.append(decoded)
+
+    for match in re.finditer(r"(?:\\u[0-9a-fA-F]{4}){4,}", text):
+        chunk = match.group(0)
+        try:
+            decoded = chunk.encode("utf-8").decode("unicode_escape")
+        except Exception:
+            continue
+        if decoded:
+            versions.append(decoded)
+
+    rot13 = codecs.decode(text, "rot_13")
+    if rot13:
+        versions.append(rot13)
+
+    homoglyph_map = {
+        "\u0430": "a",
+        "\u0435": "e",
+        "\u043e": "o",
+        "\u0440": "p",
+        "\u0441": "c",
+        "\u0443": "y",
+        "\u0445": "x",
+        "\u0456": "i",
+        "\u0458": "j",
+        "\u04bb": "h",
+        "\u0455": "s",
+        "\u04c0": "l",
+        "\u0410": "A",
+        "\u0412": "B",
+        "\u0415": "E",
+        "\u041a": "K",
+        "\u041c": "M",
+        "\u041d": "H",
+        "\u041e": "O",
+        "\u0420": "P",
+        "\u0421": "C",
+        "\u0422": "T",
+        "\u0425": "X",
+    }
+    dehomoglyphed = text
+    for cyrillic, latin in homoglyph_map.items():
+        dehomoglyphed = dehomoglyphed.replace(cyrillic, latin)
+    if dehomoglyphed != text:
+        versions.append(dehomoglyphed)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in versions:
+        if item and item not in seen:
+            seen.add(item)
+            deduped.append(item)
+    return deduped
+
+
 class SecretScanner:
     """Scan text for leaked secrets, API keys, credentials."""
 
@@ -177,9 +270,26 @@ class SecretScanner:
     def scan_text(self, text: str) -> list[dict[str, Any]]:
         if not isinstance(text, str) or not text:
             return []
-        if self._use_fast_matching:
-            return self._fast_scanner.scan(text)
-        return self._scan_text_sequential(text)
+        all_findings: list[dict[str, Any]] = []
+        for version in preprocess_for_scanning(text):
+            if self._use_fast_matching:
+                all_findings.extend(self._fast_scanner.scan(version))
+            else:
+                all_findings.extend(self._scan_text_sequential(version))
+
+        deduped: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, int]] = set()
+        for finding in sorted(all_findings, key=lambda item: int(item.get("position", 0))):
+            signature = (
+                str(finding.get("pattern", "")),
+                str(finding.get("raw_match", "")),
+                int(finding.get("position", 0)),
+            )
+            if signature in seen:
+                continue
+            seen.add(signature)
+            deduped.append(finding)
+        return deduped
 
     def scan_dict(self, data: dict[str, Any], path: str = "") -> list[dict[str, Any]]:
         findings: list[dict[str, Any]] = []

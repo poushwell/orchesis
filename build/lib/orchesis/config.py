@@ -1,7 +1,11 @@
 """Policy loading and validation."""
 
 import hashlib
+import logging
+import posixpath
 import re
+import unicodedata
+from urllib.parse import unquote
 from pathlib import Path
 from typing import Any, Callable
 
@@ -10,10 +14,32 @@ from orchesis.identity import AgentIdentity, AgentRegistry, TrustTier
 
 _TOOL_RATE_LIMIT_PATTERN = re.compile(r"^\s*(\d+)\s*/\s*(second|minute|hour)\s*$", re.IGNORECASE)
 _RATE_LIMIT_WINDOW_SECONDS = {"second": 1, "minute": 60, "hour": 3600}
+_LOGGER = logging.getLogger(__name__)
 
 
 class PolicyError(ValueError):
     """Raised when policy structure/content is invalid."""
+
+
+def _normalize_tool_name(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = unicodedata.normalize("NFKC", value.replace("\x00", "")).strip().lower()
+    if any(ch in normalized for ch in ("\t", "\n", "\r")):
+        return ""
+    return normalized
+
+
+def _normalize_path_value(path: str) -> str:
+    decoded = unquote(path)
+    cleaned = unicodedata.normalize("NFKC", decoded.replace("\x00", "")).strip().replace("\\", "/")
+    cleaned = re.sub(r"/+", "/", cleaned)
+    if not cleaned.startswith("/"):
+        cleaned = "/" + cleaned
+    normalized = posixpath.normpath(cleaned)
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    return normalized
 
 
 def _parse_tool_rate_limit(value: Any) -> tuple[int, int, str]:
@@ -55,6 +81,50 @@ def _normalize_tool_access_rate_limits(policy: dict[str, Any]) -> None:
     tool_access["_parsed_rate_limits"] = parsed
 
 
+def _normalize_policy_paths(policy: dict[str, Any]) -> None:
+    top_denied = policy.get("denied_paths")
+    if isinstance(top_denied, list):
+        policy["denied_paths"] = [
+            _normalize_path_value(item)
+            for item in top_denied
+            if isinstance(item, str) and item.strip()
+        ]
+
+    rules = policy.get("rules")
+    if isinstance(rules, list):
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            for key in ("denied_paths", "allowed_paths"):
+                paths = rule.get(key)
+                if isinstance(paths, list):
+                    rule[key] = [
+                        _normalize_path_value(item)
+                        for item in paths
+                        if isinstance(item, str) and item.strip()
+                    ]
+
+    tool_access = policy.get("tool_access")
+    if isinstance(tool_access, dict):
+        for key in ("allowed", "denied"):
+            values = tool_access.get(key)
+            if isinstance(values, list):
+                tool_access[key] = [
+                    _normalize_tool_name(item)
+                    for item in values
+                    if isinstance(item, str) and _normalize_tool_name(item)
+                ]
+        allowed = set(tool_access.get("allowed", [])) if isinstance(tool_access.get("allowed"), list) else set()
+        denied = set(tool_access.get("denied", [])) if isinstance(tool_access.get("denied"), list) else set()
+        overlap = sorted(allowed.intersection(denied))
+        if overlap:
+            for tool_name in overlap:
+                _LOGGER.warning(
+                    "tool '%s' in both allowed and denied lists - deny takes precedence",
+                    tool_name,
+                )
+
+
 def _is_number(value: Any) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool)
 
@@ -71,6 +141,7 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise ValueError("Policy top-level YAML object must be a mapping.")
 
+    _normalize_policy_paths(loaded)
     _normalize_tool_access_rate_limits(loaded)
     return loaded
 

@@ -70,8 +70,9 @@ class ToolRateLimiter:
     def check_and_record(
         self, *, tool_name: str, max_requests: int, window_seconds: int, now: datetime
     ) -> tuple[bool, int]:
+        scoped_tool_name = f"per_tool::{tool_name}"
         over_limit = self._tracker.check_and_record(
-            tool_name,
+            scoped_tool_name,
             max_requests=max_requests,
             window_seconds=window_seconds,
             timestamp=now,
@@ -79,7 +80,7 @@ class ToolRateLimiter:
             session_id=self._session_id,
         )
         current_count = self._tracker.get_count(
-            tool_name,
+            scoped_tool_name,
             window_seconds=window_seconds,
             now=now,
             agent_id=self._agent_id,
@@ -148,19 +149,63 @@ def _sanitize_text(value: str) -> str:
 
 @lru_cache(maxsize=512)
 def _sanitize_text_cached(value: str) -> str:
-    return unicodedata.normalize("NFKC", value.replace("\x00", " ").strip())
+    return unicodedata.normalize("NFKC", value.replace("\x00", "").strip())
+
+
+def _normalize_tool_name(value: Any) -> tuple[str, bool]:
+    if not isinstance(value, str):
+        return "__unknown__", False
+    normalized = _sanitize_text(value)
+    normalized = "".join(
+        ch for ch in unicodedata.normalize("NFKD", normalized) if not unicodedata.combining(ch)
+    )
+    homoglyph_map = {
+        "\u0430": "a",
+        "\u0435": "e",
+        "\u043e": "o",
+        "\u0440": "p",
+        "\u0441": "c",
+        "\u0443": "y",
+        "\u0445": "x",
+        "\u0442": "t",
+        "\u0456": "i",
+        "\u0458": "j",
+        "\u04bb": "h",
+        "\u0455": "s",
+        "\u04c0": "l",
+        "\u0410": "A",
+        "\u0412": "B",
+        "\u0415": "E",
+        "\u041a": "K",
+        "\u041c": "M",
+        "\u041d": "H",
+        "\u041e": "O",
+        "\u0420": "P",
+        "\u0421": "C",
+        "\u0422": "T",
+        "\u0425": "X",
+    }
+    for cyrillic, latin in homoglyph_map.items():
+        normalized = normalized.replace(cyrillic, latin)
+    normalized = normalized.lower()
+    if normalized == "":
+        return "__unknown__", False
+    has_control_chars = any(ch in normalized for ch in ("\t", "\n", "\r"))
+    return normalized, has_control_chars
 
 
 def _normalize_path(path: str) -> str:
     decoded = unquote(path)
     cleaned = _sanitize_text(decoded).replace("\\", "/")
+    if any(ch in cleaned for ch in ("\t", "\n", "\r")):
+        raise ValueError("path contains control characters")
     cleaned = re.sub(r"/+", "/", cleaned)
     if not cleaned.startswith("/"):
         cleaned = "/" + cleaned
     normalized = posixpath.normpath(cleaned)
     if not normalized.startswith("/"):
         normalized = "/" + normalized
-    return normalized
+    return normalized.lower()
 
 
 def _coerce_cost(value: Any) -> float | None:
@@ -289,8 +334,7 @@ def _resolve_per_tool_rate_limit(
 ) -> dict[str, Any] | None:
     if not isinstance(policy, dict):
         return None
-    tool_name = request.get("tool")
-    tool = tool_name if isinstance(tool_name, str) and tool_name else "__unknown__"
+    tool, _invalid_tool_name = _normalize_tool_name(request.get("tool"))
     session_policies = policy.get("session_policies")
     session_config = (
         session_policies.get(session_type)
@@ -308,7 +352,11 @@ def _resolve_per_tool_rate_limit(
     )
     if not isinstance(parsed_limits, dict):
         return None
-    parsed = _parse_rate_limit_value(parsed_limits.get(tool))
+    normalized_limits: dict[str, Any] = {}
+    for key, value in parsed_limits.items():
+        normalized_key, _ = _normalize_tool_name(key)
+        normalized_limits[normalized_key] = value
+    parsed = _parse_rate_limit_value(normalized_limits.get(tool))
     if parsed is None:
         return None
     max_requests, window_seconds, unit = parsed
@@ -325,16 +373,26 @@ def _tier_allowed_and_denied(
 ) -> tuple[set[str], set[str], bool]:
     raw = tiers.get(tier_name)
     if isinstance(raw, list):
-        allowed = {item for item in raw if isinstance(item, str)}
+        allowed = {_normalize_tool_name(item)[0] for item in raw if isinstance(item, str)}
         return allowed, set(), "*" in allowed
     if isinstance(raw, dict):
         allowed_raw = raw.get("allowed")
         if isinstance(allowed_raw, list):
-            allowed = {item for item in allowed_raw if isinstance(item, str)}
+            allowed = {
+                _normalize_tool_name(item)[0] for item in allowed_raw if isinstance(item, str)
+            }
         else:
-            allowed = {key for key in raw.keys() if isinstance(key, str) and key != "denied"}
+            allowed = {
+                _normalize_tool_name(key)[0]
+                for key in raw.keys()
+                if isinstance(key, str) and key != "denied"
+            }
         denied_raw = raw.get("denied")
-        denied = {item for item in denied_raw if isinstance(item, str)} if isinstance(denied_raw, list) else set()
+        denied = (
+            {_normalize_tool_name(item)[0] for item in denied_raw if isinstance(item, str)}
+            if isinstance(denied_raw, list)
+            else set()
+        )
         return allowed, denied, "*" in allowed
     return set(), set(), False
 
@@ -355,8 +413,7 @@ def _evaluate_tool_access_control(
     if not isinstance(policy, dict):
         return reasons, checked, _normalize_tier(identity)
 
-    tool_name = request.get("tool")
-    tool = tool_name if isinstance(tool_name, str) and tool_name else "__unknown__"
+    tool, invalid_tool_name = _normalize_tool_name(request.get("tool"))
     session_policies = policy.get("session_policies")
     session_config = (
         session_policies.get(session_type)
@@ -420,11 +477,19 @@ def _evaluate_tool_access_control(
 
     mode = str(tool_access.get("mode", "denylist")).strip().lower()
     checked.append("tool_access_control")
+    if invalid_tool_name:
+        reasons.append("tool_access_control: tool name contains control characters")
+        return reasons, checked, effective_tier
 
     if mode == "allowlist":
         allowed = {
-            item
+            _normalize_tool_name(item)[0]
             for item in tool_access.get("allowed", [])
+            if isinstance(item, str) and item.strip()
+        }
+        denied = {
+            _normalize_tool_name(item)[0]
+            for item in tool_access.get("denied", [])
             if isinstance(item, str) and item.strip()
         }
         overrides = tool_access.get("overrides")
@@ -433,7 +498,14 @@ def _evaluate_tool_access_control(
             if isinstance(override_entry, dict):
                 additional = override_entry.get("additional_allowed")
                 if isinstance(additional, list):
-                    allowed.update(item for item in additional if isinstance(item, str) and item.strip())
+                    allowed.update(
+                        _normalize_tool_name(item)[0]
+                        for item in additional
+                        if isinstance(item, str) and item.strip()
+                    )
+        if tool in denied:
+            reasons.append(f"tool_access_control: tool '{tool}' is in denylist")
+            return reasons, checked, effective_tier
         if tool not in allowed:
             reasons.append(
                 f"tool_access_control: tool '{tool}' not in allowlist (allowed: {sorted(allowed)})"
@@ -442,7 +514,7 @@ def _evaluate_tool_access_control(
 
     if mode == "denylist":
         denied = {
-            item
+            _normalize_tool_name(item)[0]
             for item in tool_access.get("denied", [])
             if isinstance(item, str) and item.strip()
         }
@@ -873,8 +945,7 @@ def _apply_identity_check(
 ) -> tuple[list[str], list[str], bool]:
     reasons: list[str] = []
     checked = ["identity_check"]
-    tool_name = request.get("tool")
-    tool = tool_name if isinstance(tool_name, str) else "__unknown__"
+    tool, _invalid_tool_name = _normalize_tool_name(request.get("tool"))
 
     if identity.trust_tier == TrustTier.BLOCKED:
         reasons.append(f"identity: agent '{identity.agent_id}' is blocked")
@@ -935,6 +1006,8 @@ def _get_path(request: dict[str, Any]) -> str | None:
     raw = params.get("path")
     if not isinstance(raw, str):
         return None
+    if "\x00" in raw or any(ch in raw for ch in ("\t", "\n", "\r")):
+        return "/__invalid_control_char_path__"
     return _normalize_path(raw)
 
 
@@ -1017,15 +1090,16 @@ def _apply_rate_limit(
     if not isinstance(max_per_minute, int):
         return reasons, checked
 
-    tool_name = request.get("tool")
-    tool = tool_name if isinstance(tool_name, str) else "__unknown__"
+    scope = str(rule.get("scope", "tool")).strip().lower()
+    tool, _invalid_tool_name = _normalize_tool_name(request.get("tool"))
+    counter_key = "__global__" if scope == "global" else tool
     if dry_run:
         over_limit = state.is_over_limit(
-            tool, max_per_minute, 60, now=now, agent_id=agent_id, session_id=session_id
+            counter_key, max_per_minute, 60, now=now, agent_id=agent_id, session_id=session_id
         )
     else:
         over_limit = state.check_and_record(
-            tool,
+            counter_key,
             max_requests=max_per_minute,
             window_seconds=60,
             timestamp=now,
@@ -1044,6 +1118,13 @@ def _apply_file_access(
 ) -> tuple[list[str], list[str]]:
     reasons: list[str] = []
     checked = ["file_access"]
+    params = request.get("params")
+    raw_path = params.get("path") if isinstance(params, dict) else None
+    if isinstance(raw_path, str) and (
+        "\x00" in raw_path or any(ch in raw_path for ch in ("\t", "\n", "\r"))
+    ):
+        reasons.append("file_access: path contains control characters")
+        return reasons, checked
     path = _get_path(request)
     if path is None:
         return reasons, checked
@@ -1096,6 +1177,9 @@ def _apply_regex_match(
     field = rule.get("field")
     value = _extract_field(request, field) if isinstance(field, str) else None
     if not isinstance(value, str):
+        return reasons, checked
+    if "\x00" in value:
+        reasons.append(f"regex_match: field '{field}' contains null byte")
         return reasons, checked
 
     deny_patterns = rule.get("deny_patterns")
@@ -1153,8 +1237,13 @@ def _apply_context_rules(
     for item in selected:
         denied_tools = item.get("denied_tools")
         if isinstance(denied_tools, list):
-            tool_name = request.get("tool")
-            if isinstance(tool_name, str) and tool_name in denied_tools:
+            tool_name, _invalid_tool = _normalize_tool_name(request.get("tool"))
+            normalized_denied = {
+                _normalize_tool_name(candidate)[0]
+                for candidate in denied_tools
+                if isinstance(candidate, str) and candidate.strip()
+            }
+            if tool_name in normalized_denied:
                 reasons.append(
                     f"context_rules: agent '{agent}' is not allowed to call tool '{tool_name}'"
                 )
@@ -1315,7 +1404,7 @@ class PolicyEngine:
         plugins: PluginRegistry | None = None,
     ):
         self._policy = policy or {"rules": []}
-        self._state = state
+        self._state = state if state is not None else RateLimitTracker(persist_path=None)
         self._emitter = emitter
         self._registry = registry
         self._plugins = plugins
@@ -1615,14 +1704,14 @@ def evaluate(
     effective_rate_limit_per_minute = (
         identity.rate_limit_per_minute if identity is not None else None
     )
+    # Per-tool limits should not be tightened further by identity override;
+    # keep global rate-limit rule evaluation with its own configured threshold.
     if per_tool_rate_limit is not None:
         effective_rate_limit_per_minute = None
     effective_daily_budget_limit: float | None = None
 
     for rule_type in RULE_EVALUATION_ORDER:
         if rule_type == "identity_check":
-            continue
-        if rule_type == "rate_limit" and per_tool_rate_limit is not None:
             continue
         handler_name = _RULE_HANDLERS.get(rule_type)
         handler = globals().get(handler_name) if isinstance(handler_name, str) else None
@@ -1638,9 +1727,13 @@ def evaluate(
                     rule_for_eval["max_cost_per_call"] = effective_max_cost_per_call
                 if effective_daily_budget is not None:
                     rule_for_eval["daily_budget"] = effective_daily_budget
-            elif rule_type == "rate_limit" and effective_rate_limit_per_minute is not None:
-                rule_for_eval = dict(rule)
-                rule_for_eval["max_requests_per_minute"] = effective_rate_limit_per_minute
+            elif rule_type == "rate_limit":
+                if per_tool_rate_limit is not None:
+                    rule_for_eval = dict(rule_for_eval)
+                    rule_for_eval["scope"] = "global"
+                if effective_rate_limit_per_minute is not None:
+                    rule_for_eval = dict(rule_for_eval)
+                    rule_for_eval["max_requests_per_minute"] = effective_rate_limit_per_minute
             if rule_type == "budget_limit":
                 candidate_budget = rule_for_eval.get("daily_budget")
                 if isinstance(candidate_budget, int | float):
