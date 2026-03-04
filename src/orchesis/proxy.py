@@ -1,6 +1,7 @@
 """FastAPI proxy layer using Orchesis rule engine."""
 
 import asyncio
+import concurrent.futures
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
@@ -12,6 +13,7 @@ import threading
 import time
 import uuid
 from typing import Any
+import http.client
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request as UrlRequest, urlopen
 from urllib.error import HTTPError, URLError
@@ -63,6 +65,7 @@ from orchesis.dashboard import get_dashboard_html
 from orchesis.air_export import export_session_to_air
 from orchesis import __version__ as ORCHESIS_VERSION
 from orchesis.compliance import ComplianceEngine, Framework, Severity
+from orchesis.connection_pool import ConnectionPool, PoolConfig, PooledConnection
 
 _HTTP_PROXY_LOGGER = logging.getLogger("orchesis.http_proxy")
 
@@ -138,6 +141,32 @@ class ProxyStats:
             self.secrets_detected += max(0, int(secrets_detected))
             self.secrets_blocked += max(0, int(secrets_blocked))
             self.pii_detected += max(0, int(pii_detected))
+
+
+class PooledThreadHTTPServer(HTTPServer):
+    """HTTPServer with bounded worker pool."""
+
+    def __init__(self, server_address: tuple[str, int], request_handler_class: Any, max_workers: int = 200):
+        super().__init__(server_address, request_handler_class)
+        self._pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, int(max_workers)),
+            thread_name_prefix="orchesis-worker",
+        )
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        self._pool.submit(self.process_request_thread, request, client_address)
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+
+    def server_close(self) -> None:
+        super().server_close()
+        self._pool.shutdown(wait=True, cancel_futures=False)
 
 
 _SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
@@ -1588,6 +1617,10 @@ class _RequestContext:
     resp_body: bytes = b""
     parsed_resp_obj: Any = None  # ParsedResponse | None
     flow_node_id: str = ""
+    is_streaming: bool = False
+    streaming_events: list[str] = field(default_factory=list)
+    streaming_text: str = ""
+    streaming_chunks: int = 0
 
 
 class LLMHTTPProxy:
@@ -1607,6 +1640,34 @@ class LLMHTTPProxy:
                 self._policy = load_policy(policy_path)
             except Exception:
                 self._policy = {}
+        proxy_engine_cfg = self._policy.get("proxy")
+        self._proxy_engine_cfg = proxy_engine_cfg if isinstance(proxy_engine_cfg, dict) else {}
+        self._max_workers = int(self._proxy_engine_cfg.get("max_workers", 200))
+        if self._max_workers <= 0:
+            self._max_workers = 200
+        pool_cfg_raw = self._proxy_engine_cfg.get("connection_pool", {})
+        pool_cfg = pool_cfg_raw if isinstance(pool_cfg_raw, dict) else {}
+        self._connection_pool = ConnectionPool(
+            PoolConfig(
+                max_connections_per_host=int(pool_cfg.get("max_per_host", 10)),
+                max_total_connections=int(pool_cfg.get("max_total", 50)),
+                idle_timeout=float(pool_cfg.get("idle_timeout", 60.0)),
+                connection_timeout=float(pool_cfg.get("connection_timeout", self._config.timeout)),
+                retry_on_connection_error=bool(pool_cfg.get("retry_on_connection_error", True)),
+                max_retries=int(pool_cfg.get("max_retries", 2)),
+            )
+        )
+        streaming_cfg_raw = self._proxy_engine_cfg.get("streaming", {})
+        streaming_cfg = streaming_cfg_raw if isinstance(streaming_cfg_raw, dict) else {}
+        self._streaming_enabled = bool(streaming_cfg.get("enabled", True))
+        self._streaming_buffer_size = int(streaming_cfg.get("buffer_size", 4096))
+        if self._streaming_buffer_size <= 0:
+            self._streaming_buffer_size = 4096
+        self._streaming_max_accumulated_events = int(streaming_cfg.get("max_accumulated_events", 10000))
+        if self._streaming_max_accumulated_events <= 0:
+            self._streaming_max_accumulated_events = 10000
+        self._streaming_count = 0
+        self._streaming_chunks_total = 0
         budgets = self._policy.get("budgets")
         self._budget_cfg = budgets if isinstance(budgets, dict) else {}
         tool_costs = self._policy.get("tool_costs")
@@ -1774,6 +1835,24 @@ class LLMHTTPProxy:
             payload["flow_xray"] = self._flow_analyzer.get_stats()
         if self._compliance_engine is not None:
             payload["compliance"] = self._compliance_engine.get_stats()
+        thread_queue = 0
+        if isinstance(self._server, PooledThreadHTTPServer):
+            try:
+                thread_queue = int(self._server._pool._work_queue.qsize())  # noqa: SLF001
+            except Exception:
+                thread_queue = 0
+        payload["proxy_engine"] = {
+            "thread_pool": {
+                "max_workers": int(self._max_workers),
+                "active_threads": thread_queue,
+            },
+            "connection_pool": self._connection_pool.get_stats(),
+            "streaming": {
+                "enabled": self._streaming_enabled,
+                "total_streamed_requests": int(self._streaming_count),
+                "total_streamed_chunks": int(self._streaming_chunks_total),
+            },
+        }
         return payload
 
     @property
@@ -1804,7 +1883,11 @@ class LLMHTTPProxy:
             def log_message(self, fmt: str, *args: Any) -> None:
                 _HTTP_PROXY_LOGGER.debug("proxy %s - " + fmt, self.address_string(), *args)
 
-        self._server = HTTPServer((self._config.host, self._config.port), _Handler)
+        self._server = PooledThreadHTTPServer(
+            (self._config.host, self._config.port),
+            _Handler,
+            max_workers=self._max_workers,
+        )
         if blocking:
             try:
                 self._server.serve_forever()
@@ -1821,6 +1904,7 @@ class LLMHTTPProxy:
             self._server.server_close()
             self._server = None
         self._state_tracker.flush()
+        self._connection_pool.close_all()
         if self._recorder is not None:
             self._recorder.close_all()
 
@@ -1917,6 +2001,7 @@ class LLMHTTPProxy:
             "recent_events": recent_events[:20],
             "cost_timeline": list(self._dashboard_cost_timeline),
             "flow_xray": flow_stats,
+            "connection_pool": stats.get("proxy_engine", {}).get("connection_pool", {}),
         }
 
     def _build_dashboard_agents(self) -> dict[str, Any]:
@@ -2495,35 +2580,209 @@ class LLMHTTPProxy:
                     return False
         return True
 
+    def _is_streaming_request(self, ctx: _RequestContext) -> bool:
+        return bool(self._streaming_enabled and isinstance(ctx.body, dict) and ctx.body.get("stream") is True)
+
+    @staticmethod
+    def _extract_text_delta(event_str: str) -> str:
+        for line in event_str.split("\n"):
+            if not line.startswith("data: "):
+                continue
+            data_str = line[6:].strip()
+            if data_str == "[DONE]":
+                return ""
+            try:
+                data = json.loads(data_str)
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                if data.get("type") == "content_block_delta":
+                    delta = data.get("delta", {})
+                    if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                        text = delta.get("text", "")
+                        return str(text) if isinstance(text, str) else ""
+                choices = data.get("choices", [])
+                if isinstance(choices, list) and choices:
+                    first = choices[0]
+                    if isinstance(first, dict):
+                        delta = first.get("delta", {})
+                        if isinstance(delta, dict):
+                            content = delta.get("content", "")
+                            return str(content) if isinstance(content, str) else ""
+        return ""
+
+    @staticmethod
+    def _send_chunk(handler: BaseHTTPRequestHandler, data: bytes) -> None:
+        chunk = data if isinstance(data, bytes) else b""
+        header = f"{len(chunk):x}\r\n".encode("utf-8")
+        handler.wfile.write(header)
+        handler.wfile.write(chunk)
+        handler.wfile.write(b"\r\n")
+        handler.wfile.flush()
+
+    @staticmethod
+    def _build_synthetic_response(events: list[str], text_parts: list[str], ctx: _RequestContext) -> str:
+        full_text = "".join(text_parts)
+        synthetic: dict[str, Any] = {
+            "id": str(ctx.body.get("id", "synthetic_stream")),
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": full_text}],
+            "model": str(ctx.body.get("model", ctx.original_model)),
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "_orchesis_streaming": True,
+            "_orchesis_chunks": len(events),
+        }
+        for event_str in reversed(events):
+            if "message_delta" not in event_str and "\"usage\"" not in event_str:
+                continue
+            for line in event_str.split("\n"):
+                if not line.startswith("data: "):
+                    continue
+                try:
+                    data = json.loads(line[6:])
+                except Exception:
+                    continue
+                if isinstance(data, dict):
+                    usage = data.get("usage", {})
+                    if isinstance(usage, dict) and usage:
+                        synthetic["usage"] = usage
+                        return json.dumps(synthetic, ensure_ascii=False)
+        return json.dumps(synthetic, ensure_ascii=False)
+
+    @staticmethod
+    def _compose_target_path(parsed_url: Any) -> str:
+        base_path = parsed_url.path if isinstance(parsed_url.path, str) and parsed_url.path else "/"
+        if isinstance(parsed_url.query, str) and parsed_url.query:
+            return f"{base_path}?{parsed_url.query}"
+        return base_path
+
+    def _request_upstream_once(
+        self,
+        *,
+        upstream_url: str,
+        payload: bytes,
+        headers: dict[str, str],
+        stream_response: bool,
+        ctx: _RequestContext,
+    ) -> tuple[int, dict[str, str], bytes]:
+        parsed = urlsplit(upstream_url)
+        host = parsed.hostname or ""
+        if not host:
+            raise URLError("invalid upstream host")
+        use_ssl = parsed.scheme.lower() == "https"
+        port = parsed.port or (443 if use_ssl else 80)
+        target_path = self._compose_target_path(parsed)
+        pooled_conn = self._connection_pool.acquire(host=host, port=port, use_ssl=use_ssl)
+        error = False
+        try:
+            pooled_conn.conn.request("POST", target_path, body=payload, headers=headers)
+            response = pooled_conn.conn.getresponse()
+            status = int(getattr(response, "status", 200))
+            resp_headers = {str(k): str(v) for k, v in response.getheaders()}
+            if stream_response and status == 200:
+                self._handle_streaming_response(ctx, response, pooled_conn, resp_headers)
+                return status, resp_headers, ctx.resp_body
+            body = response.read()
+            return status, resp_headers, body
+        except Exception:
+            error = True
+            raise
+        finally:
+            if not stream_response:
+                self._connection_pool.release(pooled_conn, error=error)
+
+    def _handle_streaming_response(
+        self,
+        ctx: _RequestContext,
+        upstream_response: http.client.HTTPResponse,
+        pooled_conn: PooledConnection,
+        response_headers: dict[str, str],
+    ) -> None:
+        ctx.handler.send_response(int(getattr(upstream_response, "status", 200)))
+        skip = {"transfer-encoding", "connection", "content-length"}
+        for key, value in response_headers.items():
+            if key.lower() in skip:
+                continue
+            ctx.handler.send_header(key, value)
+        ctx.handler.send_header("Transfer-Encoding", "chunked")
+        ctx.handler.send_header("X-Orchesis-Circuit", self._circuit_breaker.get_state().lower().replace("_", "-"))
+        if self._recorder is not None:
+            ctx.handler.send_header("X-Orchesis-Session-Id", ctx.session_id)
+            ctx.handler.send_header("X-Orchesis-Request-Id", ctx.request_id)
+        if self._config.cors:
+            ctx.handler.send_header("Access-Control-Allow-Origin", "*")
+        ctx.handler.end_headers()
+        events: list[str] = []
+        texts: list[str] = []
+        chunks = 0
+        buffer = b""
+        had_error = False
+        try:
+            while True:
+                chunk = upstream_response.read(self._streaming_buffer_size)
+                if not chunk:
+                    break
+                self._send_chunk(ctx.handler, chunk)
+                chunks += 1
+                buffer += chunk
+                while b"\n\n" in buffer and len(events) < self._streaming_max_accumulated_events:
+                    event_data, buffer = buffer.split(b"\n\n", 1)
+                    event_str = event_data.decode("utf-8", errors="replace")
+                    events.append(event_str)
+                    delta = self._extract_text_delta(event_str)
+                    if delta:
+                        texts.append(delta)
+            self._send_chunk(ctx.handler, b"")
+        except (ConnectionAbortedError, BrokenPipeError, OSError):
+            had_error = True
+        finally:
+            self._connection_pool.release(pooled_conn, error=had_error)
+        ctx.is_streaming = True
+        ctx.streaming_events = events
+        ctx.streaming_text = "".join(texts)
+        ctx.streaming_chunks = chunks
+        self._streaming_count += 1
+        self._streaming_chunks_total += chunks
+        synthetic = self._build_synthetic_response(events, texts, ctx)
+        ctx.resp_body = synthetic.encode("utf-8")
+
     def _phase_upstream(self, ctx: _RequestContext) -> bool:
         ctx.provider = self._detect_provider(ctx.parsed_req.provider, ctx.handler.headers)
         upstream_base = self._get_upstream(ctx.provider, ctx.handler.headers)
         upstream_url = f"{upstream_base.rstrip('/')}{ctx.handler.path}"
         payload = json.dumps(ctx.body, ensure_ascii=False).encode("utf-8")
         upstream_headers = self._build_forward_headers(ctx.handler.headers, payload)
-        req = UrlRequest(upstream_url, data=payload, headers=upstream_headers, method="POST")
         ctx.resp_status = 200
         ctx.resp_headers = {}
         ctx.resp_body = b""
-        try:
-            with urlopen(req, timeout=self._config.timeout) as upstream_resp:
-                ctx.resp_status = int(getattr(upstream_resp, "status", 200))
-                ctx.resp_headers = dict(upstream_resp.headers.items())
-                ctx.resp_body = upstream_resp.read()
-        except HTTPError as error:
-            ctx.resp_status = int(error.code)
-            ctx.resp_headers = dict(error.headers.items()) if error.headers is not None else {}
-            ctx.resp_body = error.read()
-        except (URLError, OSError) as error:
-            self._circuit_breaker.record_failure()
-            self._inc("errors")
-            self._send_json(
-                ctx.handler,
-                502,
-                {"error": {"type": "upstream_error", "message": f"Failed to connect to upstream: {error}"}},
-            )
-            return False
-        return True
+        stream_response = self._is_streaming_request(ctx)
+        retries = self._connection_pool._config.max_retries if self._connection_pool._config.retry_on_connection_error else 0  # noqa: SLF001
+        for attempt in range(max(0, retries) + 1):
+            try:
+                status, resp_headers, resp_body = self._request_upstream_once(
+                    upstream_url=upstream_url,
+                    payload=payload,
+                    headers=upstream_headers,
+                    stream_response=stream_response,
+                    ctx=ctx,
+                )
+                ctx.resp_status = status
+                ctx.resp_headers = resp_headers
+                ctx.resp_body = resp_body
+                return True
+            except Exception as error:
+                if attempt >= retries:
+                    self._circuit_breaker.record_failure()
+                    self._inc("errors")
+                    self._send_json(
+                        ctx.handler,
+                        502,
+                        {"error": {"type": "upstream_error", "message": f"Failed to connect to upstream: {error}"}},
+                    )
+                    return False
+        return False
 
     def _phase_post_upstream(self, ctx: _RequestContext) -> bool:
         ctx.parsed_resp_obj = None
@@ -2566,21 +2825,25 @@ class LLMHTTPProxy:
             upstream_base = self._get_upstream(ctx.provider, ctx.handler.headers)
             upstream_url = f"{upstream_base.rstrip('/')}{ctx.handler.path}"
             payload_retry = json.dumps(ctx.body, ensure_ascii=False).encode("utf-8")
-            req_retry = UrlRequest(
-                upstream_url,
-                data=payload_retry,
-                headers=self._build_forward_headers(ctx.handler.headers, payload_retry),
-                method="POST",
-            )
+            retry_headers = self._build_forward_headers(ctx.handler.headers, payload_retry)
             try:
-                with urlopen(req_retry, timeout=self._config.timeout) as upstream_retry:
-                    ctx.resp_status = int(getattr(upstream_retry, "status", 200))
-                    ctx.resp_headers = dict(upstream_retry.headers.items())
-                    ctx.resp_body = upstream_retry.read()
-            except HTTPError as error:
-                ctx.resp_status = int(error.code)
-                ctx.resp_headers = dict(error.headers.items()) if error.headers is not None else {}
-                ctx.resp_body = error.read()
+                status, resp_headers, resp_body = self._request_upstream_once(
+                    upstream_url=upstream_url,
+                    payload=payload_retry,
+                    headers=retry_headers,
+                    stream_response=False,
+                    ctx=ctx,
+                )
+                ctx.resp_status = status
+                ctx.resp_headers = resp_headers
+                ctx.resp_body = resp_body
+            except Exception as error:
+                ctx.resp_status = 502
+                ctx.resp_headers = {}
+                ctx.resp_body = json.dumps(
+                    {"error": {"type": "upstream_error", "message": f"Failed to connect to upstream: {error}"}},
+                    ensure_ascii=False,
+                ).encode("utf-8")
             ctx.cascade_decision = escalated_decision
             ctx.cascade_level_name = self._cascade_router.level_name(ctx.cascade_decision.cascade_level)
             try:
@@ -2637,30 +2900,7 @@ class LLMHTTPProxy:
             )
         return True
 
-    def _phase_send_response(self, ctx: _RequestContext) -> None:
-        ctx.handler.send_response(ctx.resp_status)
-        self._copy_upstream_headers(ctx.handler, ctx.resp_headers, len(ctx.resp_body))
-        ctx.handler.send_header("X-Orchesis-Cost", str(round(float(ctx.proc_result.get("cost", 0.0)), 6)))
-        ctx.handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
-        ctx.handler.send_header("X-Orchesis-Cascade-Level", ctx.cascade_level_name)
-        ctx.handler.send_header("X-Orchesis-Cascade-Model", str(ctx.body.get("model", ctx.original_model)))
-        ctx.handler.send_header("X-Orchesis-Cache", ctx.cascade_cache_state)
-        ctx.handler.send_header("X-Orchesis-Circuit", self._circuit_breaker.get_state().lower().replace("_", "-"))
-        if self._recorder is not None:
-            ctx.handler.send_header("X-Orchesis-Session-Id", ctx.session_id)
-            ctx.handler.send_header("X-Orchesis-Request-Id", ctx.request_id)
-        if ctx.loop_warning_header:
-            ctx.handler.send_header("X-Orchesis-Loop-Warning", ctx.loop_warning_header)
-        if self._behavioral_detector.enabled:
-            ctx.handler.send_header("X-Orchesis-Behavior", ctx.behavior_header)
-            if ctx.behavior_score_header:
-                ctx.handler.send_header("X-Orchesis-Anomaly-Score", ctx.behavior_score_header)
-            if ctx.behavior_dims_header:
-                ctx.handler.send_header("X-Orchesis-Anomaly-Dimensions", ctx.behavior_dims_header)
-        if self._config.cors:
-            ctx.handler.send_header("Access-Control-Allow-Origin", "*")
-        ctx.handler.end_headers()
-        ctx.handler.wfile.write(ctx.resp_body)
+    def _finalize_response_recording(self, ctx: _RequestContext) -> None:
         self._inc("allowed")
         self._dashboard_cost_timeline.append(
             {
@@ -2700,6 +2940,35 @@ class LLMHTTPProxy:
                 "loop_state": ctx.loop_warning_header,
             },
         )
+
+    def _phase_send_response(self, ctx: _RequestContext) -> None:
+        if not ctx.is_streaming:
+            ctx.handler.send_response(ctx.resp_status)
+            self._copy_upstream_headers(ctx.handler, ctx.resp_headers, len(ctx.resp_body))
+            ctx.handler.send_header("X-Orchesis-Cost", str(round(float(ctx.proc_result.get("cost", 0.0)), 6)))
+            ctx.handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
+            ctx.handler.send_header("X-Orchesis-Cascade-Level", ctx.cascade_level_name)
+            ctx.handler.send_header("X-Orchesis-Cascade-Model", str(ctx.body.get("model", ctx.original_model)))
+            ctx.handler.send_header("X-Orchesis-Cache", ctx.cascade_cache_state)
+            ctx.handler.send_header("X-Orchesis-Circuit", self._circuit_breaker.get_state().lower().replace("_", "-"))
+            if self._recorder is not None:
+                ctx.handler.send_header("X-Orchesis-Session-Id", ctx.session_id)
+                ctx.handler.send_header("X-Orchesis-Request-Id", ctx.request_id)
+            if ctx.loop_warning_header:
+                ctx.handler.send_header("X-Orchesis-Loop-Warning", ctx.loop_warning_header)
+            if self._behavioral_detector.enabled:
+                ctx.handler.send_header("X-Orchesis-Behavior", ctx.behavior_header)
+                if ctx.behavior_score_header:
+                    ctx.handler.send_header("X-Orchesis-Anomaly-Score", ctx.behavior_score_header)
+                if ctx.behavior_dims_header:
+                    ctx.handler.send_header("X-Orchesis-Anomaly-Dimensions", ctx.behavior_dims_header)
+            if self._config.cors:
+                ctx.handler.send_header("Access-Control-Allow-Origin", "*")
+            ctx.handler.end_headers()
+            self._finalize_response_recording(ctx)
+            ctx.handler.wfile.write(ctx.resp_body)
+            return
+        self._finalize_response_recording(ctx)
 
     def _handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         self._inc("requests")
@@ -2959,13 +3228,16 @@ class LLMHTTPProxy:
         extra_headers: dict[str, str] | None = None,
     ) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        handler.send_response(status)
-        handler.send_header("Content-Type", "application/json")
-        handler.send_header("Content-Length", str(len(body)))
-        if isinstance(extra_headers, dict):
-            for key, value in extra_headers.items():
-                handler.send_header(str(key), str(value))
-        if self._config.cors:
-            handler.send_header("Access-Control-Allow-Origin", "*")
-        handler.end_headers()
-        handler.wfile.write(body)
+        try:
+            handler.send_response(status)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(body)))
+            if isinstance(extra_headers, dict):
+                for key, value in extra_headers.items():
+                    handler.send_header(str(key), str(value))
+            if self._config.cors:
+                handler.send_header("Access-Control-Allow-Origin", "*")
+            handler.end_headers()
+            handler.wfile.write(body)
+        except (ConnectionAbortedError, BrokenPipeError, OSError):
+            return
