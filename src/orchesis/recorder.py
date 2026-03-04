@@ -68,6 +68,9 @@ class SessionRecorder:
         self._writers: dict[str, _SessionWriter] = {}
         self._lock = threading.Lock()
         self._total_recorded = 0
+        self._index_path = self._storage_path / "index.json"
+        self._index: dict[str, dict[str, Any]] = {}
+        self._load_index()
 
     def __enter__(self) -> SessionRecorder:
         return self
@@ -87,6 +90,23 @@ class SessionRecorder:
         ext = ".jsonl.gz" if self._compress else ".jsonl"
         tail = f"_{suffix}" if suffix else ""
         return f"{session_id}_{date_part}{tail}{ext}"
+
+    def _load_index(self) -> None:
+        try:
+            if self._index_path.exists():
+                loaded = json.loads(self._index_path.read_text(encoding="utf-8"))
+                self._index = loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            self._index = {}
+
+    def _save_index(self) -> None:
+        try:
+            self._index_path.write_text(
+                json.dumps(self._index, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
 
     def _open_writer(self, session_id: str, suffix: str = "") -> _SessionWriter:
         path = self._storage_path / self._filename(session_id, suffix=suffix)
@@ -126,6 +146,36 @@ class SessionRecorder:
             writer.handle.flush()
             writer.record_count += 1
             self._total_recorded += 1
+            sid = record.session_id
+            entry = self._index.get(sid)
+            if entry is None:
+                entry = {
+                    "session_id": sid,
+                    "start_time": record.timestamp,
+                    "end_time": record.timestamp,
+                    "request_count": 0,
+                    "total_cost": 0.0,
+                    "models_used": [],
+                    "error_count": 0,
+                    "file_path": str(writer.file_path),
+                    "file_size_bytes": 0,
+                }
+            now_cost = float(record.cost)
+            entry["end_time"] = record.timestamp
+            entry["request_count"] = int(entry.get("request_count", 0)) + 1
+            entry["total_cost"] = round(float(entry.get("total_cost", 0.0)) + now_cost, 8)
+            models_used = entry.setdefault("models_used", [])
+            if record.model and isinstance(models_used, list) and record.model not in models_used:
+                models_used.append(record.model)
+            if record.error or record.status_code >= 400:
+                entry["error_count"] = int(entry.get("error_count", 0)) + 1
+            entry["file_path"] = str(writer.file_path)
+            try:
+                entry["file_size_bytes"] = int(writer.file_path.stat().st_size)
+            except OSError:
+                pass
+            self._index[sid] = entry
+            self._save_index()
 
     def close_session(self, session_id: str) -> None:
         with self._lock:
@@ -172,7 +222,7 @@ class SessionRecorder:
             return []
         return records
 
-    def list_sessions(self) -> list[SessionSummary]:
+    def _list_sessions_from_files(self) -> list[SessionSummary]:
         summaries: dict[str, SessionSummary] = {}
         for path in self._iter_session_files():
             sid = self._session_id_from_file(path)
@@ -201,6 +251,31 @@ class SessionRecorder:
             if current is None or summary.end_time > current.end_time:
                 summaries[sid] = summary
         return sorted(summaries.values(), key=lambda item: item.end_time, reverse=True)
+
+    def list_sessions(self) -> list[SessionSummary]:
+        with self._lock:
+            if self._index:
+                summaries: list[SessionSummary] = []
+                for entry in self._index.values():
+                    if not isinstance(entry, dict):
+                        continue
+                    models = entry.get("models_used", [])
+                    summaries.append(
+                        SessionSummary(
+                            session_id=str(entry.get("session_id", "")),
+                            start_time=float(entry.get("start_time", 0.0) or 0.0),
+                            end_time=float(entry.get("end_time", 0.0) or 0.0),
+                            request_count=int(entry.get("request_count", 0) or 0),
+                            total_cost=float(entry.get("total_cost", 0.0) or 0.0),
+                            models_used=models if isinstance(models, list) else [],
+                            error_count=int(entry.get("error_count", 0) or 0),
+                            file_path=str(entry.get("file_path", "")),
+                            file_size_bytes=int(entry.get("file_size_bytes", 0) or 0),
+                        )
+                    )
+                return sorted(summaries, key=lambda item: item.end_time, reverse=True)
+        # Backward compatibility for recordings created before index.json existed.
+        return self._list_sessions_from_files()
 
     def load_session(self, session_id: str) -> list[SessionRecord]:
         self.close_session(session_id)
@@ -243,6 +318,9 @@ class SessionRecorder:
                     deleted = True
                 except OSError:
                     pass
+        with self._lock:
+            self._index.pop(session_id, None)
+            self._save_index()
         return deleted
 
     def cleanup(self, max_age_days: int = 30) -> int:
@@ -261,6 +339,10 @@ class SessionRecorder:
                     deleted += 1
                 except OSError:
                     pass
+        remaining_sids = {self._session_id_from_file(p) for p in self._iter_session_files()}
+        with self._lock:
+            self._index = {k: v for k, v in self._index.items() if k in remaining_sids}
+            self._save_index()
         return deleted
 
     def get_stats(self) -> dict[str, Any]:

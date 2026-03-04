@@ -110,17 +110,21 @@ def test_thread_safety_check_request() -> None:
     assert stats["fuzzy_detections"] >= 1
 
 
-def test_legacy_check_api_still_works() -> None:
-    detector = LoopDetector(warn_threshold=2, block_threshold=3)
-    detector.check("web_search", {"q": "same"})
-    result = detector.check("web_search", {"q": "same"})
-    assert result["action"] == "warn"
+def test_check_request_warn_threshold_behavior() -> None:
+    cfg = _cfg(action_exact="warn")
+    cfg["exact"]["threshold"] = 2
+    detector = LoopDetector(config=cfg)
+    detector.check_request(_req(content="same"))
+    result = detector.check_request(_req(content="same"))
+    assert result.action == "warn"
 
 
 def test_legacy_stats_fields_present() -> None:
-    detector = LoopDetector(warn_threshold=1, block_threshold=2)
-    detector.check("a", {"x": 1})
-    detector.check("a", {"x": 1})
+    cfg = _cfg(action_exact="block")
+    cfg["exact"]["threshold"] = 1
+    detector = LoopDetector(config=cfg)
+    detector.check_request(_req(content="x"))
+    detector.check_request(_req(content="x"))
     stats = detector.get_stats()
     assert "total_saved_usd" in stats
     assert "loops_blocked" in stats
