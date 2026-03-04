@@ -214,6 +214,22 @@ def _normalize_cost_controls(policy: dict[str, Any]) -> None:
 def _normalize_proxy_config(policy: dict[str, Any]) -> None:
     proxy_cfg = policy.get("proxy")
     if not isinstance(proxy_cfg, dict):
+        policy["proxy"] = {
+            "max_workers": 200,
+            "connection_pool": {
+                "max_per_host": 10,
+                "max_total": 50,
+                "idle_timeout": 60,
+                "connection_timeout": 30,
+                "retry_on_connection_error": True,
+                "max_retries": 2,
+            },
+            "streaming": {
+                "enabled": True,
+                "buffer_size": 4096,
+                "max_accumulated_events": 10000,
+            },
+        }
         return
 
     port = proxy_cfg.get("port")
@@ -250,6 +266,49 @@ def _normalize_proxy_config(policy: dict[str, Any]) -> None:
         proxy_cfg["upstream"] = normalized_upstream
     elif upstream is not None:
         proxy_cfg["upstream"] = {}
+
+    max_workers = proxy_cfg.get("max_workers", 200)
+    if not _is_number(max_workers) or int(max_workers) <= 0:
+        raise PolicyError("proxy.max_workers must be > 0")
+    proxy_cfg["max_workers"] = int(max_workers)
+
+    pool_cfg_raw = proxy_cfg.get("connection_pool")
+    pool_cfg = pool_cfg_raw if isinstance(pool_cfg_raw, dict) else {}
+    max_per_host = pool_cfg.get("max_per_host", 10)
+    max_total = pool_cfg.get("max_total", 50)
+    idle_timeout = pool_cfg.get("idle_timeout", 60)
+    connection_timeout = pool_cfg.get("connection_timeout", 30)
+    max_retries = pool_cfg.get("max_retries", 2)
+    if not _is_number(max_per_host) or int(max_per_host) <= 0:
+        raise PolicyError("proxy.connection_pool.max_per_host must be > 0")
+    if not _is_number(max_total) or int(max_total) <= 0:
+        raise PolicyError("proxy.connection_pool.max_total must be > 0")
+    if not _is_number(idle_timeout) or float(idle_timeout) <= 0:
+        raise PolicyError("proxy.connection_pool.idle_timeout must be > 0")
+    if not _is_number(connection_timeout) or float(connection_timeout) <= 0:
+        raise PolicyError("proxy.connection_pool.connection_timeout must be > 0")
+    if not _is_number(max_retries) or int(max_retries) < 0:
+        raise PolicyError("proxy.connection_pool.max_retries must be >= 0")
+    pool_cfg["max_per_host"] = int(max_per_host)
+    pool_cfg["max_total"] = int(max_total)
+    pool_cfg["idle_timeout"] = float(idle_timeout)
+    pool_cfg["connection_timeout"] = float(connection_timeout)
+    pool_cfg["retry_on_connection_error"] = bool(pool_cfg.get("retry_on_connection_error", True))
+    pool_cfg["max_retries"] = int(max_retries)
+    proxy_cfg["connection_pool"] = pool_cfg
+
+    streaming_cfg_raw = proxy_cfg.get("streaming")
+    streaming_cfg = streaming_cfg_raw if isinstance(streaming_cfg_raw, dict) else {}
+    buffer_size = streaming_cfg.get("buffer_size", 4096)
+    max_accumulated = streaming_cfg.get("max_accumulated_events", 10000)
+    if not _is_number(buffer_size) or int(buffer_size) <= 0:
+        raise PolicyError("proxy.streaming.buffer_size must be > 0")
+    if not _is_number(max_accumulated) or int(max_accumulated) <= 0:
+        raise PolicyError("proxy.streaming.max_accumulated_events must be > 0")
+    streaming_cfg["enabled"] = bool(streaming_cfg.get("enabled", True))
+    streaming_cfg["buffer_size"] = int(buffer_size)
+    streaming_cfg["max_accumulated_events"] = int(max_accumulated)
+    proxy_cfg["streaming"] = streaming_cfg
 
 
 def _normalize_kill_switch(policy: dict[str, Any]) -> None:
