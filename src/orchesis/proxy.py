@@ -9,6 +9,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from typing import Any
 from urllib.parse import urlsplit
 from urllib.request import Request as UrlRequest, urlopen
@@ -54,6 +55,7 @@ from orchesis.structured_log import StructuredLogger
 from orchesis.telemetry import JsonlEmitter
 from orchesis.webhooks import WebhookConfig, WebhookEmitter
 from orchesis.request_parser import ParsedResponse, parse_request, parse_response
+from orchesis.recorder import SessionRecord, SessionRecorder
 from orchesis.response_handler import ResponseProcessor, SECRET_PATTERNS
 
 _HTTP_PROXY_LOGGER = logging.getLogger("orchesis.http_proxy")
@@ -149,6 +151,17 @@ class OrchesisProxy:
         behavioral_cfg = self._policy.get("behavioral_fingerprint")
         self._behavioral_cfg = behavioral_cfg if isinstance(behavioral_cfg, dict) else {}
         self._behavioral_detector = BehavioralDetector(self._behavioral_cfg)
+        recording_cfg = self._policy.get("recording")
+        self._recording_cfg = recording_cfg if isinstance(recording_cfg, dict) else {}
+        self._recorder = (
+            SessionRecorder(
+                storage_path=str(self._recording_cfg.get("storage_path", ".orchesis/sessions")),
+                compress=bool(self._recording_cfg.get("compress", True)),
+                max_file_size_mb=int(self._recording_cfg.get("max_file_size_mb", 10)),
+            )
+            if bool(self._recording_cfg.get("enabled", False))
+            else None
+        )
         proxy_cfg = self._policy.get("proxy") if isinstance(self._policy.get("proxy"), dict) else {}
         secret_cfg = proxy_cfg.get("secret_scanning") if isinstance(proxy_cfg.get("secret_scanning"), dict) else {}
         pii_cfg = proxy_cfg.get("pii_scanning") if isinstance(proxy_cfg.get("pii_scanning"), dict) else {}
@@ -943,6 +956,16 @@ def create_proxy_app(
         if isinstance(current_policy.get("behavioral_fingerprint"), dict)
         else {}
     )
+    recording_cfg = current_policy.get("recording") if isinstance(current_policy.get("recording"), dict) else {}
+    recorder = (
+        SessionRecorder(
+            storage_path=str(recording_cfg.get("storage_path", ".orchesis/sessions")),
+            compress=bool(recording_cfg.get("compress", True)),
+            max_file_size_mb=int(recording_cfg.get("max_file_size_mb", 10)),
+        )
+        if bool(recording_cfg.get("enabled", False))
+        else None
+    )
     current_registry = None
     watcher: PolicyWatcher | None = None
     current_policy_hash = "inline"
@@ -1107,7 +1130,7 @@ def create_proxy_app(
 
         def _on_reload(new_policy: dict[str, Any]) -> None:
             _ = new_policy
-            nonlocal current_policy, current_registry, current_policy_hash, behavioral_detector
+            nonlocal current_policy, current_registry, current_policy_hash, behavioral_detector, recorder, recording_cfg
             version = store.load(policy_path)
             current_policy = version.policy
             current_registry = _resolve_registry_for_policy(current_policy, version)
@@ -1116,6 +1139,18 @@ def create_proxy_app(
                 current_policy.get("behavioral_fingerprint")
                 if isinstance(current_policy.get("behavioral_fingerprint"), dict)
                 else {}
+            )
+            recording_cfg = (
+                current_policy.get("recording") if isinstance(current_policy.get("recording"), dict) else {}
+            )
+            recorder = (
+                SessionRecorder(
+                    storage_path=str(recording_cfg.get("storage_path", ".orchesis/sessions")),
+                    compress=bool(recording_cfg.get("compress", True)),
+                    max_file_size_mb=int(recording_cfg.get("max_file_size_mb", 10)),
+                )
+                if bool(recording_cfg.get("enabled", False))
+                else None
             )
             _sync_webhooks(current_policy)
             _sync_alerts(current_policy)
@@ -1158,6 +1193,13 @@ def create_proxy_app(
                 )
 
         raw_body = await request.body()
+        request_started = time.perf_counter()
+        session_id = (
+            request.headers.get("x-session")
+            or request.headers.get("x-orchesis-session-id")
+            or uuid.uuid4().hex
+        )
+        request_id = uuid.uuid4().hex
         body_json: dict[str, Any] | None = None
         if raw_body:
             try:
@@ -1190,6 +1232,9 @@ def create_proxy_app(
                     )
                     response.headers["X-Orchesis-Trace-Id"] = trace.trace_id
                     response.headers["X-Orchesis-Decision"] = "DENY"
+                    if recorder is not None:
+                        response.headers["X-Orchesis-Session-Id"] = session_id
+                        response.headers["X-Orchesis-Request-Id"] = request_id
                     return response
                 if auth_mode == "log":
                     logger.warn("authentication failed (log mode)", reason=auth_reason)
@@ -1230,6 +1275,9 @@ def create_proxy_app(
                     sorted({item.dimension for item in behavior_decision.anomalies})
                 )
                 response.headers["X-Orchesis-Decision"] = "DENY"
+                if recorder is not None:
+                    response.headers["X-Orchesis-Session-Id"] = session_id
+                    response.headers["X-Orchesis-Request-Id"] = request_id
                 return response
             if behavior_decision.action == "learning":
                 behavior_state = "learning"
@@ -1258,6 +1306,9 @@ def create_proxy_app(
             )
             response.headers["X-Orchesis-Trace-Id"] = trace.trace_id
             response.headers["X-Orchesis-Decision"] = "DENY"
+            if recorder is not None:
+                response.headers["X-Orchesis-Session-Id"] = session_id
+                response.headers["X-Orchesis-Request-Id"] = request_id
             return response
 
         forwarded_headers = {
@@ -1279,6 +1330,9 @@ def create_proxy_app(
                 )
                 response.headers["X-Orchesis-Trace-Id"] = trace.trace_id
                 response.headers["X-Orchesis-Decision"] = "DENY"
+                if recorder is not None:
+                    response.headers["X-Orchesis-Session-Id"] = session_id
+                    response.headers["X-Orchesis-Request-Id"] = request_id
                 return response
             injected_params = injected.get("params") if isinstance(injected.get("params"), dict) else extracted_params
             extracted_params = dict(injected_params)
@@ -1346,12 +1400,49 @@ def create_proxy_app(
             )
         response.headers["X-Orchesis-Trace-Id"] = trace.trace_id
         response.headers["X-Orchesis-Decision"] = "ALLOW"
+        if recorder is not None:
+            response.headers["X-Orchesis-Session-Id"] = session_id
+            response.headers["X-Orchesis-Request-Id"] = request_id
         if behavioral_detector.enabled:
             response.headers["X-Orchesis-Behavior"] = behavior_state
             if behavior_score:
                 response.headers["X-Orchesis-Anomaly-Score"] = behavior_score
             if behavior_dimensions:
                 response.headers["X-Orchesis-Anomaly-Dimensions"] = behavior_dimensions
+        if recorder is not None:
+            response_obj: dict[str, Any] | None = None
+            try:
+                parsed_content = json.loads(forwarded.content.decode("utf-8"))
+                if isinstance(parsed_content, dict):
+                    response_obj = parsed_content
+            except Exception:
+                response_obj = None
+            include_response = bool(recording_cfg.get("include_response_body", True))
+            exclude_models = recording_cfg.get("exclude_models", [])
+            model_used = str((body_json or {}).get("model", ""))
+            if not (isinstance(exclude_models, list) and model_used in exclude_models):
+                recorder.record(
+                    SessionRecord(
+                        request_id=request_id,
+                        session_id=session_id,
+                        timestamp=time.time(),
+                        request=body_json if isinstance(body_json, dict) else {},
+                        response=response_obj if include_response else None,
+                        status_code=forwarded.status_code,
+                        provider="openai",
+                        model=model_used,
+                        latency_ms=(time.perf_counter() - request_started) * 1000.0,
+                        cost=float(eval_request.get("cost", 0.0)),
+                        error=None if forwarded.status_code < 400 else f"http_{forwarded.status_code}",
+                        metadata={
+                            "agent_id": context.get("agent", "default"),
+                            "trace_id": trace.trace_id,
+                            "behavioral_state": behavior_state,
+                            "cascade_level": "",
+                            "loop_state": "",
+                        },
+                    )
+                )
         return response
 
     @app.get("/metrics")
@@ -1375,6 +1466,37 @@ def create_proxy_app(
             "uptime_seconds": int(max(0.0, time.perf_counter() - app_started_at)),
             "total_decisions": total_decisions,
         }
+
+    @app.get("/stats")
+    def stats_endpoint() -> dict[str, Any]:
+        payload = {"policy_version": current_policy_hash}
+        if recorder is not None:
+            payload["recorder"] = recorder.get_stats()
+        if behavioral_detector.enabled:
+            payload["behavioral_detector"] = behavioral_detector.get_stats()
+        return payload
+
+    @app.get("/sessions")
+    def sessions_endpoint() -> dict[str, Any]:
+        if recorder is None:
+            return {"sessions": []}
+        return {"sessions": [asdict(item) for item in recorder.list_sessions()]}
+
+    @app.get("/sessions/{session_id}")
+    def session_summary_endpoint(session_id: str) -> dict[str, Any]:
+        if recorder is None:
+            return {"error": "recording_disabled"}
+        try:
+            summary = recorder.get_session_summary(session_id)
+        except FileNotFoundError:
+            return {"error": "session_not_found"}
+        return {"session": asdict(summary)}
+
+    @app.delete("/sessions/{session_id}")
+    def session_delete_endpoint(session_id: str) -> dict[str, Any]:
+        if recorder is None:
+            return {"deleted": False, "error": "recording_disabled"}
+        return {"deleted": recorder.delete_session(session_id), "session_id": session_id}
 
     return app
 
@@ -1478,6 +1600,17 @@ class LLMHTTPProxy:
         behavioral_cfg = self._policy.get("behavioral_fingerprint")
         self._behavioral_cfg = behavioral_cfg if isinstance(behavioral_cfg, dict) else {}
         self._behavioral_detector = BehavioralDetector(self._behavioral_cfg)
+        recording_cfg = self._policy.get("recording")
+        self._recording_cfg = recording_cfg if isinstance(recording_cfg, dict) else {}
+        self._recorder = (
+            SessionRecorder(
+                storage_path=str(self._recording_cfg.get("storage_path", ".orchesis/sessions")),
+                compress=bool(self._recording_cfg.get("compress", True)),
+                max_file_size_mb=int(self._recording_cfg.get("max_file_size_mb", 10)),
+            )
+            if bool(self._recording_cfg.get("enabled", False))
+            else None
+        )
         kill_cfg = self._policy.get("kill_switch")
         self._kill_cfg = kill_cfg if isinstance(kill_cfg, dict) else {}
         self._kill_enabled = bool(self._kill_cfg.get("enabled", False))
@@ -1535,6 +1668,8 @@ class LLMHTTPProxy:
         }
         if self._behavioral_detector.enabled:
             payload["behavioral_detector"] = self._behavioral_detector.get_stats()
+        if self._recorder is not None:
+            payload["recorder"] = self._recorder.get_stats()
         return payload
 
     @property
@@ -1550,6 +1685,9 @@ class LLMHTTPProxy:
 
             def do_GET(self) -> None:  # noqa: N802
                 proxy._handle_get(self)
+
+            def do_DELETE(self) -> None:  # noqa: N802
+                proxy._handle_delete(self)
 
             def do_OPTIONS(self) -> None:  # noqa: N802
                 self.send_response(200)
@@ -1579,6 +1717,8 @@ class LLMHTTPProxy:
             self._server.server_close()
             self._server = None
         self._state_tracker.flush()
+        if self._recorder is not None:
+            self._recorder.close_all()
 
     def _inc(self, field: str) -> None:
         with self._stats_lock:
@@ -1605,17 +1745,44 @@ class LLMHTTPProxy:
         if handler.path == "/stats":
             self._send_json(handler, 200, self.stats)
             return
+        if handler.path == "/sessions" and self._recorder is not None:
+            sessions = [asdict(item) for item in self._recorder.list_sessions()]
+            self._send_json(handler, 200, {"sessions": sessions})
+            return
+        if handler.path.startswith("/sessions/") and self._recorder is not None:
+            session_id = handler.path.split("/sessions/", 1)[1].strip()
+            if not session_id:
+                self._send_json(handler, 400, {"error": "session_id_required"})
+                return
+            try:
+                summary = self._recorder.get_session_summary(session_id)
+            except FileNotFoundError:
+                self._send_json(handler, 404, {"error": "session_not_found"})
+                return
+            self._send_json(handler, 200, {"session": asdict(summary)})
+            return
         self._send_json(handler, 404, {"error": "Not found"})
 
     def _handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         self._inc("requests")
         proc_result: dict[str, Any] = {"cost": 0.0}
+        request_started = time.perf_counter()
         loop_warning_header = ""
         circuit_state_header = self._circuit_breaker.get_state().lower().replace("_", "-")
         behavior_header = "normal"
         behavior_score_header = ""
         behavior_dims_header = ""
         behavior_agent_id = "default"
+        session_id = self._resolve_session_id(handler.headers) if self._recorder is not None else ""
+        request_id = uuid.uuid4().hex if self._recorder is not None else ""
+        session_headers = (
+            {
+                "X-Orchesis-Session-Id": session_id,
+                "X-Orchesis-Request-Id": request_id,
+            }
+            if self._recorder is not None
+            else {}
+        )
         try:
             if handler.path == "/kill":
                 self._handle_kill(handler)
@@ -1674,11 +1841,39 @@ class LLMHTTPProxy:
                     handler.send_header("X-Orchesis-Cascade-Level", pre_level_name)
                     handler.send_header("X-Orchesis-Cascade-Model", pre_model or "")
                     handler.send_header("X-Orchesis-Cache", "hit")
+                    if self._recorder is not None:
+                        handler.send_header("X-Orchesis-Session-Id", session_id)
+                        handler.send_header("X-Orchesis-Request-Id", request_id)
                     if self._config.cors:
                         handler.send_header("Access-Control-Allow-Origin", "*")
                     handler.end_headers()
                     handler.wfile.write(cached_payload)
                     self._inc("allowed")
+                    cached_obj: dict[str, Any] | None = None
+                    try:
+                        decoded_cached = json.loads(cached_payload.decode("utf-8"))
+                        if isinstance(decoded_cached, dict):
+                            cached_obj = decoded_cached
+                    except Exception:
+                        cached_obj = None
+                    self._record_session(
+                        request_id=request_id,
+                        session_id=session_id,
+                        request_body=body,
+                        response_body=cached_obj,
+                        status_code=200,
+                        provider=parsed_req.provider,
+                        model=str(body.get("model", "")),
+                        latency_ms=(time.perf_counter() - request_started) * 1000.0,
+                        cost=0.0,
+                        error=None,
+                        metadata={
+                            "agent_id": behavior_agent_id,
+                            "behavioral_state": behavior_header,
+                            "cascade_level": pre_level_name,
+                            "loop_state": loop_warning_header,
+                        },
+                    )
                     return
 
                 cascade_decision = self._cascade_router.route(parsed_req, context=cascade_context)
@@ -1777,6 +1972,25 @@ class LLMHTTPProxy:
                         {
                             "error": "behavioral_anomaly",
                             "anomalies": [asdict(item) for item in behavior_decision.anomalies],
+                        },
+                        extra_headers=session_headers,
+                    )
+                    self._record_session(
+                        request_id=request_id,
+                        session_id=session_id,
+                        request_body=body,
+                        response_body=None,
+                        status_code=429,
+                        provider=parsed_req.provider,
+                        model=str(body.get("model", "")),
+                        latency_ms=(time.perf_counter() - request_started) * 1000.0,
+                        cost=float(proc_result.get("cost", 0.0)),
+                        error="behavioral_anomaly",
+                        metadata={
+                            "agent_id": behavior_agent_id,
+                            "behavioral_state": "anomaly",
+                            "cascade_level": cascade_level_name,
+                            "loop_state": loop_warning_header,
                         },
                     )
                     return
@@ -2008,6 +2222,9 @@ class LLMHTTPProxy:
             handler.send_header("X-Orchesis-Cascade-Model", str(body.get("model", original_model)))
             handler.send_header("X-Orchesis-Cache", cascade_cache_state)
             handler.send_header("X-Orchesis-Circuit", self._circuit_breaker.get_state().lower().replace("_", "-"))
+            if self._recorder is not None:
+                handler.send_header("X-Orchesis-Session-Id", session_id)
+                handler.send_header("X-Orchesis-Request-Id", request_id)
             if loop_warning_header:
                 handler.send_header("X-Orchesis-Loop-Warning", loop_warning_header)
             if self._behavioral_detector.enabled:
@@ -2021,10 +2238,40 @@ class LLMHTTPProxy:
             handler.end_headers()
             handler.wfile.write(resp_body)
             self._inc("allowed")
+            response_obj: dict[str, Any] | None = None
+            try:
+                parsed_obj = json.loads(resp_body.decode("utf-8"))
+                if isinstance(parsed_obj, dict):
+                    response_obj = parsed_obj
+            except Exception:
+                response_obj = None
+            self._record_session(
+                request_id=request_id,
+                session_id=session_id,
+                request_body=body,
+                response_body=response_obj,
+                status_code=resp_status,
+                provider=provider,
+                model=str(body.get("model", original_model)),
+                latency_ms=(time.perf_counter() - request_started) * 1000.0,
+                cost=float(proc_result.get("cost", 0.0)),
+                error=None if resp_status < 400 else f"http_{resp_status}",
+                metadata={
+                    "agent_id": behavior_agent_id,
+                    "behavioral_state": behavior_header,
+                    "cascade_level": cascade_level_name,
+                    "loop_state": loop_warning_header,
+                },
+            )
         except Exception as error:  # noqa: BLE001
             _HTTP_PROXY_LOGGER.exception("proxy runtime error")
             self._inc("errors")
-            self._send_json(handler, 500, {"error": {"type": "proxy_error", "message": str(error)}})
+            self._send_json(
+                handler,
+                500,
+                {"error": {"type": "proxy_error", "message": str(error)}},
+                extra_headers=session_headers,
+            )
 
     def _handle_kill(self, handler: BaseHTTPRequestHandler) -> None:
         payload = self._read_json_body(handler)
@@ -2039,6 +2286,20 @@ class LLMHTTPProxy:
             200,
             {"status": "killed", "reason": self._kill_reason, "killed_at": self._kill_time},
         )
+
+    def _handle_delete(self, handler: BaseHTTPRequestHandler) -> None:
+        if handler.path.startswith("/sessions/") and self._recorder is not None:
+            session_id = handler.path.split("/sessions/", 1)[1].strip()
+            if not session_id:
+                self._send_json(handler, 400, {"error": "session_id_required"})
+                return
+            deleted = self._recorder.delete_session(session_id)
+            if deleted:
+                self._send_json(handler, 200, {"deleted": True, "session_id": session_id})
+                return
+            self._send_json(handler, 404, {"deleted": False, "error": "session_not_found"})
+            return
+        self._send_json(handler, 404, {"error": "Not found"})
 
     def _handle_resume(self, handler: BaseHTTPRequestHandler) -> None:
         payload = self._read_json_body(handler)
@@ -2103,6 +2364,52 @@ class LLMHTTPProxy:
         threshold = int(threshold_raw) if isinstance(threshold_raw, int | float) else 5
         return self._loop_trigger_hits >= max(1, threshold)
 
+    @staticmethod
+    def _resolve_session_id(headers: Any) -> str:
+        sid = headers.get("X-Session") or headers.get("x-session")
+        if not isinstance(sid, str) or not sid.strip():
+            sid = headers.get("X-Orchesis-Session-Id") or headers.get("x-orchesis-session-id")
+        if isinstance(sid, str) and sid.strip():
+            return sid.strip()
+        return uuid.uuid4().hex
+
+    def _record_session(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        request_body: dict[str, Any],
+        response_body: dict[str, Any] | None,
+        status_code: int,
+        provider: str,
+        model: str,
+        latency_ms: float,
+        cost: float,
+        error: str | None,
+        metadata: dict[str, Any],
+    ) -> None:
+        if self._recorder is None:
+            return
+        exclude = self._recording_cfg.get("exclude_models", [])
+        if isinstance(exclude, list) and model in exclude:
+            return
+        include_response = bool(self._recording_cfg.get("include_response_body", True))
+        record = SessionRecord(
+            request_id=request_id,
+            session_id=session_id,
+            timestamp=time.time(),
+            request=request_body,
+            response=response_body if include_response else None,
+            status_code=int(status_code),
+            provider=provider,
+            model=model,
+            latency_ms=float(latency_ms),
+            cost=float(cost),
+            error=error,
+            metadata=metadata,
+        )
+        self._recorder.record(record)
+
     def _build_forward_headers(self, source: Any, payload: bytes) -> dict[str, str]:
         headers: dict[str, str] = {"Content-Type": "application/json", "Content-Length": str(len(payload))}
         pass_headers = {
@@ -2146,11 +2453,20 @@ class LLMHTTPProxy:
             return "openai"
         return parsed_provider if parsed_provider in {"anthropic", "openai"} else "openai"
 
-    def _send_json(self, handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
+    def _send_json(
+        self,
+        handler: BaseHTTPRequestHandler,
+        status: int,
+        payload: dict[str, Any],
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", str(len(body)))
+        if isinstance(extra_headers, dict):
+            for key, value in extra_headers.items():
+                handler.send_header(str(key), str(value))
         if self._config.cors:
             handler.send_header("Access-Control-Allow-Origin", "*")
         handler.end_headers()
