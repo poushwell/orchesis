@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\.github\actions\orchesis-scan\sarif_formatter.py
+# hypothesis_version: 6.151.9
+
+['$schema', '2.0', '2.1.0', '5.0', '5.5', '8.0', '9.5', 'artifactLocation', 'critical', 'driver', 'endTimeUtc', 'error', 'executionSuccessful', 'fullDescription', 'help', 'high', 'id', 'invocations', 'level', 'locations', 'low', 'medium', 'message', 'name', 'note', 'physicalLocation', 'precision', 'problem.severity', 'properties', 'region', 'results', 'ruleId', 'rules', 'runs', 'security-severity', 'shortDescription', 'startLine', 'text', 'tool', 'uri', 'version', 'warning']

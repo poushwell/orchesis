@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\mcp_server.py
+# hypothesis_version: 6.151.9
+
+[-32700, -32602, -32601, -32600, '0.7.0', '2.0', '2024-11-05', 'Invalid Request', 'Invalid params', "MCP tool '%s' failed", 'arguments', 'capabilities', 'code', 'content', 'description', 'error', 'handler', 'id', 'initialize', 'initialized', 'inputSchema', 'isError', 'jsonrpc', 'listChanged', 'message', 'method', 'name', 'object', 'orchesis', 'orchesis.mcp', 'params', 'ping', 'properties', 'protocolVersion', 'required', 'result', 'serverInfo', 'text', 'tools', 'tools/call', 'tools/list', 'type', 'version']

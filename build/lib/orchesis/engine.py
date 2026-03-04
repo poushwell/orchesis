@@ -3,6 +3,7 @@
 import hashlib
 import ipaddress
 import json
+import fnmatch
 import posixpath
 import re
 import threading
@@ -469,6 +470,160 @@ def _tier_allowed_and_denied(
     return set(), set(), False
 
 
+def _extract_domains(params: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for candidate in _extract_network_values(params):
+        parsed = urlparse(candidate)
+        if parsed.hostname:
+            values.append(parsed.hostname.lower())
+        elif isinstance(candidate, str) and candidate.strip():
+            values.append(candidate.strip().lower())
+    return values
+
+
+def _extract_commands(params: dict[str, Any]) -> list[str]:
+    commands: list[str] = []
+    for key in ("command", "cmd", "shell_command"):
+        candidate = params.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            commands.append(candidate.strip())
+    for value in _iter_string_values(params):
+        if not isinstance(value, str) or not value.strip():
+            continue
+        lowered = value.strip().lower()
+        if lowered.startswith(("git ", "ls", "cat ", "python ", "bash ", "sh ")):
+            commands.append(value.strip())
+    return commands
+
+
+def _matches_any_glob(value: str, patterns: list[str], *, case_insensitive: bool = True) -> bool:
+    source = value.lower() if case_insensitive else value
+    for pattern in patterns:
+        candidate = pattern.lower() if case_insensitive else pattern
+        if fnmatch.fnmatch(source, candidate):
+            return True
+        if "/**/" in candidate:
+            fallback = candidate.replace("/**/", "/*/")
+            if fnmatch.fnmatch(source, fallback):
+                return True
+        if candidate.endswith("/**"):
+            fallback = candidate[:-3] + "/*"
+            if fnmatch.fnmatch(source, fallback):
+                return True
+    return False
+
+
+def _constraint_denies(values: list[str], patterns: list[str], *, normalize_path: bool = False) -> bool:
+    if not values or not patterns:
+        return False
+    for raw in values:
+        value = raw
+        if normalize_path:
+            try:
+                value = _normalize_path(raw)
+            except Exception:
+                continue
+        if _matches_any_glob(value, patterns):
+            return True
+    return False
+
+
+def _constraint_allows(values: list[str], patterns: list[str], *, normalize_path: bool = False) -> bool:
+    if not patterns:
+        return True
+    if not values:
+        return True
+    for raw in values:
+        value = raw
+        if normalize_path:
+            try:
+                value = _normalize_path(raw)
+            except Exception:
+                continue
+        if not _matches_any_glob(value, patterns):
+            return False
+    return True
+
+
+def _evaluate_capabilities(
+    *,
+    policy: dict[str, Any],
+    tool: str,
+    request_params: dict[str, Any],
+    default_action: str,
+) -> tuple[list[str], list[str]]:
+    reasons: list[str] = []
+    checked: list[str] = []
+    capabilities = policy.get("capabilities")
+    if not isinstance(capabilities, list):
+        return reasons, checked
+
+    checked.append("capabilities")
+    matching: list[dict[str, Any]] = []
+    for item in capabilities:
+        if not isinstance(item, dict):
+            continue
+        cap_tool = item.get("tool")
+        if not isinstance(cap_tool, str):
+            continue
+        if cap_tool == "*" or cap_tool == tool:
+            matching.append(item)
+
+    paths = _extract_paths(request_params)
+    domains = _extract_domains(request_params)
+    commands = _extract_commands(request_params)
+
+    for item in matching:
+        deny = item.get("deny")
+        if not isinstance(deny, dict):
+            continue
+        deny_paths = [str(pattern) for pattern in deny.get("paths", []) if isinstance(pattern, str)]
+        deny_domains = [str(pattern) for pattern in deny.get("domains", []) if isinstance(pattern, str)]
+        deny_commands = [str(pattern) for pattern in deny.get("commands", []) if isinstance(pattern, str)]
+        if _constraint_denies(paths, deny_paths, normalize_path=True):
+            reasons.append(f"capabilities: tool '{tool}' denied by path constraint")
+            return reasons, checked
+        if _constraint_denies(domains, deny_domains):
+            reasons.append(f"capabilities: tool '{tool}' denied by domain constraint")
+            return reasons, checked
+        if _constraint_denies(commands, deny_commands):
+            reasons.append(f"capabilities: tool '{tool}' denied by command constraint")
+            return reasons, checked
+
+    if default_action == "allow":
+        return reasons, checked
+
+    if not matching:
+        reasons.append(f"capabilities: tool '{tool}' is not explicitly allowed (default_action=deny)")
+        return reasons, checked
+
+    allow_ok = False
+    has_allow_constraints = False
+    for item in matching:
+        allow = item.get("allow")
+        if not isinstance(allow, dict) or not allow:
+            allow_ok = True
+            continue
+        has_allow_constraints = True
+        allow_paths = [str(pattern) for pattern in allow.get("paths", []) if isinstance(pattern, str)]
+        allow_domains = [str(pattern) for pattern in allow.get("domains", []) if isinstance(pattern, str)]
+        allow_commands = [str(pattern) for pattern in allow.get("commands", []) if isinstance(pattern, str)]
+        if (
+            _constraint_allows(paths, allow_paths, normalize_path=True)
+            and _constraint_allows(domains, allow_domains)
+            and _constraint_allows(commands, allow_commands)
+        ):
+            allow_ok = True
+            break
+
+    if not allow_ok:
+        if has_allow_constraints:
+            reasons.append(f"capabilities: tool '{tool}' does not satisfy allow constraints")
+        else:
+            reasons.append(f"capabilities: tool '{tool}' is blocked by default_action=deny")
+    return reasons, checked
+
+
 def _evaluate_tool_access_control(
     *,
     policy: dict[str, Any] | None,
@@ -541,6 +696,25 @@ def _evaluate_tool_access_control(
                     f"tool_access_control: session budget exceeded for '{session_type}' ({spent + safe_cost} > {session_budget})"
                 )
 
+    if invalid_tool_name:
+        checked.append("tool_access_control")
+        reasons.append("tool_access_control: tool name contains control characters")
+        return reasons, checked, effective_tier
+
+    default_action = str(policy.get("default_action", "allow")).strip().lower()
+    if default_action not in {"allow", "deny"}:
+        default_action = "allow"
+    request_params = request.get("params")
+    safe_params = request_params if isinstance(request_params, dict) else {}
+    capability_reasons, capability_checked = _evaluate_capabilities(
+        policy=policy,
+        tool=tool,
+        request_params=safe_params,
+        default_action=default_action,
+    )
+    reasons.extend(capability_reasons)
+    checked.extend(capability_checked)
+
     # Top-level or session-level tool access.
     base_tool_access = policy.get("tool_access") if isinstance(policy.get("tool_access"), dict) else None
     tool_access = _extract_tool_access(base_tool_access, session_config)
@@ -549,9 +723,6 @@ def _evaluate_tool_access_control(
 
     mode = str(tool_access.get("mode", "denylist")).strip().lower()
     checked.append("tool_access_control")
-    if invalid_tool_name:
-        reasons.append("tool_access_control: tool name contains control characters")
-        return reasons, checked, effective_tier
 
     if mode == "allowlist":
         allowed = {

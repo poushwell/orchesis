@@ -57,6 +57,7 @@ from orchesis.webhooks import WebhookConfig, WebhookEmitter
 from orchesis.request_parser import ParsedResponse, parse_request, parse_response
 from orchesis.recorder import SessionRecord, SessionRecorder
 from orchesis.response_handler import ResponseProcessor, SECRET_PATTERNS
+from orchesis.flow_xray import FlowAnalyzer, FlowXRayConfig
 
 _HTTP_PROXY_LOGGER = logging.getLogger("orchesis.http_proxy")
 
@@ -1563,6 +1564,7 @@ class _RequestContext:
     resp_headers: dict[str, str] = field(default_factory=dict)
     resp_body: bytes = b""
     parsed_resp_obj: Any = None  # ParsedResponse | None
+    flow_node_id: str = ""
 
 
 class LLMHTTPProxy:
@@ -1626,6 +1628,27 @@ class LLMHTTPProxy:
             cost_tracker=self._cost_tracker,
             secret_patterns=SECRET_PATTERNS,
             scan_secrets=self._scan_response,
+        )
+        flow_cfg_raw = self._policy.get("flow_xray")
+        self._flow_cfg = flow_cfg_raw if isinstance(flow_cfg_raw, dict) else {}
+        self._flow_analyzer = (
+            FlowAnalyzer(
+                FlowXRayConfig(
+                    enabled=bool(self._flow_cfg.get("enabled", False)),
+                    max_sessions=int(self._flow_cfg.get("max_sessions", 1000)),
+                    redundancy_window_seconds=float(self._flow_cfg.get("redundancy_window_seconds", 30.0)),
+                    retry_threshold=int(self._flow_cfg.get("retry_threshold", 3)),
+                    ping_pong_min_repetitions=int(self._flow_cfg.get("ping_pong_min_repetitions", 3)),
+                    token_waste_stddev_threshold=float(self._flow_cfg.get("token_waste_stddev_threshold", 2.0)),
+                    latency_spike_threshold=float(self._flow_cfg.get("latency_spike_threshold", 0.5)),
+                    suspicious_tool_chains=self._flow_cfg.get("suspicious_tool_chains", []),
+                    enable_security_patterns=bool(self._flow_cfg.get("enable_security_patterns", True)),
+                    enable_efficiency_patterns=bool(self._flow_cfg.get("enable_efficiency_patterns", True)),
+                    enable_performance_patterns=bool(self._flow_cfg.get("enable_performance_patterns", True)),
+                )
+            )
+            if bool(self._flow_cfg.get("enabled", False))
+            else None
         )
         behavioral_cfg = self._policy.get("behavioral_fingerprint")
         self._behavioral_cfg = behavioral_cfg if isinstance(behavioral_cfg, dict) else {}
@@ -1700,6 +1723,8 @@ class LLMHTTPProxy:
             payload["behavioral_detector"] = self._behavioral_detector.get_stats()
         if self._recorder is not None:
             payload["recorder"] = self._recorder.get_stats()
+        if self._flow_analyzer is not None:
+            payload["flow_xray"] = self._flow_analyzer.get_stats()
         return payload
 
     @property
@@ -1791,6 +1816,40 @@ class LLMHTTPProxy:
                 return
             self._send_json(handler, 200, {"session": asdict(summary)})
             return
+        if handler.path == "/api/flow/sessions":
+            if self._flow_analyzer is None:
+                self._send_json(handler, 200, {"sessions": []})
+                return
+            self._send_json(handler, 200, {"sessions": self._flow_analyzer.list_sessions()})
+            return
+        if handler.path.startswith("/api/flow/analyze/"):
+            if self._flow_analyzer is None:
+                self._send_json(handler, 404, {"error": "Session not found"})
+                return
+            session_id = handler.path.split("/api/flow/analyze/", 1)[1].strip()
+            analysis = self._flow_analyzer.analyze_session(session_id)
+            if analysis is None:
+                self._send_json(handler, 404, {"error": "Session not found"})
+                return
+            self._send_json(handler, 200, analysis.to_dict())
+            return
+        if handler.path.startswith("/api/flow/graph/"):
+            if self._flow_analyzer is None:
+                self._send_json(handler, 404, {"error": "Session not found"})
+                return
+            session_id = handler.path.split("/api/flow/graph/", 1)[1].strip()
+            graph_json = self._flow_analyzer.export_graph_json(session_id)
+            if not graph_json:
+                self._send_json(handler, 404, {"error": "Session not found"})
+                return
+            self._send_json(handler, 200, json.loads(graph_json))
+            return
+        if handler.path == "/api/flow/patterns":
+            if self._flow_analyzer is None:
+                self._send_json(handler, 200, {"sessions_tracked": 0, "pattern_counts": {}})
+                return
+            self._send_json(handler, 200, self._flow_analyzer.get_stats())
+            return
         self._send_json(handler, 404, {"error": "Not found"})
 
     def _phase_parse(self, ctx: _RequestContext) -> bool:
@@ -1871,6 +1930,28 @@ class LLMHTTPProxy:
             ctx.body["model"] = ctx.cascade_decision.model
         if ctx.cascade_decision.max_tokens > 0:
             ctx.body["max_tokens"] = ctx.cascade_decision.max_tokens
+        return True
+
+    def _phase_flow_xray_record(self, ctx: _RequestContext) -> bool:
+        if self._flow_analyzer is None:
+            return True
+        tool_names: list[str] = []
+        tools_raw = ctx.body.get("tools")
+        if isinstance(tools_raw, list):
+            for item in tools_raw:
+                if isinstance(item, dict):
+                    name = item.get("name")
+                    if isinstance(name, str) and name:
+                        tool_names.append(name)
+                elif isinstance(item, str) and item:
+                    tool_names.append(item)
+        flow_session = ctx.session_id or "default"
+        ctx.flow_node_id = self._flow_analyzer.record_request(
+            session_id=flow_session,
+            model=str(ctx.body.get("model", ctx.original_model)),
+            messages=ctx.body.get("messages", []) if isinstance(ctx.body.get("messages"), list) else [],
+            tools=tool_names,
+        )
         return True
 
     def _phase_circuit_breaker(self, ctx: _RequestContext) -> bool:
@@ -2115,7 +2196,7 @@ class LLMHTTPProxy:
             ctx.resp_status = int(error.code)
             ctx.resp_headers = dict(error.headers.items()) if error.headers is not None else {}
             ctx.resp_body = error.read()
-        except URLError as error:
+        except (URLError, OSError) as error:
             self._circuit_breaker.record_failure()
             self._inc("errors")
             self._send_json(
@@ -2213,6 +2294,29 @@ class LLMHTTPProxy:
                 is_error=ctx.resp_status >= 400,
                 completion_tokens=completion_tokens,
             )
+        if self._flow_analyzer is not None and ctx.flow_node_id:
+            tool_calls_for_flow: list[dict[str, Any]] = []
+            if ctx.parsed_resp_obj is not None:
+                for tool_call in getattr(ctx.parsed_resp_obj, "tool_calls", []):
+                    name = getattr(tool_call, "name", "")
+                    params = getattr(tool_call, "params", {})
+                    if isinstance(name, str) and name:
+                        tool_calls_for_flow.append(
+                            {
+                                "name": name,
+                                "input": params if isinstance(params, dict) else {},
+                            }
+                        )
+            self._flow_analyzer.record_response(
+                session_id=ctx.session_id or "default",
+                node_id=ctx.flow_node_id,
+                tokens_in=int(getattr(ctx.parsed_resp_obj, "input_tokens", 0)) if ctx.parsed_resp_obj is not None else 0,
+                tokens_out=int(getattr(ctx.parsed_resp_obj, "output_tokens", 0)) if ctx.parsed_resp_obj is not None else 0,
+                cost_usd=float(ctx.proc_result.get("cost", 0.0)),
+                latency_ms=(time.perf_counter() - ctx.request_started) * 1000.0,
+                status="ok" if ctx.resp_status < 400 else "error",
+                tool_calls=tool_calls_for_flow,
+            )
         return True
 
     def _phase_send_response(self, ctx: _RequestContext) -> None:
@@ -2302,6 +2406,8 @@ class LLMHTTPProxy:
                 )
                 return
             if not self._phase_parse(ctx):
+                return
+            if not self._phase_flow_xray_record(ctx):
                 return
             if not self._phase_cascade(ctx):
                 return

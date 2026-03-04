@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\cost_tracker.py
+# hypothesis_version: 6.151.9
+
+[0.0, 0.0001, 0.00015, 0.0004, 0.0006, 0.0008, 0.001, 0.0016, 0.002, 0.0025, 0.003, 0.004, 0.005, 0.008, 0.01, 0.015, 0.02, 0.075, 2.0, 100.0, 1000.0, -1000, 'calls', 'claude-haiku-4', 'claude-opus-4', 'claude-sonnet-4', 'code_interpreter', 'daily', 'daily_budget', 'daily_percent', 'daily_remaining', 'daily_spent', 'daily_totals', 'default', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-4o', 'gpt-4o-mini', 'inf', 'input', 'limit', 'output', 'over', 'over_budget', 'per_tool', 'per_tool_status', 'percent', 'read_file', 'send_email', 'shell_execute', 'soft_limit_percent', 'soft_limit_reached', 'spent', 'task_totals', 'tool_daily', 'web_search', 'write_file']

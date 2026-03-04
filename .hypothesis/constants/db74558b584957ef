@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\replayer.py
+# hypothesis_version: 6.151.9
+
+[0.0, 100.0, 1000.0, 400, 429, 502, '/', '/replay', '/v1/chat/completions', 'Content-Type', 'POST', 'application/json', 'blocked_by_policy', 'completion_tokens', 'context', 'cost', 'default', 'input', 'llm_request', 'messages', 'model', 'output', 'output_tokens', 'params', 'path', 'tool', 'unknown', 'usage', 'utf-8']

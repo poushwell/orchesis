@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\.github\actions\orchesis-scan\checks\dependency_checks.py
+# hypothesis_version: 6.151.9
+
+['0.9.8', '1.3.2', '2.1.0', '@', 'CVE-2025-99421', 'CVE-2026-12007', 'CVE-2026-31011', 'DEP_VULNERABLE_IMAGE', 'DEP_VULNERABLE_NPX', '\\d+', 'args', 'command', 'critical', 'cve', 'high', 'image', 'latest', 'legacy-mcp-bridge', 'max_vulnerable', 'mcp-shell-server', 'mcpServers', 'medium', 'npx', 'openclaw-mcp', 'package', 'servers', 'utf-8']

@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\.github\actions\orchesis-scan\checks\models.py
+# hypothesis_version: 6.151.9
+
+['critical', 'high', 'low', 'medium']

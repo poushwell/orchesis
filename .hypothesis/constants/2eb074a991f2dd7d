@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\circuit_breaker.py
+# hypothesis_version: 6.151.9
+
+[0.0, 1.0, 2.0, 300, 503, 'CLOSED', 'HALF_OPEN', 'OPEN', 'cooldown_remaining', 'error_count', 'last_failure', 'state', 'trip_count']

@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\.github\actions\orchesis-scan\checks\policy_checks.py
+# hypothesis_version: 6.151.9
+
+['POL_AUDIT_MISSING', 'POL_BUDGETS_MISSING', 'POL_NO_DENY_RULES', 'POL_READ_ERROR', 'allowed_paths', 'allowed_paths: ["/"]', "allowed_paths: ['/']", 'allowed_paths: [/*]', 'audit', 'budgets:', 'capabilities:', 'daily:', 'default_action', 'default_action:', 'denied_', 'deny', 'high', 'kill_switch:', 'logging', 'loop_detection', 'loop_detection:', 'low', 'medium', 'rate_limits:', 'scan_outbound', 'scan_outbound: false', 'scan_response: false', 'secret_scanning:', 'secrets:', 'telemetry', 'tool_access:', 'utf-8']

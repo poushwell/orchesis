@@ -557,6 +557,95 @@ def _normalize_recording(policy: dict[str, Any]) -> None:
     policy["recording"] = raw
 
 
+def _normalize_flow_xray(policy: dict[str, Any]) -> None:
+    raw = policy.get("flow_xray")
+    if raw is None:
+        policy["flow_xray"] = {
+            "enabled": False,
+            "max_sessions": 1000,
+            "redundancy_window_seconds": 30.0,
+            "retry_threshold": 3,
+            "ping_pong_min_repetitions": 3,
+            "token_waste_stddev_threshold": 2.0,
+            "latency_spike_threshold": 0.5,
+            "enable_security_patterns": True,
+            "enable_efficiency_patterns": True,
+            "enable_performance_patterns": True,
+            "suspicious_tool_chains": [
+                ["read_file", "http_request"],
+                ["database_query", "http_request"],
+                ["get_secret", "http_request"],
+            ],
+        }
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("flow_xray must be a mapping")
+
+    raw["enabled"] = bool(raw.get("enabled", False))
+    max_sessions = raw.get("max_sessions", 1000)
+    if not _is_number(max_sessions) or int(max_sessions) <= 0:
+        raise PolicyError("flow_xray.max_sessions must be > 0")
+    raw["max_sessions"] = int(max_sessions)
+
+    redundancy_window = raw.get("redundancy_window_seconds", 30.0)
+    if not _is_number(redundancy_window) or float(redundancy_window) <= 0:
+        raise PolicyError("flow_xray.redundancy_window_seconds must be > 0")
+    raw["redundancy_window_seconds"] = float(redundancy_window)
+
+    retry_threshold = raw.get("retry_threshold", 3)
+    if not _is_number(retry_threshold) or int(retry_threshold) <= 0:
+        raise PolicyError("flow_xray.retry_threshold must be > 0")
+    raw["retry_threshold"] = int(retry_threshold)
+
+    ping_pong = raw.get("ping_pong_min_repetitions", 3)
+    if not _is_number(ping_pong) or int(ping_pong) < 2:
+        raise PolicyError("flow_xray.ping_pong_min_repetitions must be >= 2")
+    raw["ping_pong_min_repetitions"] = int(ping_pong)
+
+    token_waste_stddev = raw.get("token_waste_stddev_threshold", 2.0)
+    if not _is_number(token_waste_stddev) or float(token_waste_stddev) <= 0:
+        raise PolicyError("flow_xray.token_waste_stddev_threshold must be > 0")
+    raw["token_waste_stddev_threshold"] = float(token_waste_stddev)
+
+    latency_spike = raw.get("latency_spike_threshold", 0.5)
+    if not _is_number(latency_spike) or float(latency_spike) <= 0:
+        raise PolicyError("flow_xray.latency_spike_threshold must be > 0")
+    raw["latency_spike_threshold"] = float(latency_spike)
+
+    if "security_patterns" in raw and "enable_security_patterns" not in raw:
+        raw["enable_security_patterns"] = bool(raw.get("security_patterns", True))
+    if "efficiency_patterns" in raw and "enable_efficiency_patterns" not in raw:
+        raw["enable_efficiency_patterns"] = bool(raw.get("efficiency_patterns", True))
+    if "performance_patterns" in raw and "enable_performance_patterns" not in raw:
+        raw["enable_performance_patterns"] = bool(raw.get("performance_patterns", True))
+    raw["enable_security_patterns"] = bool(raw.get("enable_security_patterns", True))
+    raw["enable_efficiency_patterns"] = bool(raw.get("enable_efficiency_patterns", True))
+    raw["enable_performance_patterns"] = bool(raw.get("enable_performance_patterns", True))
+
+    chains = raw.get("suspicious_tool_chains")
+    if chains is None:
+        chains = [
+            ["read_file", "http_request"],
+            ["database_query", "http_request"],
+            ["get_secret", "http_request"],
+        ]
+    if not isinstance(chains, list):
+        raise PolicyError("flow_xray.suspicious_tool_chains must be a list of lists")
+    normalized_chains: list[list[str]] = []
+    for index, chain in enumerate(chains):
+        if not isinstance(chain, list):
+            raise PolicyError(f"flow_xray.suspicious_tool_chains[{index}] must be a list")
+        normalized_chain: list[str] = []
+        for item in chain:
+            if not isinstance(item, str) or not item.strip():
+                raise PolicyError(f"flow_xray.suspicious_tool_chains[{index}] entries must be non-empty strings")
+            normalized_chain.append(item.strip())
+        if normalized_chain:
+            normalized_chains.append(normalized_chain)
+    raw["suspicious_tool_chains"] = normalized_chains
+    policy["flow_xray"] = raw
+
+
 def _normalize_capability_constraints(raw: Any, *, key: str, index: int, section: str) -> list[str]:
     if raw is None:
         return []
@@ -652,6 +741,7 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     _normalize_loop_detection(loaded)
     _normalize_behavioral_fingerprint(loaded)
     _normalize_recording(loaded)
+    _normalize_flow_xray(loaded)
     _normalize_capabilities(loaded)
     return loaded
 

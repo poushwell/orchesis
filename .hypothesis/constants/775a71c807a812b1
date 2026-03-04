@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\behavioral.py
+# hypothesis_version: 6.151.9
+
+[0.0, 0.0001, 0.001, 1.0, 3.0, 3.5, 4.0, 10.0, 60.0, '-inf', 'Authorization', 'X-Agent-Id', 'X-Orchesis-Agent-Id', 'action', 'agents_learning', 'agents_monitored', 'allow', 'authorization', 'block', 'completion_tokens', 'cost_per_request', 'count', 'default', 'dimensions', 'enabled', 'error_rate', 'error_window_size', 'estimated_cost', 'first_seen', 'headers', 'inf', 'is_error', 'last_seen', 'learning', 'learning_window', 'log', 'max', 'mean', 'messages', 'min', 'model', 'model_distribution', 'monitoring', 'name', 'persist_baselines', 'persist_path', 'prompt_tokens', 'request_frequency', 'state', 'std', 'tool_count', 'tool_distribution', 'tools', 'total_cost', 'total_requests', 'unknown', 'variance', 'warn', 'x-agent-id', 'x-orchesis-agent-id', 'z_threshold']

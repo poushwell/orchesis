@@ -96,6 +96,10 @@ def preprocess_for_pii(text: str) -> list[str]:
             text = repr(text)
     if not text:
         return [text]
+    try:
+        text = text.replace("\x00", "")
+    except Exception:
+        pass
 
     versions: list[str] = [text]
     cleaned = text
@@ -164,19 +168,30 @@ class PiiDetector:
 
     def scan_text(self, text: str) -> list[dict[str, Any]]:
         all_findings: list[dict[str, Any]] = []
-        for version in preprocess_for_pii(text):
-            if self._use_fast_matching:
-                all_findings.extend(
-                    self._fast_detector.scan(
-                        version,
-                        threshold_rank=self._threshold,
-                        ignored_patterns=self._ignored,
-                        mask_fn=self._mask,
-                        severity_rank=_SEVERITY_RANK,
+        try:
+            versions = preprocess_for_pii(text)
+        except Exception:
+            return []
+        for version in versions:
+            try:
+                if self._use_fast_matching:
+                    all_findings.extend(
+                        self._fast_detector.scan(
+                            version,
+                            threshold_rank=self._threshold,
+                            ignored_patterns=self._ignored,
+                            mask_fn=self._mask,
+                            severity_rank=_SEVERITY_RANK,
+                        )
                     )
-                )
-            else:
-                all_findings.extend(self._scan_text_sequential(version))
+                else:
+                    all_findings.extend(self._scan_text_sequential(version))
+            except Exception:
+                # Defensive path for malformed Unicode / fuzzed inputs.
+                try:
+                    all_findings.extend(self._scan_text_sequential(version))
+                except Exception:
+                    continue
         deduped: list[dict[str, Any]] = []
         seen: set[tuple[str, str, int]] = set()
         for finding in sorted(all_findings, key=lambda item: int(item.get("position", 0))):

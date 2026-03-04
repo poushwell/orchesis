@@ -54,6 +54,7 @@ class CostTracker:
         self._daily_total: dict[str, float] = defaultdict(float)
         self._tool_daily: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
         self._task_total: dict[str, float] = defaultdict(float)
+        self._cascade_savings_daily: dict[str, float] = defaultdict(float)
 
     def record_call(
         self,
@@ -156,6 +157,27 @@ class CostTracker:
         with self._lock:
             self._daily_total.pop(today, None)
             self._tool_daily.pop(today, None)
+            self._cascade_savings_daily.pop(today, None)
+
+    def record_cascade_savings(self, original_model: str, actual_model: str, tokens: int) -> float:
+        safe_tokens = max(0, int(tokens))
+        if safe_tokens <= 0:
+            return 0.0
+        original_rates = self._model_costs.get(original_model, self._model_costs["default"])
+        actual_rates = self._model_costs.get(actual_model, self._model_costs["default"])
+        # Approximate mixed input/output token cost using average rate.
+        original_cost = (safe_tokens / 1000.0) * ((original_rates["input"] + original_rates["output"]) / 2.0)
+        actual_cost = (safe_tokens / 1000.0) * ((actual_rates["input"] + actual_rates["output"]) / 2.0)
+        savings = max(0.0, original_cost - actual_cost)
+        today = date.today().isoformat()
+        with self._lock:
+            self._cascade_savings_daily[today] += savings
+        return round(savings, 8)
+
+    def get_cascade_savings_today(self, day: str | None = None) -> float:
+        safe_day = day or date.today().isoformat()
+        with self._lock:
+            return float(self._cascade_savings_daily.get(safe_day, 0.0))
 
     def to_dict(self) -> dict[str, Any]:
         with self._lock:
@@ -164,5 +186,6 @@ class CostTracker:
                 "daily_totals": dict(self._daily_total),
                 "tool_daily": {day: dict(values) for day, values in self._tool_daily.items()},
                 "task_totals": dict(self._task_total),
+                "cascade_savings_daily": dict(self._cascade_savings_daily),
             }
 
