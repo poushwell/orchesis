@@ -1,6 +1,7 @@
 """FastAPI proxy layer using Orchesis rule engine."""
 
 import asyncio
+from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -58,6 +59,7 @@ from orchesis.request_parser import ParsedResponse, parse_request, parse_respons
 from orchesis.recorder import SessionRecord, SessionRecorder
 from orchesis.response_handler import ResponseProcessor, SECRET_PATTERNS
 from orchesis.flow_xray import FlowAnalyzer, FlowXRayConfig
+from orchesis.dashboard import get_dashboard_html
 
 _HTTP_PROXY_LOGGER = logging.getLogger("orchesis.http_proxy")
 
@@ -1676,6 +1678,7 @@ class LLMHTTPProxy:
         self._secret_trigger_hits = 0
         self._loop_trigger_hits = 0
         self._server: HTTPServer | None = None
+        self._start_time = time.time()
         self._stats_lock = threading.Lock()
         self._stats = {
             "requests": 0,
@@ -1686,6 +1689,11 @@ class LLMHTTPProxy:
             "cascade_requests_by_level": {"simple": 0, "medium": 0, "complex": 0},
             "started_at": datetime.now(timezone.utc).isoformat(),
         }
+        self._dashboard_events: deque[dict[str, Any]] = deque(maxlen=500)
+        self._dashboard_cost_timeline: deque[dict[str, float]] = deque(maxlen=1000)
+        self._dashboard_cost_timeline.append(
+            {"timestamp": time.time(), "cumulative_cost": float(self._cost_tracker.get_daily_total())}
+        )
 
     @property
     def stats(self) -> dict[str, Any]:
@@ -1778,8 +1786,137 @@ class LLMHTTPProxy:
     def _inc(self, field: str) -> None:
         with self._stats_lock:
             self._stats[field] = int(self._stats.get(field, 0)) + 1
+        if field == "blocked":
+            self._add_dashboard_event("blocked", "medium", "Request blocked by runtime guardrail.")
+        elif field == "errors":
+            self._add_dashboard_event("error", "high", "Runtime error while processing request.")
+
+    def _add_dashboard_event(
+        self,
+        event_type: str,
+        severity: str,
+        description: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._dashboard_events.append(
+            {
+                "timestamp": time.time(),
+                "type": str(event_type),
+                "severity": str(severity),
+                "description": str(description),
+                "metadata": metadata if isinstance(metadata, dict) else {},
+            }
+        )
+
+    def _build_dashboard_overview(self) -> dict[str, Any]:
+        stats = self.stats
+        now = time.time()
+        recent_events = sorted(self._dashboard_events, key=lambda e: float(e.get("timestamp", 0.0)), reverse=True)
+        critical_recent = [
+            e
+            for e in recent_events
+            if (now - float(e.get("timestamp", 0.0))) <= 60.0 and str(e.get("severity", "")).lower() == "critical"
+        ]
+        blocked_recent = [
+            e for e in recent_events if (now - float(e.get("timestamp", 0.0))) <= 300.0 and e.get("type") == "blocked"
+        ]
+        circuit_state = str(stats.get("circuit_breaker", {}).get("state", "CLOSED")).upper()
+        if circuit_state == "OPEN" or critical_recent:
+            status = "alert"
+        elif blocked_recent:
+            status = "monitoring"
+        else:
+            status = "clear"
+        flow_stats = stats.get("flow_xray", {}) if isinstance(stats.get("flow_xray"), dict) else {}
+        behavioral_stats = (
+            stats.get("behavioral_detector", {}) if isinstance(stats.get("behavioral_detector"), dict) else {}
+        )
+        active_agents = int(behavioral_stats.get("agents_monitored", 0)) + int(
+            behavioral_stats.get("agents_learning", 0)
+        )
+        circuit_breakers = {
+            "default": {
+                "state": str(stats.get("circuit_breaker", {}).get("state", "closed")).lower(),
+                "failures": int(stats.get("circuit_breaker", {}).get("error_count", 0)),
+            }
+        }
+        daily_limit = self._budget_cfg.get("daily")
+        limit_usd = float(daily_limit) if isinstance(daily_limit, int | float) else 0.0
+        spent_usd = float(stats.get("cost_today", 0.0))
+        budget = {
+            "limit_usd": limit_usd,
+            "spent_usd": spent_usd,
+            "remaining_usd": max(0.0, limit_usd - spent_usd) if limit_usd > 0 else 0.0,
+        }
+        return {
+            "status": status,
+            "uptime_seconds": max(0.0, now - self._start_time),
+            "total_requests": int(stats.get("requests", 0)),
+            "blocked_requests": int(stats.get("blocked", 0)),
+            "total_cost_usd": float(stats.get("cost_today", 0.0)),
+            "active_agents": active_agents,
+            "circuit_breakers": circuit_breakers,
+            "budget": budget,
+            "recent_events": recent_events[:20],
+            "cost_timeline": list(self._dashboard_cost_timeline),
+            "flow_xray": flow_stats,
+        }
+
+    def _build_dashboard_agents(self) -> dict[str, Any]:
+        if not self._behavioral_detector.enabled:
+            return {"agents": []}
+        agents_payload: list[dict[str, Any]] = []
+        with self._behavioral_detector._lock:  # noqa: SLF001 - internal read for dashboard endpoint
+            agent_ids = list(self._behavioral_detector._agents.keys())  # noqa: SLF001
+        for agent_id in agent_ids:
+            profile = self._behavioral_detector.get_agent_profile(agent_id)
+            if not isinstance(profile, dict):
+                continue
+            dims = profile.get("dimensions", {}) if isinstance(profile.get("dimensions"), dict) else {}
+            prompt_mean = float(dims.get("prompt_tokens", {}).get("mean", 0.0)) if isinstance(
+                dims.get("prompt_tokens"), dict
+            ) else 0.0
+            completion_mean = float(dims.get("completion_tokens", {}).get("mean", 0.0)) if isinstance(
+                dims.get("completion_tokens"), dict
+            ) else 0.0
+            anomaly_score = min(
+                1.0,
+                max(
+                    0.0,
+                    float(dims.get("error_rate", {}).get("mean", 0.0)) if isinstance(dims.get("error_rate"), dict) else 0.0,
+                ),
+            )
+            agents_payload.append(
+                {
+                    "agent_id": agent_id,
+                    "state": str(profile.get("state", "monitoring")),
+                    "total_requests": int(profile.get("total_requests", 0)),
+                    "avg_tokens": round(prompt_mean + completion_mean, 4),
+                    "anomaly_score": round(anomaly_score, 6),
+                    "tools_used": sorted(list((profile.get("tool_distribution") or {}).keys()))
+                    if isinstance(profile.get("tool_distribution"), dict)
+                    else [],
+                    "last_seen": str(profile.get("last_seen", "")),
+                    "request_frequency": float(dims.get("request_frequency", {}).get("mean", 0.0))
+                    if isinstance(dims.get("request_frequency"), dict)
+                    else 0.0,
+                    "anomaly_scores": {"error_rate": anomaly_score},
+                }
+            )
+        agents_payload.sort(key=lambda item: float(item.get("total_requests", 0)), reverse=True)
+        return {"agents": agents_payload}
 
     def _handle_get(self, handler: BaseHTTPRequestHandler) -> None:
+        if handler.path in {"/dashboard", "/dashboard/"}:
+            payload = get_dashboard_html().encode("utf-8")
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/html; charset=utf-8")
+            handler.send_header("Content-Length", str(len(payload)))
+            if self._config.cors:
+                handler.send_header("Access-Control-Allow-Origin", "*")
+            handler.end_headers()
+            handler.wfile.write(payload)
+            return
         if handler.path in {"/", "/health"}:
             self._send_json(
                 handler,
@@ -1800,12 +1937,22 @@ class LLMHTTPProxy:
         if handler.path == "/stats":
             self._send_json(handler, 200, self.stats)
             return
-        if handler.path == "/sessions" and self._recorder is not None:
+        if handler.path == "/api/dashboard/overview":
+            self._send_json(handler, 200, self._build_dashboard_overview())
+            return
+        if handler.path == "/api/dashboard/agents":
+            self._send_json(handler, 200, self._build_dashboard_agents())
+            return
+        if handler.path in {"/api/sessions", "/sessions"} and self._recorder is not None:
             sessions = [asdict(item) for item in self._recorder.list_sessions()]
             self._send_json(handler, 200, {"sessions": sessions})
             return
-        if handler.path.startswith("/sessions/") and self._recorder is not None:
-            session_id = handler.path.split("/sessions/", 1)[1].strip()
+        if (handler.path.startswith("/sessions/") or handler.path.startswith("/api/sessions/")) and self._recorder is not None:
+            session_id = (
+                handler.path.split("/api/sessions/", 1)[1].strip()
+                if handler.path.startswith("/api/sessions/")
+                else handler.path.split("/sessions/", 1)[1].strip()
+            )
             if not session_id:
                 self._send_json(handler, 400, {"error": "session_id_required"})
                 return
@@ -2344,6 +2491,19 @@ class LLMHTTPProxy:
         ctx.handler.end_headers()
         ctx.handler.wfile.write(ctx.resp_body)
         self._inc("allowed")
+        self._dashboard_cost_timeline.append(
+            {
+                "timestamp": time.time(),
+                "cumulative_cost": float(self._cost_tracker.get_daily_total()),
+            }
+        )
+        if ctx.resp_status >= 400:
+            sev = "critical" if ctx.resp_status >= 500 else "high"
+            self._add_dashboard_event(
+                "upstream_response",
+                sev,
+                f"Upstream returned HTTP {ctx.resp_status}.",
+            )
         response_obj: dict[str, Any] | None = None
         try:
             parsed_obj = json.loads(ctx.resp_body.decode("utf-8"))
