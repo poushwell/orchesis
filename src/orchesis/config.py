@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import yaml
+from orchesis.behavioral import DEFAULT_DIMENSIONS
 from orchesis.identity import AgentIdentity, AgentRegistry, TrustTier
 
 _TOOL_RATE_LIMIT_PATTERN = re.compile(r"^\s*(\d+)\s*/\s*(second|minute|hour)\s*$", re.IGNORECASE)
@@ -474,6 +475,46 @@ def _normalize_loop_detection(policy: dict[str, Any]) -> None:
     policy["loop_detection"] = raw
 
 
+def _normalize_behavioral_fingerprint(policy: dict[str, Any]) -> None:
+    raw = policy.get("behavioral_fingerprint")
+    if raw is None:
+        policy["behavioral_fingerprint"] = {
+            "enabled": False,
+            "learning_window": 20,
+            "dimensions": dict(DEFAULT_DIMENSIONS),
+            "persist_baselines": False,
+            "persist_path": ".orchesis/baselines.json",
+        }
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("behavioral_fingerprint must be a mapping")
+
+    raw["enabled"] = bool(raw.get("enabled", False))
+    learning_window = raw.get("learning_window", 20)
+    if not _is_number(learning_window) or int(learning_window) <= 0:
+        raise PolicyError("behavioral_fingerprint.learning_window must be > 0")
+    raw["learning_window"] = int(learning_window)
+    raw["persist_baselines"] = bool(raw.get("persist_baselines", False))
+    raw["persist_path"] = str(raw.get("persist_path", ".orchesis/baselines.json"))
+
+    dimensions = raw.get("dimensions")
+    dims_in = dimensions if isinstance(dimensions, dict) else {}
+    normalized_dims: dict[str, dict[str, Any]] = {}
+    for dim_name, default in DEFAULT_DIMENSIONS.items():
+        current = dims_in.get(dim_name, {})
+        if not isinstance(current, dict):
+            current = {}
+        z_threshold = current.get("z_threshold", default["z_threshold"])
+        action = str(current.get("action", default["action"])).strip().lower()
+        if not _is_number(z_threshold) or float(z_threshold) <= 0:
+            raise PolicyError(f"behavioral_fingerprint.dimensions.{dim_name}.z_threshold must be > 0")
+        if action not in {"warn", "block", "log"}:
+            raise PolicyError(f"behavioral_fingerprint.dimensions.{dim_name}.action must be warn|block|log")
+        normalized_dims[dim_name] = {"z_threshold": float(z_threshold), "action": action}
+    raw["dimensions"] = normalized_dims
+    policy["behavioral_fingerprint"] = raw
+
+
 def _normalize_capability_constraints(raw: Any, *, key: str, index: int, section: str) -> list[str]:
     if raw is None:
         return []
@@ -567,6 +608,7 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     _normalize_cascade(loaded)
     _normalize_circuit_breaker(loaded)
     _normalize_loop_detection(loaded)
+    _normalize_behavioral_fingerprint(loaded)
     _normalize_capabilities(loaded)
     return loaded
 

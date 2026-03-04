@@ -2,7 +2,7 @@
 
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import json
 import logging
@@ -30,6 +30,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency path
     Response = Any  # type: ignore[assignment]
 
 from orchesis.auth import AgentAuthenticator, CredentialStore
+from orchesis.behavioral import BehavioralDetector, extract_agent_id
 from orchesis.cost_tracker import CostTracker
 from orchesis.circuit_breaker import CircuitBreaker
 from orchesis.credential_injector import CredentialInjector
@@ -145,6 +146,9 @@ class OrchesisProxy:
         self._policy = policy if isinstance(policy, dict) else {}
         self._stats = ProxyStats()
         self._server: asyncio.base_events.Server | None = None
+        behavioral_cfg = self._policy.get("behavioral_fingerprint")
+        self._behavioral_cfg = behavioral_cfg if isinstance(behavioral_cfg, dict) else {}
+        self._behavioral_detector = BehavioralDetector(self._behavioral_cfg)
         proxy_cfg = self._policy.get("proxy") if isinstance(self._policy.get("proxy"), dict) else {}
         secret_cfg = proxy_cfg.get("secret_scanning") if isinstance(proxy_cfg.get("secret_scanning"), dict) else {}
         pii_cfg = proxy_cfg.get("pii_scanning") if isinstance(proxy_cfg.get("pii_scanning"), dict) else {}
@@ -206,6 +210,9 @@ class OrchesisProxy:
                 return
             method, path, headers, body = parsed
             bytes_count = len(body)
+            behavior_state_header = "normal"
+            anomaly_score_header = ""
+            anomaly_dimensions_header = ""
 
             if len(body) > self._config.max_body_size:
                 writer.write(self._build_error_response(413, "payload_too_large", "Request body too large"))
@@ -295,6 +302,58 @@ class OrchesisProxy:
                     )
                     return
 
+            body_json: dict[str, Any] | None = None
+            if body:
+                try:
+                    loaded = json.loads(body.decode("utf-8"))
+                    if isinstance(loaded, dict):
+                        body_json = loaded
+                except Exception:
+                    body_json = None
+
+            if self._behavioral_detector.enabled:
+                request_data = {
+                    "model": (body_json or {}).get("model", ""),
+                    "messages": (body_json or {}).get("messages", []),
+                    "tools": (body_json or {}).get("tools", []),
+                    "estimated_cost": 0.0,
+                    "headers": headers,
+                }
+                agent_id = extract_agent_id(request_data)
+                behavior_decision = self._behavioral_detector.check_request(agent_id, request_data)
+                if behavior_decision.action == "block":
+                    payload = {
+                        "error": "behavioral_anomaly",
+                        "anomalies": [asdict(item) for item in behavior_decision.anomalies],
+                    }
+                    body_block = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                    writer.write(
+                        self._build_response_bytes(
+                            429,
+                            {
+                                "content-type": "application/json",
+                                "x-orchesis-behavior": "anomaly",
+                                "x-orchesis-anomaly-score": str(behavior_decision.anomaly_score),
+                                "x-orchesis-anomaly-dimensions": ",".join(
+                                    sorted({item.dimension for item in behavior_decision.anomalies})
+                                ),
+                            },
+                            body_block,
+                            decision="DENY",
+                        )
+                    )
+                    await writer.drain()
+                    decision_label = "DENY"
+                    return
+                if behavior_decision.action == "learning":
+                    behavior_state_header = "learning"
+                elif behavior_decision.anomalies:
+                    behavior_state_header = "anomaly"
+                    anomaly_score_header = str(behavior_decision.anomaly_score)
+                    anomaly_dimensions_header = ",".join(
+                        sorted({item.dimension for item in behavior_decision.anomalies})
+                    )
+
             if self._credential_injector is not None and tool_call is not None:
                 try:
                     injected_call, aliases = self._credential_injector.inject(
@@ -327,6 +386,25 @@ class OrchesisProxy:
                     )
 
             status, resp_headers, resp_body = await self._forward_request(method, path, headers, body)
+            if self._behavioral_detector.enabled:
+                completion_tokens = 0
+                try:
+                    decoded = json.loads(resp_body.decode("utf-8"))
+                    if isinstance(decoded, dict):
+                        usage = decoded.get("usage")
+                        if isinstance(usage, dict):
+                            completion_tokens = int(
+                                usage.get("completion_tokens")
+                                or usage.get("output_tokens")
+                                or 0
+                            )
+                except Exception:
+                    completion_tokens = 0
+                self._behavioral_detector.record_response(
+                    extract_agent_id({"headers": headers, "model": (body_json or {}).get("model", "")}),
+                    is_error=status >= 400,
+                    completion_tokens=completion_tokens,
+                )
             if self._config.buffer_responses and tool_call is not None and self._scan_responses:
                 scan_result = self._scan_response_findings(tool_call[0], resp_body)
                 secrets = scan_result["secrets"]
@@ -362,6 +440,14 @@ class OrchesisProxy:
                     )
 
             response_bytes = self._build_response_bytes(status, resp_headers, resp_body)
+            if self._behavioral_detector.enabled:
+                resp_headers = dict(resp_headers)
+                resp_headers["x-orchesis-behavior"] = behavior_state_header
+                if anomaly_score_header:
+                    resp_headers["x-orchesis-anomaly-score"] = anomaly_score_header
+                if anomaly_dimensions_header:
+                    resp_headers["x-orchesis-anomaly-dimensions"] = anomaly_dimensions_header
+                response_bytes = self._build_response_bytes(status, resp_headers, resp_body)
             writer.write(response_bytes)
             await writer.drain()
             if decision_label not in {"PASSTHROUGH", "DENY"}:
@@ -760,7 +846,9 @@ class OrchesisProxy:
         ]
         return "\r\n".join(lines).encode("utf-8") + body
 
-    def _build_response_bytes(self, status: int, headers: dict[str, str], body: bytes) -> bytes:
+    def _build_response_bytes(
+        self, status: int, headers: dict[str, str], body: bytes, *, decision: str = "ALLOW"
+    ) -> bytes:
         phrase_map = {
             200: "OK",
             201: "Created",
@@ -775,7 +863,7 @@ class OrchesisProxy:
         merged = dict(headers)
         merged["content-length"] = str(len(body))
         merged["connection"] = "close"
-        merged["x-orchesis-decision"] = "ALLOW"
+        merged["x-orchesis-decision"] = decision
         head = [f"HTTP/1.1 {status} {phrase}"]
         for key, value in merged.items():
             head.append(f"{key}: {value}")
@@ -850,6 +938,11 @@ def create_proxy_app(
     app_started_at = time.perf_counter()
     store = PolicyStore()
     current_policy = policy
+    behavioral_detector = BehavioralDetector(
+        current_policy.get("behavioral_fingerprint")
+        if isinstance(current_policy.get("behavioral_fingerprint"), dict)
+        else {}
+    )
     current_registry = None
     watcher: PolicyWatcher | None = None
     current_policy_hash = "inline"
@@ -1014,11 +1107,16 @@ def create_proxy_app(
 
         def _on_reload(new_policy: dict[str, Any]) -> None:
             _ = new_policy
-            nonlocal current_policy, current_registry, current_policy_hash
+            nonlocal current_policy, current_registry, current_policy_hash, behavioral_detector
             version = store.load(policy_path)
             current_policy = version.policy
             current_registry = _resolve_registry_for_policy(current_policy, version)
             current_policy_hash = version.version_id
+            behavioral_detector = BehavioralDetector(
+                current_policy.get("behavioral_fingerprint")
+                if isinstance(current_policy.get("behavioral_fingerprint"), dict)
+                else {}
+            )
             _sync_webhooks(current_policy)
             _sync_alerts(current_policy)
             _sync_auth(current_policy)
@@ -1103,6 +1201,44 @@ def create_proxy_app(
             "cost": _extract_cost(request, body_json),
             "context": context,
         }
+        behavior_state = "normal"
+        behavior_score = ""
+        behavior_dimensions = ""
+        if behavioral_detector.enabled:
+            req_data = {
+                "model": (body_json or {}).get("model", ""),
+                "messages": (body_json or {}).get("messages", []),
+                "tools": (body_json or {}).get("tools", []),
+                "estimated_cost": float(eval_request["cost"]),
+                "headers": dict(request.headers),
+            }
+            behavior_decision = behavioral_detector.check_request(
+                extract_agent_id(req_data), req_data
+            )
+            if behavior_decision.action == "block":
+                response = JSONResponse(
+                    status_code=429,
+                    content={
+                        "error": "behavioral_anomaly",
+                        "anomalies": [asdict(item) for item in behavior_decision.anomalies],
+                    },
+                )
+                response.headers["X-Orchesis-Trace-Id"] = trace.trace_id
+                response.headers["X-Orchesis-Behavior"] = "anomaly"
+                response.headers["X-Orchesis-Anomaly-Score"] = str(behavior_decision.anomaly_score)
+                response.headers["X-Orchesis-Anomaly-Dimensions"] = ",".join(
+                    sorted({item.dimension for item in behavior_decision.anomalies})
+                )
+                response.headers["X-Orchesis-Decision"] = "DENY"
+                return response
+            if behavior_decision.action == "learning":
+                behavior_state = "learning"
+            elif behavior_decision.anomalies:
+                behavior_state = "anomaly"
+                behavior_score = str(behavior_decision.anomaly_score)
+                behavior_dimensions = ",".join(
+                    sorted({item.dimension for item in behavior_decision.anomalies})
+                )
         decision = evaluate(
             eval_request,
             current_policy,
@@ -1189,8 +1325,33 @@ def create_proxy_app(
             status_code=forwarded.status_code,
             media_type=forwarded.headers.get("content-type"),
         )
+        if behavioral_detector.enabled:
+            completion_tokens = 0
+            try:
+                parsed_fwd = forwarded.json()
+                if isinstance(parsed_fwd, dict):
+                    usage = parsed_fwd.get("usage")
+                    if isinstance(usage, dict):
+                        completion_tokens = int(
+                            usage.get("completion_tokens")
+                            or usage.get("output_tokens")
+                            or 0
+                        )
+            except Exception:
+                completion_tokens = 0
+            behavioral_detector.record_response(
+                extract_agent_id({"headers": dict(request.headers), "model": (body_json or {}).get("model", "")}),
+                is_error=forwarded.status_code >= 400,
+                completion_tokens=completion_tokens,
+            )
         response.headers["X-Orchesis-Trace-Id"] = trace.trace_id
         response.headers["X-Orchesis-Decision"] = "ALLOW"
+        if behavioral_detector.enabled:
+            response.headers["X-Orchesis-Behavior"] = behavior_state
+            if behavior_score:
+                response.headers["X-Orchesis-Anomaly-Score"] = behavior_score
+            if behavior_dimensions:
+                response.headers["X-Orchesis-Anomaly-Dimensions"] = behavior_dimensions
         return response
 
     @app.get("/metrics")
@@ -1314,6 +1475,9 @@ class LLMHTTPProxy:
             secret_patterns=SECRET_PATTERNS,
             scan_secrets=self._scan_response,
         )
+        behavioral_cfg = self._policy.get("behavioral_fingerprint")
+        self._behavioral_cfg = behavioral_cfg if isinstance(behavioral_cfg, dict) else {}
+        self._behavioral_detector = BehavioralDetector(self._behavioral_cfg)
         kill_cfg = self._policy.get("kill_switch")
         self._kill_cfg = kill_cfg if isinstance(kill_cfg, dict) else {}
         self._kill_enabled = bool(self._kill_cfg.get("enabled", False))
@@ -1369,6 +1533,8 @@ class LLMHTTPProxy:
             "secret_trigger_hits": self._secret_trigger_hits,
             "loop_trigger_hits": self._loop_trigger_hits,
         }
+        if self._behavioral_detector.enabled:
+            payload["behavioral_detector"] = self._behavioral_detector.get_stats()
         return payload
 
     @property
@@ -1446,6 +1612,10 @@ class LLMHTTPProxy:
         proc_result: dict[str, Any] = {"cost": 0.0}
         loop_warning_header = ""
         circuit_state_header = self._circuit_breaker.get_state().lower().replace("_", "-")
+        behavior_header = "normal"
+        behavior_score_header = ""
+        behavior_dims_header = ""
+        behavior_agent_id = "default"
         try:
             if handler.path == "/kill":
                 self._handle_kill(handler)
@@ -1588,6 +1758,36 @@ class LLMHTTPProxy:
                     loop_warning_header = loop_decision.reason or "Loop warning"
                     if loop_decision.action == "downgrade_model":
                         body["model"] = "claude-haiku-4"
+
+            if self._behavioral_detector.enabled:
+                behavior_data = {
+                    "model": body.get("model", parsed_req.model),
+                    "messages": parsed_req.messages,
+                    "tools": parsed_req.tool_calls,
+                    "estimated_cost": float(proc_result.get("cost", 0.0)),
+                    "headers": {k: v for k, v in handler.headers.items()},
+                }
+                behavior_agent_id = extract_agent_id(behavior_data)
+                behavior_decision = self._behavioral_detector.check_request(behavior_agent_id, behavior_data)
+                if behavior_decision.action == "block":
+                    self._inc("blocked")
+                    self._send_json(
+                        handler,
+                        429,
+                        {
+                            "error": "behavioral_anomaly",
+                            "anomalies": [asdict(item) for item in behavior_decision.anomalies],
+                        },
+                    )
+                    return
+                if behavior_decision.action == "learning":
+                    behavior_header = "learning"
+                elif behavior_decision.anomalies:
+                    behavior_header = "anomaly"
+                    behavior_score_header = str(behavior_decision.anomaly_score)
+                    behavior_dims_header = ",".join(
+                        sorted({item.dimension for item in behavior_decision.anomalies})
+                    )
 
             if self._budget_cfg:
                 budget_status = self._cost_tracker.check_budget(self._budget_cfg)
@@ -1790,6 +1990,16 @@ class LLMHTTPProxy:
                     self._cascade_router.record_result(cascade_decision, parsed_resp_obj)
                     self._cascade_router.cache_response(cascade_decision, resp_body)
 
+            if self._behavioral_detector.enabled:
+                completion_tokens = 0
+                if parsed_resp_obj is not None:
+                    completion_tokens = int(parsed_resp_obj.output_tokens)
+                self._behavioral_detector.record_response(
+                    behavior_agent_id,
+                    is_error=resp_status >= 400,
+                    completion_tokens=completion_tokens,
+                )
+
             handler.send_response(resp_status)
             self._copy_upstream_headers(handler, resp_headers, len(resp_body))
             handler.send_header("X-Orchesis-Cost", str(round(float(proc_result.get("cost", 0.0)), 6)))
@@ -1800,6 +2010,12 @@ class LLMHTTPProxy:
             handler.send_header("X-Orchesis-Circuit", self._circuit_breaker.get_state().lower().replace("_", "-"))
             if loop_warning_header:
                 handler.send_header("X-Orchesis-Loop-Warning", loop_warning_header)
+            if self._behavioral_detector.enabled:
+                handler.send_header("X-Orchesis-Behavior", behavior_header)
+                if behavior_score_header:
+                    handler.send_header("X-Orchesis-Anomaly-Score", behavior_score_header)
+                if behavior_dims_header:
+                    handler.send_header("X-Orchesis-Anomaly-Dimensions", behavior_dims_header)
             if self._config.cors:
                 handler.send_header("Access-Control-Allow-Origin", "*")
             handler.end_headers()
