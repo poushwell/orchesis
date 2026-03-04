@@ -11,8 +11,8 @@ def _build_reporter(with_loop: bool = True) -> CostReporter:
     tracker.record_call("read_file")
     loop = LoopDetector(warn_threshold=1, block_threshold=2) if with_loop else None
     if loop is not None:
-        loop.check("web_search", {"q": "x"})
-        loop.check("web_search", {"q": "x"})
+        loop.check_request({"model": "test", "messages": [], "tool_calls": [{"name": "web_search"}], "content_text": "x"})
+        loop.check_request({"model": "test", "messages": [], "tool_calls": [{"name": "web_search"}], "content_text": "x"})
     return CostReporter(tracker, loop_detector=loop)
 
 
