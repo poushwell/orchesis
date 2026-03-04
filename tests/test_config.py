@@ -42,6 +42,18 @@ def test_load_policy_raises_on_non_mapping_root(tmp_path: Path) -> None:
         load_policy(policy_path)
 
 
+def test_load_policy_raises_policy_error_for_fuzzed_non_mapping_yaml(tmp_path: Path) -> None:
+    policy_path = _write_yaml(tmp_path, "fuzzed.yaml", "[0b_\n#2\n")
+    with pytest.raises((PolicyError, ValueError)):
+        load_policy(policy_path)
+
+
+def test_load_policy_raises_policy_error_for_valid_non_mapping_yaml(tmp_path: Path) -> None:
+    policy_path = _write_yaml(tmp_path, "list-root.yaml", "[0b1]")
+    with pytest.raises(PolicyError, match="top-level YAML object"):
+        load_policy(policy_path)
+
+
 def test_validate_policy_accepts_valid_policy() -> None:
     policy = {
         "rules": [

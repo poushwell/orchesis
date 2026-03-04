@@ -82,3 +82,14 @@ def test_plugin_redact_for_audit() -> None:
     redacted = plugin.redact_for_audit(event)
     assert "user@example.com" not in str(redacted)
     assert "123-45-6789" not in str(redacted)
+
+
+def test_scan_text_handles_fuzzed_binary_input_gracefully() -> None:
+    detector = PiiDetector()
+    crash_input = (
+        b"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBj\x00\x00\x00\x00\x00\x00\x00BBBBBBBBBBBBBB"
+        b"ij\xf4\x83\x91\x80 123-45-6789B\xf4\x83\x90\xb3\xf4\x83\x90\xb3ij\x00\x10\x1d 123-45-6789"
+        b"BBBBBBBBBBBBI341434348 "
+    )
+    findings = detector.scan_text(crash_input)  # type: ignore[arg-type]
+    assert isinstance(findings, list)

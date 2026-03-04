@@ -515,6 +515,48 @@ def _normalize_behavioral_fingerprint(policy: dict[str, Any]) -> None:
     policy["behavioral_fingerprint"] = raw
 
 
+def _normalize_recording(policy: dict[str, Any]) -> None:
+    raw = policy.get("recording")
+    if raw is None:
+        policy["recording"] = {
+            "enabled": False,
+            "storage_path": ".orchesis/sessions",
+            "max_age_days": 30,
+            "max_file_size_mb": 10,
+            "compress": True,
+            "include_response_body": True,
+            "exclude_models": [],
+        }
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("recording must be a mapping")
+
+    raw["enabled"] = bool(raw.get("enabled", False))
+    storage_path = raw.get("storage_path", ".orchesis/sessions")
+    if not isinstance(storage_path, str) or not storage_path.strip():
+        raise PolicyError("recording.storage_path must be a non-empty string")
+    raw["storage_path"] = storage_path.strip()
+
+    max_age_days = raw.get("max_age_days", 30)
+    if not _is_number(max_age_days) or int(max_age_days) <= 0:
+        raise PolicyError("recording.max_age_days must be > 0")
+    raw["max_age_days"] = int(max_age_days)
+
+    max_file_size_mb = raw.get("max_file_size_mb", 10)
+    if not _is_number(max_file_size_mb) or int(max_file_size_mb) <= 0:
+        raise PolicyError("recording.max_file_size_mb must be > 0")
+    raw["max_file_size_mb"] = int(max_file_size_mb)
+
+    raw["compress"] = bool(raw.get("compress", True))
+    raw["include_response_body"] = bool(raw.get("include_response_body", True))
+    exclude_models = raw.get("exclude_models")
+    if isinstance(exclude_models, list):
+        raw["exclude_models"] = [str(item) for item in exclude_models if isinstance(item, str)]
+    else:
+        raw["exclude_models"] = []
+    policy["recording"] = raw
+
+
 def _normalize_capability_constraints(raw: Any, *, key: str, index: int, section: str) -> list[str]:
     if raw is None:
         return []
@@ -598,7 +640,7 @@ def load_policy(path: str | Path) -> dict[str, Any]:
         raise ValueError(f"Invalid YAML policy: {error}") from error
 
     if not isinstance(loaded, dict):
-        raise ValueError("Policy top-level YAML object must be a mapping.")
+        raise PolicyError("Policy top-level YAML object must be a mapping.")
 
     _normalize_policy_paths(loaded)
     _normalize_tool_access_rate_limits(loaded)
@@ -609,6 +651,7 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     _normalize_circuit_breaker(loaded)
     _normalize_loop_detection(loaded)
     _normalize_behavioral_fingerprint(loaded)
+    _normalize_recording(loaded)
     _normalize_capabilities(loaded)
     return loaded
 
@@ -679,6 +722,8 @@ def load_agent_registry(policy: dict[str, Any]) -> AgentRegistry:
 
 def validate_policy(policy: dict[str, Any]) -> list[str]:
     """Validate policy structure and return errors."""
+    if not isinstance(policy, dict):
+        return ["policy must be a mapping"]
     errors: list[str] = []
     rules = policy.get("rules")
 
@@ -854,6 +899,8 @@ def validate_policy(policy: dict[str, Any]) -> list[str]:
 
 def validate_policy_warnings(policy: dict[str, Any]) -> list[str]:
     """Return non-fatal policy recommendations."""
+    if not isinstance(policy, dict):
+        return []
     warnings: list[str] = []
     version = policy.get("version")
     if not isinstance(version, str) or not version.strip():

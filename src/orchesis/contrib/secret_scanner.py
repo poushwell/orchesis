@@ -150,6 +150,10 @@ def preprocess_for_scanning(text: str) -> list[str]:
             text = repr(text)
     if not text:
         return [text]
+    try:
+        text = text.replace("\x00", "")
+    except Exception:
+        pass
 
     versions: list[str] = [text]
     cleaned = text
@@ -307,14 +311,29 @@ class SecretScanner:
         return sorted(findings, key=lambda item: int(item.get("position", 0)))
 
     def scan_text(self, text: str) -> list[dict[str, Any]]:
-        if not isinstance(text, str) or not text:
+        if not text:
             return []
+        if not isinstance(text, str):
+            try:
+                text = str(text, "utf-8", errors="replace")  # type: ignore[arg-type]
+            except Exception:
+                return []
         all_findings: list[dict[str, Any]] = []
-        for version in preprocess_for_scanning(text):
-            if self._use_fast_matching:
-                all_findings.extend(self._fast_scanner.scan(version))
-            else:
-                all_findings.extend(self._scan_text_sequential(version))
+        try:
+            versions = preprocess_for_scanning(text)
+        except Exception:
+            return []
+        for version in versions:
+            try:
+                if self._use_fast_matching:
+                    all_findings.extend(self._fast_scanner.scan(version))
+                else:
+                    all_findings.extend(self._scan_text_sequential(version))
+            except Exception:
+                try:
+                    all_findings.extend(self._scan_text_sequential(version))
+                except Exception:
+                    continue
 
         deduped: list[dict[str, Any]] = []
         seen: set[tuple[str, str, int]] = set()

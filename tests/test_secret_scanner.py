@@ -93,3 +93,10 @@ def test_plugin_blocks_on_secret() -> None:
     )
     assert checked == ["secret_scanner"]
     assert any("secret_scanner:" in reason for reason in reasons)
+
+
+def test_scan_text_handles_fuzzed_binary_input_gracefully() -> None:
+    scanner = SecretScanner()
+    crash_input = b"1\x00\x00\xff\xff\xff],\x00\x00\x88"
+    findings = scanner.scan_text(crash_input)  # type: ignore[arg-type]
+    assert isinstance(findings, list)
