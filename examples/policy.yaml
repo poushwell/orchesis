@@ -82,3 +82,28 @@ rules:
     conditions:
       - rule: file_access
       - rule: budget_limit
+
+default_action: deny
+
+budgets:
+  daily: 50.0
+  daily_limit_usd: 50.0
+
+loop_detection:
+  enabled: true
+  threshold: 5
+  window_seconds: 60
+  action: warn
+
+secret_scanning:
+  enabled: true
+
+tool_access:
+  default: allow
+
+kill_switch:
+  enabled: false
+
+audit:
+  enabled: true
+  log_path: ".orchesis/audit.jsonl"
