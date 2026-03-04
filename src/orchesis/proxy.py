@@ -1561,6 +1561,7 @@ class LLMHTTPProxy:
         self._cost_tracker = CostTracker(tool_costs=self._tool_costs)
         loop_cfg = self._policy.get("loop_detection")
         self._loop_cfg = loop_cfg if isinstance(loop_cfg, dict) else {}
+        self._downgrade_model = str(self._loop_cfg.get("downgrade_model", "claude-haiku-4"))
         self._loop_detector = None
         if bool(self._loop_cfg.get("enabled", False)):
             self._loop_detector = LoopDetector(config=self._loop_cfg)
@@ -1952,7 +1953,7 @@ class LLMHTTPProxy:
                 if loop_decision.action in {"warn", "downgrade_model"}:
                     loop_warning_header = loop_decision.reason or "Loop warning"
                     if loop_decision.action == "downgrade_model":
-                        body["model"] = "claude-haiku-4"
+                        body["model"] = self._downgrade_model
 
             if self._behavioral_detector.enabled:
                 behavior_data = {

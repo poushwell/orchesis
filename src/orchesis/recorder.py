@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import gzip
 import json
@@ -46,7 +46,6 @@ class SessionSummary:
 class _SessionWriter:
     file_path: Path
     handle: IO[bytes]
-    lock: threading.Lock = field(default_factory=threading.Lock)
     record_count: int = 0
 
 
@@ -121,10 +120,8 @@ class SessionRecorder:
             if writer is None:
                 writer = self._open_writer(record.session_id)
                 self._writers[record.session_id] = writer
-        with writer.lock:
             if self._should_rotate(writer):
-                with self._lock:
-                    writer = self._rotate(record.session_id, writer)
+                writer = self._rotate(record.session_id, writer)
             writer.handle.write(payload)
             writer.handle.flush()
             writer.record_count += 1
@@ -133,8 +130,7 @@ class SessionRecorder:
     def close_session(self, session_id: str) -> None:
         with self._lock:
             writer = self._writers.pop(session_id, None)
-        if writer is not None:
-            with writer.lock:
+            if writer is not None:
                 writer.handle.flush()
                 writer.handle.close()
 

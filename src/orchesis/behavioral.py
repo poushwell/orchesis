@@ -185,6 +185,14 @@ class BehavioralFingerprint:
                     if name:
                         self.tool_distribution[name] = self.tool_distribution.get(name, 0) + 1
 
+    def record_response_only(self, is_error: bool, completion_tokens: int = 0) -> None:
+        """Update response-only dimensions without mutating request baselines."""
+        with self._lock:
+            self._error_window.append(1 if is_error else 0)
+            self.error_rate.update(sum(self._error_window) / max(1, len(self._error_window)))
+            if completion_tokens > 0:
+                self.completion_tokens.update(float(completion_tokens))
+
     def get_profile(self) -> dict[str, Any]:
         with self._lock:
             state = "learning" if self.total_requests < self._learning_window else "monitoring"
@@ -292,6 +300,9 @@ class BehavioralDetector:
         if profile.is_learning():
             profile.update(request_data)
             return BehavioralDecision(action="learning", anomaly_score=0.0, anomalies=[], state="learning")
+        now = time.monotonic()
+        elapsed = now - profile.last_seen
+        current_freq = 60.0 / max(0.001, elapsed) if profile.total_requests > 0 else 0.0
 
         dimensions_map = {
             "request_frequency": profile.request_frequency,
@@ -301,7 +312,7 @@ class BehavioralDetector:
             "error_rate": profile.error_rate,
         }
         current_values = {
-            "request_frequency": 0.0,
+            "request_frequency": current_freq,
             "prompt_tokens": float(BehavioralFingerprint._estimate_prompt_tokens(request_data.get("messages", []))),
             "cost_per_request": float(request_data.get("estimated_cost", 0.0) or 0.0),
             "tool_count": float(len(request_data.get("tools", []) if isinstance(request_data.get("tools"), list) else [])),
@@ -353,16 +364,7 @@ class BehavioralDetector:
 
     def record_response(self, agent_id: str, is_error: bool, completion_tokens: int = 0) -> None:
         profile = self._get_or_create(agent_id)
-        profile.update(
-            {
-                "model": "",
-                "messages": [],
-                "tools": [],
-                "estimated_cost": 0.0,
-                "is_error": bool(is_error),
-                "completion_tokens": int(completion_tokens),
-            }
-        )
+        profile.record_response_only(bool(is_error), int(completion_tokens))
 
     def get_stats(self) -> dict[str, Any]:
         with self._lock:

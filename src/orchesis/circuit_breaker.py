@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 import threading
 import time
 from typing import Any
@@ -35,7 +36,7 @@ class CircuitBreaker:
 
         self._lock = threading.Lock()
         self._state = self.STATE_CLOSED
-        self._failures: list[float] = []
+        self._failures: deque[float] = deque(maxlen=self._error_threshold)
         self._opened_at: float | None = None
         self._current_cooldown = self._base_cooldown
         self._half_open_requests = 0
@@ -46,7 +47,8 @@ class CircuitBreaker:
         return time.monotonic()
 
     def _prune_failures(self, now: float) -> None:
-        self._failures = [ts for ts in self._failures if (now - ts) <= self._window_seconds]
+        while self._failures and (now - self._failures[0]) > self._window_seconds:
+            self._failures.popleft()
 
     def _open(self, now: float, *, escalate_backoff: bool) -> None:
         if escalate_backoff:

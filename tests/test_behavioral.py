@@ -258,6 +258,18 @@ def test_detector_record_response_updates_error_and_completion() -> None:
     assert profile["dimensions"]["completion_tokens"]["count"] >= 1
 
 
+def test_detector_record_response_does_not_increment_total_requests() -> None:
+    d = BehavioralDetector(_detector_cfg())
+    d.check_request("a1", _req())
+    before = d.get_agent_profile("a1")
+    assert before is not None
+    requests_before = before["total_requests"]
+    d.record_response("a1", is_error=False, completion_tokens=10)
+    after = d.get_agent_profile("a1")
+    assert after is not None
+    assert after["total_requests"] == requests_before
+
+
 def test_config_validation_bad_action(tmp_path: Path) -> None:
     policy = tmp_path / "policy_bad_action.yaml"
     policy.write_text(

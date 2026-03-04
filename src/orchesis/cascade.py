@@ -93,7 +93,8 @@ class CascadeClassifier:
     }
 
     def __init__(self) -> None:
-        self._task_history: dict[str, str] = {}
+        self._task_history: OrderedDict[str, str] = OrderedDict()
+        self._max_history = 10000
         self._lock = threading.Lock()
 
     @staticmethod
@@ -138,6 +139,9 @@ class CascadeClassifier:
             with self._lock:
                 previous_hash = self._task_history.get(task_id)
                 self._task_history[task_id] = content_hash
+                self._task_history.move_to_end(task_id)
+                while len(self._task_history) > self._max_history:
+                    self._task_history.popitem(last=False)
             if isinstance(previous_hash, str) and previous_hash and previous_hash != content_hash:
                 level = min(CascadeLevel.COMPLEX, CascadeLevel(level + 1))
 

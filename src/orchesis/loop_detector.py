@@ -278,15 +278,15 @@ class LoopDetector:
             blocked = sum(1 for item in self._events if item.action_taken == "blocked")
             active_patterns = len(self._exact_patterns) + len(self._fuzzy_patterns)
             return {
-                "total_saved_usd": round(self._total_saved, 4),
+                "total_cost_saved_usd": round(self._total_saved, 4),
+                "total_saved_usd": round(self._total_saved, 4),  # legacy alias
                 "total_loops_detected": len(self._events),
                 "loops_warned": warned,
                 "loops_blocked": blocked,
                 "exact_detections": self._exact_detections,
                 "fuzzy_detections": self._fuzzy_detections,
-                "total_cost_saved_usd": round(self._total_saved, 4),
-                "active_patterns": active_patterns,
                 "active_patterns_count": active_patterns,
+                "active_patterns": active_patterns,  # legacy alias
                 "notify": self._notify,
             }
 
