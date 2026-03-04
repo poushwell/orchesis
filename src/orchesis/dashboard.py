@@ -256,6 +256,9 @@ def get_dashboard_html() -> str:
           <div><strong>Circuit Breaker</strong></div>
           <div id="cb-list" class="subtle">No data</div>
           <hr style="border-color: var(--border); border-width: 1px 0 0; margin: 10px 0;">
+          <div><strong>Connection Pool</strong></div>
+          <div id="pool-stats" class="subtle">No pool data</div>
+          <hr style="border-color: var(--border); border-width: 1px 0 0; margin: 10px 0;">
           <div><strong>Budget Progress</strong></div>
           <div id="budget-label" class="subtle">No budget configured</div>
           <div class="progress"><div id="budget-bar" style="width:0%"></div></div>
@@ -519,6 +522,19 @@ def get_dashboard_html() -> str:
           return `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);"><span>${name}</span><span class="cb-pill ${st}">${st}</span><span class="subtle">failures: ${fmtNum(cb[name].failures||0)}</span></div>`;
         }).join("");
       }
+
+      const pool = data.connection_pool || {};
+      const poolEl = document.getElementById("pool-stats");
+      const hits = Number(pool.hits || 0);
+      const misses = Number(pool.misses || 0);
+      const ratio = (hits + misses) > 0 ? (hits / (hits + misses) * 100.0) : 0.0;
+      const hosts = pool.pools || {};
+      const hostRows = Object.keys(hosts).map((k)=> `${k}: ${hosts[k]}`).join(" | ");
+      poolEl.innerHTML = `
+        <div>active: ${fmtNum(pool.active || 0)}, total: ${fmtNum(pool.total_connections || 0)}</div>
+        <div>hits/misses: ${fmtNum(hits)}/${fmtNum(misses)} (${ratio.toFixed(1)}% hit)</div>
+        <div class="subtle">${hostRows || "no hosts"}</div>
+      `;
 
       const budget = data.budget || {};
       const limit = Number(budget.limit_usd || 0);
