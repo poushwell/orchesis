@@ -4,12 +4,230 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+class Framework(Enum):
+    OWASP_LLM_TOP_10 = "owasp_llm_top10_2025"
+    NIST_AI_RMF = "nist_ai_rmf_1_0"
+    NIST_AI_AGENT = "nist_ai_agent_2026"
+
+
+class Severity(Enum):
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    INFO = "info"
+
+
+@dataclass(frozen=True)
+class FrameworkItem:
+    """One item in a compliance framework (e.g., OWASP LLM01)."""
+
+    framework: Framework
+    item_id: str
+    name: str
+    description: str
+    url: str
+    severity: Severity
+
+
+@dataclass(frozen=True)
+class ComplianceMapping:
+    """Maps an Orchesis capability to a framework item."""
+
+    framework_item: FrameworkItem
+    orchesis_module: str
+    orchesis_feature: str
+    coverage: str
+    description: str
+
+
+@dataclass
+class ComplianceFinding:
+    """A specific finding mapped to compliance frameworks."""
+
+    finding_id: str
+    timestamp: str
+    source_module: str
+    source_detail: str
+    description: str
+    severity: Severity
+    framework_mappings: list[tuple[str, str]]
+    evidence: dict[str, Any] = field(default_factory=dict)
+    recommendation: str = ""
+
+
+OWASP_LLM_TOP_10: list[FrameworkItem] = [
+    FrameworkItem(
+        framework=Framework.OWASP_LLM_TOP_10,
+        item_id="LLM01",
+        name="Prompt Injection",
+        description="Manipulating LLM via crafted inputs to cause unintended actions",
+        url="https://genai.owasp.org/llmrisk/llm01-prompt-injection/",
+        severity=Severity.CRITICAL,
+    ),
+    FrameworkItem(
+        framework=Framework.OWASP_LLM_TOP_10,
+        item_id="LLM02",
+        name="Sensitive Information Disclosure",
+        description="LLM inadvertently revealing confidential data",
+        url="https://genai.owasp.org/llmrisk/llm02-sensitive-information-disclosure/",
+        severity=Severity.HIGH,
+    ),
+    FrameworkItem(
+        framework=Framework.OWASP_LLM_TOP_10,
+        item_id="LLM03",
+        name="Supply Chain Vulnerabilities",
+        description="Risks from third-party components, models, and data",
+        url="https://genai.owasp.org/llmrisk/llm03-supply-chain-vulnerabilities/",
+        severity=Severity.HIGH,
+    ),
+    FrameworkItem(
+        framework=Framework.OWASP_LLM_TOP_10,
+        item_id="LLM04",
+        name="Data and Model Poisoning",
+        description="Tampering with training data or model to introduce vulnerabilities",
+        url="https://genai.owasp.org/llmrisk/llm04-data-and-model-poisoning/",
+        severity=Severity.HIGH,
+    ),
+    FrameworkItem(
+        framework=Framework.OWASP_LLM_TOP_10,
+        item_id="LLM05",
+        name="Improper Output Handling",
+        description="Failing to validate/sanitize LLM outputs before downstream use",
+        url="https://genai.owasp.org/llmrisk/llm05-improper-output-handling/",
+        severity=Severity.HIGH,
+    ),
+    FrameworkItem(
+        framework=Framework.OWASP_LLM_TOP_10,
+        item_id="LLM06",
+        name="Excessive Agency",
+        description="LLM-based system granted too many permissions or autonomy",
+        url="https://genai.owasp.org/llmrisk/llm06-excessive-agency/",
+        severity=Severity.HIGH,
+    ),
+    FrameworkItem(
+        framework=Framework.OWASP_LLM_TOP_10,
+        item_id="LLM07",
+        name="System Prompt Leakage",
+        description="Risk of exposing system prompts containing sensitive instructions",
+        url="https://genai.owasp.org/llmrisk/llm07-system-prompt-leakage/",
+        severity=Severity.MEDIUM,
+    ),
+    FrameworkItem(
+        framework=Framework.OWASP_LLM_TOP_10,
+        item_id="LLM08",
+        name="Vector and Embedding Weaknesses",
+        description="Vulnerabilities in RAG pipelines and vector stores",
+        url="https://genai.owasp.org/llmrisk/llm08-vector-and-embedding-weaknesses/",
+        severity=Severity.MEDIUM,
+    ),
+    FrameworkItem(
+        framework=Framework.OWASP_LLM_TOP_10,
+        item_id="LLM09",
+        name="Misinformation",
+        description="LLM generating false or misleading information",
+        url="https://genai.owasp.org/llmrisk/llm09-misinformation/",
+        severity=Severity.MEDIUM,
+    ),
+    FrameworkItem(
+        framework=Framework.OWASP_LLM_TOP_10,
+        item_id="LLM10",
+        name="Unbounded Consumption",
+        description="Excessive resource usage through uncontrolled LLM operations",
+        url="https://genai.owasp.org/llmrisk/llm10-unbounded-consumption/",
+        severity=Severity.HIGH,
+    ),
+]
+
+NIST_AI_RMF_FUNCTIONS: list[FrameworkItem] = [
+    FrameworkItem(
+        framework=Framework.NIST_AI_RMF,
+        item_id="GOVERN",
+        name="Governance",
+        description="Policies and accountability",
+        url="https://www.nist.gov/itl/ai-risk-management-framework",
+        severity=Severity.INFO,
+    ),
+    FrameworkItem(
+        framework=Framework.NIST_AI_RMF,
+        item_id="MAP",
+        name="Map",
+        description="Context and risk identification",
+        url="https://www.nist.gov/itl/ai-risk-management-framework",
+        severity=Severity.INFO,
+    ),
+    FrameworkItem(
+        framework=Framework.NIST_AI_RMF,
+        item_id="MEASURE",
+        name="Measure",
+        description="Risk analysis and monitoring",
+        url="https://www.nist.gov/itl/ai-risk-management-framework",
+        severity=Severity.INFO,
+    ),
+    FrameworkItem(
+        framework=Framework.NIST_AI_RMF,
+        item_id="MANAGE",
+        name="Manage",
+        description="Risk response and mitigation",
+        url="https://www.nist.gov/itl/ai-risk-management-framework",
+        severity=Severity.INFO,
+    ),
+]
+
+
+def _get_owasp(item_id: str) -> FrameworkItem:
+    for item in OWASP_LLM_TOP_10:
+        if item.item_id == item_id:
+            return item
+    raise KeyError(item_id)
+
+
+def _get_nist(item_id: str) -> FrameworkItem:
+    for item in NIST_AI_RMF_FUNCTIONS:
+        if item.item_id == item_id:
+            return item
+    raise KeyError(item_id)
+
+
+ORCHESIS_OWASP_MAPPINGS: list[ComplianceMapping] = [
+    ComplianceMapping(_get_owasp("LLM01"), "engine", "prompt_injection_scanner", "full", "Scans incoming messages for prompt injection patterns."),
+    ComplianceMapping(_get_owasp("LLM01"), "flow_xray", "suspicious_tool_chains", "partial", "Detects post-injection tool-chain exfiltration patterns."),
+    ComplianceMapping(_get_owasp("LLM02"), "engine", "pii_detector", "full", "Detects and optionally redacts PII in requests and responses."),
+    ComplianceMapping(_get_owasp("LLM02"), "engine", "secret_scanner", "full", "Detects API keys, tokens, and secret material."),
+    ComplianceMapping(_get_owasp("LLM03"), "engine", "integrity_monitor", "partial", "Monitors for unauthorized tool or policy changes."),
+    ComplianceMapping(_get_owasp("LLM04"), "behavioral", "anomaly_detection", "detect_only", "Detects behavioral drift that may indicate poisoning."),
+    ComplianceMapping(_get_owasp("LLM05"), "engine", "content_filter", "partial", "Filters dangerous output patterns before agent consumption."),
+    ComplianceMapping(_get_owasp("LLM05"), "engine", "yara_engine", "partial", "YARA pattern matching for malicious output signatures."),
+    ComplianceMapping(_get_owasp("LLM06"), "engine", "tool_allowlist", "full", "Policy-based tool allowlist/denylist enforcement."),
+    ComplianceMapping(_get_owasp("LLM06"), "rate_limiter", "per_tool_rate_limiting", "partial", "Limits excessive tool invocations."),
+    ComplianceMapping(_get_owasp("LLM06"), "flow_xray", "pattern_detection", "partial", "Finds excessive agency patterns and dead-end behavior."),
+    ComplianceMapping(_get_owasp("LLM07"), "engine", "prompt_injection_scanner", "partial", "Detects system prompt extraction attempts."),
+    ComplianceMapping(_get_owasp("LLM09"), "recorder", "session_recording", "detect_only", "Enables post-hoc fact-checking and audit."),
+    ComplianceMapping(_get_owasp("LLM10"), "cost_tracker", "budget_enforcement", "full", "Budget limits and model cascade reduce runaway spend."),
+    ComplianceMapping(_get_owasp("LLM10"), "circuit_breaker", "circuit_breaker", "full", "Prevents cascading failures and retry storms."),
+    ComplianceMapping(_get_owasp("LLM10"), "loop_detector", "loop_detection", "full", "Detects and blocks infinite agent loops."),
+    ComplianceMapping(_get_owasp("LLM10"), "rate_limiter", "rate_limiting", "full", "Global and per-tool request throttling."),
+]
+
+ORCHESIS_NIST_MAPPINGS: list[ComplianceMapping] = [
+    ComplianceMapping(_get_nist("GOVERN"), "config", "policy_as_code", "full", "YAML policy defines controls, budgets, and scanner behavior."),
+    ComplianceMapping(_get_nist("GOVERN"), "recorder", "audit_trail", "full", "Session recording provides accountability and audit trails."),
+    ComplianceMapping(_get_nist("MAP"), "flow_xray", "topology_analysis", "partial", "Maps agent flows and highlights risk vectors."),
+    ComplianceMapping(_get_nist("MAP"), "behavioral", "agent_profiling", "partial", "Agent DNA profiles baseline behavior and drift."),
+    ComplianceMapping(_get_nist("MEASURE"), "engine", "scanning", "full", "Multiple scanners continuously measure security posture."),
+    ComplianceMapping(_get_nist("MEASURE"), "cost_tracker", "cost_measurement", "full", "Tracks cost by request/session/tool/model."),
+    ComplianceMapping(_get_nist("MANAGE"), "circuit_breaker", "automated_response", "full", "Automated mitigation via circuit breaker and guards."),
+    ComplianceMapping(_get_nist("MANAGE"), "cascade", "cost_management", "full", "Adaptive model cascade manages cost and risk."),
+]
 
 
 @dataclass(frozen=True)
@@ -332,10 +550,234 @@ class ComplianceEngine:
         policy_path: str = "policy.yaml",
         decisions_path: str = ".orchesis/decisions.jsonl",
         incidents_path: str = ".orchesis/incidents.jsonl",
+        frameworks: list[Framework] | None = None,
+        max_findings: int = 10_000,
+        enabled: bool = True,
     ):
         self._policy_path = policy_path
         self._decisions_path = decisions_path
         self._incidents_path = incidents_path
+        self._frameworks = frameworks or [Framework.OWASP_LLM_TOP_10, Framework.NIST_AI_RMF]
+        self._findings: list[ComplianceFinding] = []
+        self._max_findings = max(1, int(max_findings))
+        self._enabled = bool(enabled)
+
+    @staticmethod
+    def _known_items_for(framework: Framework) -> list[FrameworkItem]:
+        if framework == Framework.OWASP_LLM_TOP_10:
+            return OWASP_LLM_TOP_10
+        if framework == Framework.NIST_AI_RMF:
+            return NIST_AI_RMF_FUNCTIONS
+        return []
+
+    @staticmethod
+    def _mappings_for(framework: Framework) -> list[ComplianceMapping]:
+        if framework == Framework.OWASP_LLM_TOP_10:
+            return ORCHESIS_OWASP_MAPPINGS
+        if framework == Framework.NIST_AI_RMF:
+            return ORCHESIS_NIST_MAPPINGS
+        return []
+
+    @staticmethod
+    def _framework_from_alias(value: str | None) -> Framework | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().lower()
+        aliases = {
+            "owasp_llm_top10": Framework.OWASP_LLM_TOP_10,
+            "owasp_llm_top10_2025": Framework.OWASP_LLM_TOP_10,
+            "owasp": Framework.OWASP_LLM_TOP_10,
+            "nist_ai_rmf": Framework.NIST_AI_RMF,
+            "nist_ai_rmf_1_0": Framework.NIST_AI_RMF,
+            "nist": Framework.NIST_AI_RMF,
+            "nist_ai_agent": Framework.NIST_AI_AGENT,
+            "nist_ai_agent_2026": Framework.NIST_AI_AGENT,
+        }
+        return aliases.get(normalized)
+
+    def map_finding(
+        self,
+        source_module: str,
+        source_detail: str,
+        description: str,
+        severity: Severity,
+        evidence: dict[str, Any] | None = None,
+    ) -> ComplianceFinding:
+        """Map runtime finding to configured frameworks."""
+        mappings: list[tuple[str, str]] = []
+        source_module_norm = str(source_module or "").strip().lower()
+        source_detail_norm = str(source_detail or "").strip().lower()
+        for framework in self._frameworks:
+            for item in self._mappings_for(framework):
+                module_match = source_module_norm == item.orchesis_module.lower()
+                detail_match = source_detail_norm == item.orchesis_feature.lower()
+                if module_match or detail_match:
+                    key = (item.framework_item.framework.value, item.framework_item.item_id)
+                    if key not in mappings:
+                        mappings.append(key)
+        finding = ComplianceFinding(
+            finding_id=f"cmp_{len(self._findings) + 1:06d}",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            source_module=source_module_norm,
+            source_detail=source_detail_norm,
+            description=str(description),
+            severity=severity,
+            framework_mappings=mappings,
+            evidence=evidence if isinstance(evidence, dict) else {},
+            recommendation="Review policy controls and apply mitigation workflow.",
+        )
+        self._findings.append(finding)
+        if len(self._findings) > self._max_findings:
+            overflow = len(self._findings) - self._max_findings
+            if overflow > 0:
+                self._findings = self._findings[overflow:]
+        return finding
+
+    def get_coverage_report(self, framework: Framework | None = None) -> dict[str, Any]:
+        """Return per-framework coverage report."""
+        target = framework or (self._frameworks[0] if self._frameworks else Framework.OWASP_LLM_TOP_10)
+        items = self._known_items_for(target)
+        mappings = self._mappings_for(target)
+        by_item: dict[str, list[ComplianceMapping]] = {}
+        for mapping in mappings:
+            by_item.setdefault(mapping.framework_item.item_id, []).append(mapping)
+        rows: list[dict[str, Any]] = []
+        covered = 0
+        for item in items:
+            item_mappings = by_item.get(item.item_id, [])
+            if not item_mappings:
+                status = "not_covered"
+                coverage = "none"
+            else:
+                coverage_values = {m.coverage for m in item_mappings}
+                if "full" in coverage_values:
+                    status = "covered"
+                    coverage = "full"
+                    covered += 1
+                elif "partial" in coverage_values:
+                    status = "partial"
+                    coverage = "partial"
+                    covered += 1
+                elif "detect_only" in coverage_values:
+                    status = "detect_only"
+                    coverage = "detect_only"
+                    covered += 1
+                else:
+                    status = "not_covered"
+                    coverage = "none"
+            findings_count = 0
+            for finding in self._findings:
+                if (target.value, item.item_id) in finding.framework_mappings:
+                    findings_count += 1
+            rows.append(
+                {
+                    "id": item.item_id,
+                    "name": item.name,
+                    "status": status,
+                    "coverage": coverage,
+                    "modules": sorted({m.orchesis_feature for m in item_mappings}),
+                    "findings_count": findings_count,
+                }
+            )
+        total_items = len(items)
+        percent = (covered / total_items * 100.0) if total_items > 0 else 0.0
+        return {
+            "framework": target.value,
+            "total_items": total_items,
+            "covered_items": covered,
+            "coverage_percent": round(percent, 2),
+            "items": rows,
+        }
+
+    def get_findings(
+        self,
+        framework: Framework | None = None,
+        item_id: str | None = None,
+        severity: Severity | None = None,
+        limit: int = 100,
+    ) -> list[ComplianceFinding]:
+        """Return filtered compliance findings."""
+        max_items = max(1, int(limit))
+        filtered: list[ComplianceFinding] = []
+        for finding in reversed(self._findings):
+            if severity is not None and finding.severity != severity:
+                continue
+            if framework is not None and not any(framework.value == fw for fw, _ in finding.framework_mappings):
+                continue
+            if isinstance(item_id, str) and item_id and not any(item_id == it for _, it in finding.framework_mappings):
+                continue
+            filtered.append(finding)
+            if len(filtered) >= max_items:
+                break
+        return filtered
+
+    def get_summary(self) -> dict[str, Any]:
+        """Aggregate compliance summary across configured frameworks."""
+        frameworks_payload: dict[str, dict[str, Any]] = {}
+        for framework in self._frameworks:
+            report = self.get_coverage_report(framework)
+            frameworks_payload[framework.value] = {
+                "covered": int(report.get("covered_items", 0)),
+                "total": int(report.get("total_items", 0)),
+                "percent": float(report.get("coverage_percent", 0.0)),
+            }
+        by_severity: dict[str, int] = {item.value: 0 for item in Severity}
+        for finding in self._findings:
+            by_severity[finding.severity.value] = by_severity.get(finding.severity.value, 0) + 1
+        return {
+            "frameworks": frameworks_payload,
+            "total_findings": len(self._findings),
+            "findings_by_severity": by_severity,
+        }
+
+    def export_report(self, format: str = "json") -> dict[str, Any] | str:
+        """Export compliance report in JSON or Markdown."""
+        payload = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "summary": self.get_summary(),
+            "coverage": {framework.value: self.get_coverage_report(framework) for framework in self._frameworks},
+            "findings": [
+                {
+                    **asdict(finding),
+                    "severity": finding.severity.value,
+                }
+                for finding in self.get_findings(limit=self._max_findings)
+            ],
+        }
+        if str(format).lower() == "markdown":
+            lines = [
+                "# Orchesis Compliance Report",
+                "",
+                f"- Generated: {payload['generated_at']}",
+                f"- Total Findings: {payload['summary']['total_findings']}",
+                "",
+                "## Framework Coverage",
+            ]
+            for fw, item in payload["summary"]["frameworks"].items():
+                lines.append(f"- {fw}: {item['covered']}/{item['total']} ({item['percent']}%)")
+            lines.append("")
+            lines.append("## Recent Findings")
+            if not payload["findings"]:
+                lines.append("- No findings recorded.")
+            else:
+                for finding in payload["findings"][:20]:
+                    lines.append(
+                        f"- [{finding['severity']}] {finding['source_module']}/{finding['source_detail']}: {finding['description']}"
+                    )
+            return "\n".join(lines) + "\n"
+        return payload
+
+    def get_stats(self) -> dict[str, Any]:
+        """Summary stats for runtime endpoint integration."""
+        summary = self.get_summary()
+        return {
+            "enabled": self._enabled,
+            "frameworks": [framework.value for framework in self._frameworks],
+            "max_findings": self._max_findings,
+            "total_findings": summary.get("total_findings", 0),
+            "coverage": summary.get("frameworks", {}),
+            "findings_by_severity": summary.get("findings_by_severity", {}),
+        }
 
     def check(self, framework: str) -> ComplianceReport:
         if framework not in FRAMEWORK_CHECKS:

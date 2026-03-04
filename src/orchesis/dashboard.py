@@ -229,6 +229,7 @@ def get_dashboard_html() -> str:
       <button class="tab-btn" data-tab="agents">🤖 Agents</button>
       <button class="tab-btn" data-tab="sessions">💾 Sessions</button>
       <button class="tab-btn" data-tab="flow">🔬 Flow X-Ray</button>
+      <button class="tab-btn" data-tab="compliance">📘 Compliance</button>
     </div>
 
     <section id="shield" class="screen active">
@@ -321,6 +322,40 @@ def get_dashboard_html() -> str:
         <div><strong>Detected Patterns</strong></div>
         <div id="patterns-empty" class="empty" style="display:none;">No patterns detected.</div>
         <div id="patterns"></div>
+      </div>
+    </section>
+
+    <section id="compliance" class="screen">
+      <div class="grid-2">
+        <div class="panel">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+            <strong>Compliance Coverage Overview</strong>
+            <button id="export-compliance-btn" class="tab-btn" style="padding:6px 10px;">Export Report JSON</button>
+          </div>
+          <div class="grid-2" style="margin-top:10px;">
+            <div class="panel">
+              <div class="subtle">OWASP LLM Top 10</div>
+              <div id="cmp-owasp-percent" class="metric-value">0%</div>
+              <div class="progress"><div id="cmp-owasp-bar" style="width:0%"></div></div>
+            </div>
+            <div class="panel">
+              <div class="subtle">NIST AI RMF</div>
+              <div id="cmp-nist-percent" class="metric-value">0%</div>
+              <div class="progress"><div id="cmp-nist-bar" style="width:0%"></div></div>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <strong>Recent Compliance Findings</strong>
+          <div id="cmp-findings" class="event-feed"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <strong>OWASP Top 10 Coverage</strong>
+        <table id="cmp-owasp-table" class="table">
+          <thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Modules</th></tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
     </section>
   </div>
@@ -619,6 +654,51 @@ def get_dashboard_html() -> str:
       }
     }
 
+    function renderCompliance(summary, coverage, findings){
+      const fw = (summary && summary.frameworks) ? summary.frameworks : {};
+      const owasp = fw["owasp_llm_top10_2025"] || { percent: 0 };
+      const nist = fw["nist_ai_rmf_1_0"] || { percent: 0 };
+      const oPct = Number(owasp.percent || 0);
+      const nPct = Number(nist.percent || 0);
+      document.getElementById("cmp-owasp-percent").textContent = `${oPct.toFixed(1)}%`;
+      document.getElementById("cmp-nist-percent").textContent = `${nPct.toFixed(1)}%`;
+      document.getElementById("cmp-owasp-bar").style.width = `${Math.max(0, Math.min(100, oPct)).toFixed(1)}%`;
+      document.getElementById("cmp-nist-bar").style.width = `${Math.max(0, Math.min(100, nPct)).toFixed(1)}%`;
+
+      const rows = document.querySelector("#cmp-owasp-table tbody");
+      rows.innerHTML = "";
+      const owaspReport = coverage && coverage.frameworks ? coverage.frameworks["owasp_llm_top10_2025"] : null;
+      const items = (owaspReport && Array.isArray(owaspReport.items)) ? owaspReport.items : [];
+      items.forEach((item)=>{
+        const status = String(item.status || "not_covered");
+        const sevClass = status === "covered" ? "low" : (status === "partial" || status === "detect_only" ? "medium" : "high");
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${item.id || ""}</td>
+          <td>${item.name || ""}</td>
+          <td><span class="sev ${sevClass}">${status}</span></td>
+          <td>${(item.modules || []).join(", ") || "-"}</td>
+        `;
+        rows.appendChild(tr);
+      });
+
+      const findingsEl = document.getElementById("cmp-findings");
+      findingsEl.innerHTML = "";
+      const list = (findings && Array.isArray(findings.findings)) ? findings.findings.slice(0, 10) : [];
+      if(list.length === 0){
+        findingsEl.innerHTML = `<div class="empty">No compliance findings.</div>`;
+      }else{
+        list.forEach((f)=>{
+          const sev = String(f.severity || "info").toLowerCase();
+          const mapText = Array.isArray(f.framework_mappings) ? f.framework_mappings.map((m)=> `${m[0]}:${m[1]}`).join(", ") : "-";
+          const row = document.createElement("div");
+          row.className = "event";
+          row.innerHTML = `<span class="subtle">${f.timestamp || ""}</span><span class="sev ${sev}">${sev.toUpperCase()}</span><span>${f.description || ""}<div class="subtle">${mapText}</div></span>`;
+          findingsEl.appendChild(row);
+        });
+      }
+    }
+
     async function pollShield(){
       const data = await fetchData("/api/dashboard/overview");
       renderOverview(data);
@@ -646,12 +726,21 @@ def get_dashboard_html() -> str:
       ]);
       renderFlowAnalysis(analysis, graph);
     }
+    async function pollCompliance(){
+      const [summary, coverage, findings] = await Promise.all([
+        fetchData("/api/compliance/summary"),
+        fetchData("/api/compliance/coverage"),
+        fetchData("/api/compliance/findings?limit=10")
+      ]);
+      renderCompliance(summary, coverage, findings);
+    }
 
     async function pollCurrent(){
       if(currentTab === "shield") return pollShield();
       if(currentTab === "agents") return pollAgents();
       if(currentTab === "sessions") return pollSessions();
       if(currentTab === "flow") return pollFlow();
+      if(currentTab === "compliance") return pollCompliance();
     }
 
     function switchTab(tab){
@@ -670,6 +759,12 @@ def get_dashboard_html() -> str:
         btn.addEventListener("click", ()=> switchTab(btn.dataset.tab));
       });
       document.getElementById("flow-session-select").addEventListener("change", ()=> pollFlow());
+      const exportBtn = document.getElementById("export-compliance-btn");
+      if(exportBtn){
+        exportBtn.addEventListener("click", ()=>{
+          window.open("/api/compliance/report?format=json", "_blank");
+        });
+      }
     }
 
     async function boot(){

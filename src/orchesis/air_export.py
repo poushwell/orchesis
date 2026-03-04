@@ -313,6 +313,7 @@ def export_session_to_air(
     recorder: Any,
     flow_analyzer: Any = None,
     behavioral_detector: Any = None,
+    compliance_engine: Any = None,
     content_level: str = "structure",
     version: str | None = None,
 ) -> dict[str, Any]:
@@ -339,6 +340,54 @@ def export_session_to_air(
     dna_payload = _agent_dna_extension(behavioral_detector, records)
     if dna_payload is not None:
         extensions["orchesis"]["agent_dna"] = dna_payload
+    if compliance_engine is not None:
+        try:
+            findings = compliance_engine.get_findings(limit=500)
+        except Exception:
+            findings = []
+        session_findings: list[dict[str, Any]] = []
+        for item in findings:
+            evidence = item.evidence if isinstance(item.evidence, dict) else {}
+            sid = evidence.get("session_id")
+            if sid is not None and str(sid) != session_id:
+                continue
+            if hasattr(item, "severity"):
+                sev = getattr(item, "severity")
+                severity_value = sev.value if hasattr(sev, "value") else str(sev)
+            else:
+                severity_value = "info"
+            session_findings.append(
+                {
+                    "finding_id": str(getattr(item, "finding_id", "")),
+                    "timestamp": str(getattr(item, "timestamp", "")),
+                    "source_module": str(getattr(item, "source_module", "")),
+                    "source_detail": str(getattr(item, "source_detail", "")),
+                    "description": str(getattr(item, "description", "")),
+                    "severity": severity_value,
+                    "framework_mappings": list(getattr(item, "framework_mappings", [])),
+                }
+            )
+        try:
+            summary = compliance_engine.get_summary()
+        except Exception:
+            summary = {}
+        frameworks = []
+        if isinstance(summary, dict):
+            fw_map = summary.get("frameworks", {})
+            if isinstance(fw_map, dict):
+                frameworks = list(fw_map.keys())
+        owasp_percent = 0.0
+        if isinstance(summary, dict):
+            fw_map = summary.get("frameworks", {})
+            if isinstance(fw_map, dict):
+                owasp = fw_map.get("owasp_llm_top10_2025", {})
+                if isinstance(owasp, dict):
+                    owasp_percent = float(owasp.get("percent", 0.0))
+        extensions["orchesis"]["compliance"] = {
+            "frameworks_evaluated": frameworks,
+            "owasp_coverage_percent": owasp_percent,
+            "session_findings": session_findings,
+        }
 
     models: dict[str, Any] = {}
     for turn in turns:
@@ -374,6 +423,7 @@ def export_session_to_air_file(
     recorder: Any,
     flow_analyzer: Any = None,
     behavioral_detector: Any = None,
+    compliance_engine: Any = None,
     content_level: str = "structure",
     version: str | None = None,
     compress: bool = False,
@@ -384,6 +434,7 @@ def export_session_to_air_file(
         recorder=recorder,
         flow_analyzer=flow_analyzer,
         behavioral_detector=behavioral_detector,
+        compliance_engine=compliance_engine,
         content_level=content_level,
         version=version,
     )

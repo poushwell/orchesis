@@ -62,6 +62,7 @@ from orchesis.flow_xray import FlowAnalyzer, FlowXRayConfig
 from orchesis.dashboard import get_dashboard_html
 from orchesis.air_export import export_session_to_air
 from orchesis import __version__ as ORCHESIS_VERSION
+from orchesis.compliance import ComplianceEngine, Framework, Severity
 
 _HTTP_PROXY_LOGGER = logging.getLogger("orchesis.http_proxy")
 
@@ -167,6 +168,24 @@ class OrchesisProxy:
             if bool(self._recording_cfg.get("enabled", False))
             else None
         )
+        compliance_cfg = self._policy.get("compliance")
+        self._compliance_cfg = compliance_cfg if isinstance(compliance_cfg, dict) else {}
+        framework_tokens = self._compliance_cfg.get("frameworks", ["owasp_llm_top10", "nist_ai_rmf"])
+        resolved_frameworks: list[Framework] = []
+        if isinstance(framework_tokens, list):
+            for token in framework_tokens:
+                framework = ComplianceEngine._framework_from_alias(token if isinstance(token, str) else None)
+                if framework is not None and framework not in resolved_frameworks:
+                    resolved_frameworks.append(framework)
+        if not resolved_frameworks:
+            resolved_frameworks = [Framework.OWASP_LLM_TOP_10, Framework.NIST_AI_RMF]
+        self._compliance_engine = ComplianceEngine(
+            policy_path="policy.yaml",
+            frameworks=resolved_frameworks,
+            max_findings=int(self._compliance_cfg.get("max_findings", 10000)),
+            enabled=bool(self._compliance_cfg.get("enabled", True)),
+        )
+        self._compliance_enabled = bool(self._compliance_cfg.get("enabled", True))
         proxy_cfg = self._policy.get("proxy") if isinstance(self._policy.get("proxy"), dict) else {}
         secret_cfg = proxy_cfg.get("secret_scanning") if isinstance(proxy_cfg.get("secret_scanning"), dict) else {}
         pii_cfg = proxy_cfg.get("pii_scanning") if isinstance(proxy_cfg.get("pii_scanning"), dict) else {}
@@ -1668,6 +1687,24 @@ class LLMHTTPProxy:
             if bool(self._recording_cfg.get("enabled", False))
             else None
         )
+        compliance_cfg = self._policy.get("compliance")
+        self._compliance_cfg = compliance_cfg if isinstance(compliance_cfg, dict) else {}
+        framework_tokens = self._compliance_cfg.get("frameworks", ["owasp_llm_top10", "nist_ai_rmf"])
+        resolved_frameworks: list[Framework] = []
+        if isinstance(framework_tokens, list):
+            for token in framework_tokens:
+                resolved = ComplianceEngine._framework_from_alias(token if isinstance(token, str) else None)
+                if resolved is not None and resolved not in resolved_frameworks:
+                    resolved_frameworks.append(resolved)
+        if not resolved_frameworks:
+            resolved_frameworks = [Framework.OWASP_LLM_TOP_10, Framework.NIST_AI_RMF]
+        self._compliance_engine = ComplianceEngine(
+            policy_path=self._policy_path or "policy.yaml",
+            frameworks=resolved_frameworks,
+            max_findings=int(self._compliance_cfg.get("max_findings", 10000)),
+            enabled=bool(self._compliance_cfg.get("enabled", True)),
+        )
+        self._compliance_enabled = bool(self._compliance_cfg.get("enabled", True))
         kill_cfg = self._policy.get("kill_switch")
         self._kill_cfg = kill_cfg if isinstance(kill_cfg, dict) else {}
         self._kill_enabled = bool(self._kill_cfg.get("enabled", False))
@@ -1735,6 +1772,8 @@ class LLMHTTPProxy:
             payload["recorder"] = self._recorder.get_stats()
         if self._flow_analyzer is not None:
             payload["flow_xray"] = self._flow_analyzer.get_stats()
+        if self._compliance_engine is not None:
+            payload["compliance"] = self._compliance_engine.get_stats()
         return payload
 
     @property
@@ -1790,8 +1829,24 @@ class LLMHTTPProxy:
             self._stats[field] = int(self._stats.get(field, 0)) + 1
         if field == "blocked":
             self._add_dashboard_event("blocked", "medium", "Request blocked by runtime guardrail.")
+            if self._compliance_enabled:
+                self._compliance_engine.map_finding(
+                    source_module="engine",
+                    source_detail="tool_allowlist",
+                    description="Runtime guardrail blocked a request.",
+                    severity=Severity.MEDIUM,
+                    evidence={"counter": "blocked"},
+                )
         elif field == "errors":
             self._add_dashboard_event("error", "high", "Runtime error while processing request.")
+            if self._compliance_enabled:
+                self._compliance_engine.map_finding(
+                    source_module="circuit_breaker",
+                    source_detail="automated_response",
+                    description="Runtime error recorded by proxy.",
+                    severity=Severity.HIGH,
+                    evidence={"counter": "errors"},
+                )
 
     def _add_dashboard_event(
         self,
@@ -1932,6 +1987,7 @@ class LLMHTTPProxy:
                 recorder=self._recorder,
                 flow_analyzer=self._flow_analyzer,
                 behavioral_detector=self._behavioral_detector if self._behavioral_detector.enabled else None,
+                compliance_engine=self._compliance_engine if self._compliance_enabled else None,
                 content_level=content_level,
                 version=ORCHESIS_VERSION,
             )
@@ -2050,6 +2106,67 @@ class LLMHTTPProxy:
                 self._send_json(handler, 200, {"sessions_tracked": 0, "pattern_counts": {}})
                 return
             self._send_json(handler, 200, self._flow_analyzer.get_stats())
+            return
+        if path == "/api/compliance/summary":
+            self._send_json(handler, 200, self._compliance_engine.get_summary())
+            return
+        if path == "/api/compliance/coverage":
+            reports: dict[str, Any] = {}
+            for framework in self._compliance_engine._frameworks:  # noqa: SLF001
+                reports[framework.value] = self._compliance_engine.get_coverage_report(framework)
+            self._send_json(handler, 200, {"frameworks": reports})
+            return
+        if path.startswith("/api/compliance/coverage/"):
+            framework_token = path.split("/api/compliance/coverage/", 1)[1].strip().lower()
+            framework = ComplianceEngine._framework_from_alias(framework_token)
+            if framework is None:
+                self._send_json(handler, 404, {"error": "framework_not_found"})
+                return
+            self._send_json(handler, 200, self._compliance_engine.get_coverage_report(framework))
+            return
+        if path == "/api/compliance/findings":
+            framework = ComplianceEngine._framework_from_alias((query_params.get("framework") or [None])[0])
+            severity_token = (query_params.get("severity") or [None])[0]
+            sev = None
+            if isinstance(severity_token, str) and severity_token.strip():
+                try:
+                    sev = Severity(severity_token.strip().lower())
+                except Exception:
+                    sev = None
+            limit_raw = (query_params.get("limit") or ["100"])[0]
+            try:
+                limit = int(limit_raw)
+            except Exception:
+                limit = 100
+            findings = self._compliance_engine.get_findings(framework=framework, severity=sev, limit=limit)
+            self._send_json(
+                handler,
+                200,
+                {
+                    "findings": [
+                        {
+                            **asdict(item),
+                            "severity": item.severity.value,
+                        }
+                        for item in findings
+                    ]
+                },
+            )
+            return
+        if path == "/api/compliance/report":
+            fmt = str((query_params.get("format") or ["json"])[0]).strip().lower()
+            report = self._compliance_engine.export_report(format=fmt)
+            if isinstance(report, str):
+                payload = report.encode("utf-8")
+                handler.send_response(200)
+                handler.send_header("Content-Type", "text/markdown; charset=utf-8")
+                handler.send_header("Content-Length", str(len(payload)))
+                if self._config.cors:
+                    handler.send_header("Access-Control-Allow-Origin", "*")
+                handler.end_headers()
+                handler.wfile.write(payload)
+                return
+            self._send_json(handler, 200, report)
             return
         self._send_json(handler, 404, {"error": "Not found"})
 

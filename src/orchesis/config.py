@@ -646,6 +646,43 @@ def _normalize_flow_xray(policy: dict[str, Any]) -> None:
     policy["flow_xray"] = raw
 
 
+def _normalize_compliance(policy: dict[str, Any]) -> None:
+    raw = policy.get("compliance")
+    if raw is None:
+        policy["compliance"] = {
+            "enabled": True,
+            "frameworks": ["owasp_llm_top10", "nist_ai_rmf"],
+            "max_findings": 10000,
+        }
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("compliance must be a mapping")
+    raw["enabled"] = bool(raw.get("enabled", True))
+    frameworks_raw = raw.get("frameworks", ["owasp_llm_top10", "nist_ai_rmf"])
+    if not isinstance(frameworks_raw, list):
+        raise PolicyError("compliance.frameworks must be a list")
+    normalized_frameworks: list[str] = []
+    allowed = {"owasp_llm_top10", "nist_ai_rmf", "nist_ai_agent"}
+    for item in frameworks_raw:
+        if not isinstance(item, str):
+            continue
+        token = item.strip().lower()
+        if not token:
+            continue
+        if token not in allowed:
+            raise PolicyError(f"unsupported compliance framework: {token}")
+        if token not in normalized_frameworks:
+            normalized_frameworks.append(token)
+    if not normalized_frameworks:
+        normalized_frameworks = ["owasp_llm_top10", "nist_ai_rmf"]
+    raw["frameworks"] = normalized_frameworks
+    max_findings = raw.get("max_findings", 10000)
+    if not _is_number(max_findings) or int(max_findings) <= 0:
+        raise PolicyError("compliance.max_findings must be > 0")
+    raw["max_findings"] = int(max_findings)
+    policy["compliance"] = raw
+
+
 def _normalize_capability_constraints(raw: Any, *, key: str, index: int, section: str) -> list[str]:
     if raw is None:
         return []
@@ -742,6 +779,7 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     _normalize_behavioral_fingerprint(loaded)
     _normalize_recording(loaded)
     _normalize_flow_xray(loaded)
+    _normalize_compliance(loaded)
     _normalize_capabilities(loaded)
     return loaded
 
