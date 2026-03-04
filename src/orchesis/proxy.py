@@ -1536,6 +1536,35 @@ class HTTPProxyConfig:
     )
 
 
+@dataclass
+class _RequestContext:
+    """Mutable state passed between request processing phases."""
+
+    handler: Any  # BaseHTTPRequestHandler
+    body: dict[str, Any] = field(default_factory=dict)
+    parsed_req: Any = None  # ParsedRequest
+    provider: str = ""
+    original_model: str = ""
+    cascade_decision: Any = None  # CascadeDecision | None
+    cascade_level_name: str = "simple"
+    cascade_cache_state: str = "miss"
+    loop_warning_header: str = ""
+    circuit_state_header: str = "closed"
+    behavior_header: str = "normal"
+    behavior_score_header: str = ""
+    behavior_dims_header: str = ""
+    behavior_agent_id: str = "default"
+    session_id: str = ""
+    request_id: str = ""
+    session_headers: dict[str, str] = field(default_factory=dict)
+    proc_result: dict[str, Any] = field(default_factory=lambda: {"cost": 0.0})
+    request_started: float = 0.0
+    resp_status: int = 200
+    resp_headers: dict[str, str] = field(default_factory=dict)
+    resp_body: bytes = b""
+    parsed_resp_obj: Any = None  # ParsedResponse | None
+
+
 class LLMHTTPProxy:
     """HTTP proxy server for LLM APIs using stdlib HTTPServer."""
 
@@ -1764,23 +1793,490 @@ class LLMHTTPProxy:
             return
         self._send_json(handler, 404, {"error": "Not found"})
 
+    def _phase_parse(self, ctx: _RequestContext) -> bool:
+        length = int(ctx.handler.headers.get("Content-Length", "0") or "0")
+        raw_body = ctx.handler.rfile.read(max(0, length))
+        try:
+            body = json.loads(raw_body.decode("utf-8"))
+        except Exception:
+            self._send_json(ctx.handler, 400, {"error": "Invalid JSON in request body"})
+            return False
+        if not isinstance(body, dict):
+            self._send_json(ctx.handler, 400, {"error": "Request body must be a JSON object"})
+            return False
+        ctx.body = body
+        ctx.parsed_req = parse_request(body, ctx.handler.path)
+        ctx.original_model = ctx.parsed_req.model or str(body.get("model", ""))
+        return True
+
+    def _phase_cascade(self, ctx: _RequestContext) -> bool:
+        if self._cascade_router is None:
+            return True
+        task_id = ctx.body.get("task_id")
+        cascade_context = {"task_id": task_id} if isinstance(task_id, str) and task_id else {}
+        pre_level = self._cascade_router.classify(ctx.parsed_req, context=cascade_context)
+        pre_level_name = self._cascade_router.level_name(pre_level)
+        pre_model = ctx.parsed_req.model or str(
+            self._cascade_cfg.get("levels", {}).get(pre_level_name, {}).get("model", "")
+        )
+        cache_key = self._cascade_router.make_cache_key(ctx.parsed_req, pre_model or "")
+        cached_payload = self._cascade_router.get_cache(cache_key, pre_level)
+        if cached_payload is not None:
+            ctx.handler.send_response(200)
+            ctx.handler.send_header("Content-Type", "application/json")
+            ctx.handler.send_header("Content-Length", str(len(cached_payload)))
+            ctx.handler.send_header("X-Orchesis-Cost", "0.0")
+            ctx.handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
+            ctx.handler.send_header("X-Orchesis-Cascade-Level", pre_level_name)
+            ctx.handler.send_header("X-Orchesis-Cascade-Model", pre_model or "")
+            ctx.handler.send_header("X-Orchesis-Cache", "hit")
+            if self._recorder is not None:
+                ctx.handler.send_header("X-Orchesis-Session-Id", ctx.session_id)
+                ctx.handler.send_header("X-Orchesis-Request-Id", ctx.request_id)
+            if self._config.cors:
+                ctx.handler.send_header("Access-Control-Allow-Origin", "*")
+            ctx.handler.end_headers()
+            ctx.handler.wfile.write(cached_payload)
+            self._inc("allowed")
+            cached_obj: dict[str, Any] | None = None
+            try:
+                decoded_cached = json.loads(cached_payload.decode("utf-8"))
+                if isinstance(decoded_cached, dict):
+                    cached_obj = decoded_cached
+            except Exception:
+                cached_obj = None
+            self._record_session(
+                request_id=ctx.request_id,
+                session_id=ctx.session_id,
+                request_body=ctx.body,
+                response_body=cached_obj,
+                status_code=200,
+                provider=ctx.parsed_req.provider,
+                model=str(ctx.body.get("model", "")),
+                latency_ms=(time.perf_counter() - ctx.request_started) * 1000.0,
+                cost=0.0,
+                error=None,
+                metadata={
+                    "agent_id": ctx.behavior_agent_id,
+                    "behavioral_state": ctx.behavior_header,
+                    "cascade_level": pre_level_name,
+                    "loop_state": ctx.loop_warning_header,
+                },
+            )
+            return False
+        ctx.cascade_decision = self._cascade_router.route(ctx.parsed_req, context=cascade_context)
+        ctx.cascade_level_name = self._cascade_router.level_name(ctx.cascade_decision.cascade_level)
+        ctx.cascade_cache_state = "miss"
+        if ctx.cascade_decision.model:
+            ctx.body["model"] = ctx.cascade_decision.model
+        if ctx.cascade_decision.max_tokens > 0:
+            ctx.body["max_tokens"] = ctx.cascade_decision.max_tokens
+        return True
+
+    def _phase_circuit_breaker(self, ctx: _RequestContext) -> bool:
+        if not self._circuit_breaker.should_allow():
+            self._inc("blocked")
+            fallback = {
+                "error": {
+                    "type": "circuit_open",
+                    "message": self._circuit_breaker.fallback_message,
+                }
+            }
+            payload_fb = json.dumps(fallback, ensure_ascii=False).encode("utf-8")
+            ctx.handler.send_response(self._circuit_breaker.fallback_status)
+            ctx.handler.send_header("Content-Type", "application/json")
+            ctx.handler.send_header("Content-Length", str(len(payload_fb)))
+            ctx.handler.send_header("X-Orchesis-Circuit", "open")
+            if self._config.cors:
+                ctx.handler.send_header("Access-Control-Allow-Origin", "*")
+            ctx.handler.end_headers()
+            ctx.handler.wfile.write(payload_fb)
+            return False
+        ctx.circuit_state_header = self._circuit_breaker.get_state().lower().replace("_", "-")
+        return True
+
+    def _phase_loop_detection(self, ctx: _RequestContext) -> bool:
+        if self._loop_detector is None:
+            return True
+        loop_decision = self._loop_detector.check_request(
+            {
+                "model": ctx.body.get("model", ctx.parsed_req.model),
+                "messages": ctx.parsed_req.messages,
+                "tool_calls": ctx.parsed_req.tool_calls,
+                "content_text": ctx.parsed_req.content_text,
+            }
+        )
+        if loop_decision.action == "block":
+            self._loop_trigger_hits += 1
+            if self._kill_enabled and self._should_kill_for_loops():
+                self._activate_kill_switch("auto-kill: loop threshold reached")
+                self._inc("blocked")
+                self._send_json(
+                    ctx.handler,
+                    503,
+                    {
+                        "error": {
+                            "type": "kill_switch",
+                            "message": self._kill_reason,
+                            "killed_at": self._kill_time,
+                        }
+                    },
+                )
+                return False
+            self._inc("blocked")
+            payload_lb = {
+                "error": {
+                    "type": "loop_detected",
+                    "message": loop_decision.reason or "Fuzzy loop threshold exceeded",
+                }
+            }
+            body_lb = json.dumps(payload_lb, ensure_ascii=False).encode("utf-8")
+            ctx.handler.send_response(429)
+            ctx.handler.send_header("Content-Type", "application/json")
+            ctx.handler.send_header("Content-Length", str(len(body_lb)))
+            ctx.handler.send_header("X-Orchesis-Loop-Blocked", loop_decision.reason or "Fuzzy loop threshold exceeded")
+            ctx.handler.send_header("X-Orchesis-Loop-Saved", f"${loop_decision.estimated_cost_saved:.2f}")
+            ctx.handler.send_header("X-Orchesis-Circuit", ctx.circuit_state_header)
+            if self._config.cors:
+                ctx.handler.send_header("Access-Control-Allow-Origin", "*")
+            ctx.handler.end_headers()
+            ctx.handler.wfile.write(body_lb)
+            return False
+        if loop_decision.action in {"warn", "downgrade_model"}:
+            ctx.loop_warning_header = loop_decision.reason or "Loop warning"
+            if loop_decision.action == "downgrade_model":
+                ctx.body["model"] = self._downgrade_model
+        return True
+
+    def _phase_behavioral(self, ctx: _RequestContext) -> bool:
+        if not self._behavioral_detector.enabled:
+            return True
+        behavior_data = {
+            "model": ctx.body.get("model", ctx.parsed_req.model),
+            "messages": ctx.parsed_req.messages,
+            "tools": ctx.parsed_req.tool_calls,
+            "estimated_cost": float(ctx.proc_result.get("cost", 0.0)),
+            "headers": {k: v for k, v in ctx.handler.headers.items()},
+        }
+        ctx.behavior_agent_id = extract_agent_id(behavior_data)
+        behavior_decision = self._behavioral_detector.check_request(ctx.behavior_agent_id, behavior_data)
+        if behavior_decision.action == "block":
+            self._inc("blocked")
+            self._send_json(
+                ctx.handler,
+                429,
+                {
+                    "error": "behavioral_anomaly",
+                    "anomalies": [asdict(item) for item in behavior_decision.anomalies],
+                },
+                extra_headers=ctx.session_headers,
+            )
+            self._record_session(
+                request_id=ctx.request_id,
+                session_id=ctx.session_id,
+                request_body=ctx.body,
+                response_body=None,
+                status_code=429,
+                provider=ctx.parsed_req.provider,
+                model=str(ctx.body.get("model", "")),
+                latency_ms=(time.perf_counter() - ctx.request_started) * 1000.0,
+                cost=float(ctx.proc_result.get("cost", 0.0)),
+                error="behavioral_anomaly",
+                metadata={
+                    "agent_id": ctx.behavior_agent_id,
+                    "behavioral_state": "anomaly",
+                    "cascade_level": ctx.cascade_level_name,
+                    "loop_state": ctx.loop_warning_header,
+                },
+            )
+            return False
+        if behavior_decision.action == "learning":
+            ctx.behavior_header = "learning"
+        elif behavior_decision.anomalies:
+            ctx.behavior_header = "anomaly"
+            ctx.behavior_score_header = str(behavior_decision.anomaly_score)
+            ctx.behavior_dims_header = ",".join(sorted({item.dimension for item in behavior_decision.anomalies}))
+        return True
+
+    def _phase_budget(self, ctx: _RequestContext) -> bool:
+        _ = ctx
+        if self._budget_cfg:
+            budget_status = self._cost_tracker.check_budget(self._budget_cfg)
+            if self._kill_enabled and self._should_kill_for_cost(budget_status):
+                self._activate_kill_switch("auto-kill: emergency budget multiplier exceeded")
+                self._inc("blocked")
+                self._send_json(
+                    ctx.handler,
+                    503,
+                    {
+                        "error": {
+                            "type": "kill_switch",
+                            "message": self._kill_reason,
+                            "killed_at": self._kill_time,
+                        }
+                    },
+                )
+                return False
+            if bool(budget_status.get("over_budget", False)):
+                self._inc("blocked")
+                self._send_json(
+                    ctx.handler,
+                    429,
+                    {
+                        "error": {
+                            "type": "budget_exceeded",
+                            "message": f"Daily budget exceeded. Spent ${budget_status.get('daily_spent', 0):.4f}",
+                        }
+                    },
+                )
+                return False
+        return True
+
+    def _phase_policy(self, ctx: _RequestContext) -> bool:
+        for call in ctx.parsed_req.tool_calls:
+            eval_request = {
+                "tool": call.name,
+                "params": call.params if isinstance(call.params, dict) else {},
+                "context": {"path": ctx.handler.path, "provider": ctx.parsed_req.provider},
+            }
+            decision = evaluate(eval_request, self._policy, state=self._state_tracker)
+            if not decision.allowed:
+                self._inc("blocked")
+                reason = decision.reasons[0] if decision.reasons else "blocked_by_policy"
+                self._send_json(
+                    ctx.handler,
+                    403,
+                    {"error": {"type": "policy_violation", "message": f"Tool '{call.name}' blocked: {reason}"}},
+                )
+                return False
+        return True
+
+    def _phase_model_router(self, ctx: _RequestContext) -> bool:
+        if self._router is not None and ctx.parsed_req.content_text:
+            route = self._router.route(
+                ctx.parsed_req.content_text,
+                tool_name=ctx.parsed_req.tool_calls[0].name if ctx.parsed_req.tool_calls else None,
+            )
+            routed_model = route.get("model")
+            if isinstance(routed_model, str) and routed_model and routed_model != ctx.parsed_req.model:
+                ctx.body["model"] = routed_model
+        return True
+
+    def _phase_secrets(self, ctx: _RequestContext) -> bool:
+        if self._scan_outbound and ctx.parsed_req.content_text:
+            for pattern, secret_type in SECRET_PATTERNS:
+                if pattern.search(ctx.parsed_req.content_text):
+                    self._secret_trigger_hits += 1
+                    if self._kill_enabled and self._should_kill_for_secrets():
+                        self._activate_kill_switch("auto-kill: secrets detection threshold reached")
+                        self._inc("blocked")
+                        self._send_json(
+                            ctx.handler,
+                            503,
+                            {
+                                "error": {
+                                    "type": "kill_switch",
+                                    "message": self._kill_reason,
+                                    "killed_at": self._kill_time,
+                                }
+                            },
+                        )
+                        return False
+                    self._inc("blocked")
+                    self._send_json(
+                        ctx.handler,
+                        403,
+                        {
+                            "error": {
+                                "type": "secret_detected",
+                                "message": f"Request contains potential {secret_type}",
+                            }
+                        },
+                    )
+                    return False
+        return True
+
+    def _phase_upstream(self, ctx: _RequestContext) -> bool:
+        ctx.provider = self._detect_provider(ctx.parsed_req.provider, ctx.handler.headers)
+        upstream_base = self._get_upstream(ctx.provider, ctx.handler.headers)
+        upstream_url = f"{upstream_base.rstrip('/')}{ctx.handler.path}"
+        payload = json.dumps(ctx.body, ensure_ascii=False).encode("utf-8")
+        upstream_headers = self._build_forward_headers(ctx.handler.headers, payload)
+        req = UrlRequest(upstream_url, data=payload, headers=upstream_headers, method="POST")
+        ctx.resp_status = 200
+        ctx.resp_headers = {}
+        ctx.resp_body = b""
+        try:
+            with urlopen(req, timeout=self._config.timeout) as upstream_resp:
+                ctx.resp_status = int(getattr(upstream_resp, "status", 200))
+                ctx.resp_headers = dict(upstream_resp.headers.items())
+                ctx.resp_body = upstream_resp.read()
+        except HTTPError as error:
+            ctx.resp_status = int(error.code)
+            ctx.resp_headers = dict(error.headers.items()) if error.headers is not None else {}
+            ctx.resp_body = error.read()
+        except URLError as error:
+            self._circuit_breaker.record_failure()
+            self._inc("errors")
+            self._send_json(
+                ctx.handler,
+                502,
+                {"error": {"type": "upstream_error", "message": f"Failed to connect to upstream: {error}"}},
+            )
+            return False
+        return True
+
+    def _phase_post_upstream(self, ctx: _RequestContext) -> bool:
+        ctx.parsed_resp_obj = None
+        try:
+            decoded = json.loads(ctx.resp_body.decode("utf-8"))
+            if isinstance(decoded, dict):
+                parsed_resp = parse_response(decoded, ctx.provider)
+                ctx.parsed_resp_obj = parsed_resp
+                ctx.proc_result = self._response_processor.process(parsed_resp)
+                if not ctx.proc_result.get("allowed", True):
+                    self._inc("blocked")
+                    self._send_json(
+                        ctx.handler,
+                        403,
+                        {
+                            "error": {
+                                "type": "secret_detected_in_response",
+                                "message": ctx.proc_result.get("reason", "response contains secrets"),
+                            }
+                        },
+                    )
+                    return False
+        except Exception:
+            ctx.proc_result = {"cost": 0.0}
+        if 200 <= ctx.resp_status < 300:
+            self._circuit_breaker.record_success()
+        elif ctx.resp_status >= 500:
+            self._circuit_breaker.record_failure()
+        if (
+            self._cascade_router is not None
+            and ctx.cascade_decision is not None
+            and self._cascade_router.should_escalate(ctx.resp_status, ctx.parsed_resp_obj)
+            and ctx.cascade_decision.cascade_level < CascadeLevel.COMPLEX
+        ):
+            escalated_decision = self._cascade_router.escalate(ctx.cascade_decision)
+            if escalated_decision.model:
+                ctx.body["model"] = escalated_decision.model
+            if escalated_decision.max_tokens > 0:
+                ctx.body["max_tokens"] = escalated_decision.max_tokens
+            upstream_base = self._get_upstream(ctx.provider, ctx.handler.headers)
+            upstream_url = f"{upstream_base.rstrip('/')}{ctx.handler.path}"
+            payload_retry = json.dumps(ctx.body, ensure_ascii=False).encode("utf-8")
+            req_retry = UrlRequest(
+                upstream_url,
+                data=payload_retry,
+                headers=self._build_forward_headers(ctx.handler.headers, payload_retry),
+                method="POST",
+            )
+            try:
+                with urlopen(req_retry, timeout=self._config.timeout) as upstream_retry:
+                    ctx.resp_status = int(getattr(upstream_retry, "status", 200))
+                    ctx.resp_headers = dict(upstream_retry.headers.items())
+                    ctx.resp_body = upstream_retry.read()
+            except HTTPError as error:
+                ctx.resp_status = int(error.code)
+                ctx.resp_headers = dict(error.headers.items()) if error.headers is not None else {}
+                ctx.resp_body = error.read()
+            ctx.cascade_decision = escalated_decision
+            ctx.cascade_level_name = self._cascade_router.level_name(ctx.cascade_decision.cascade_level)
+            try:
+                decoded_retry = json.loads(ctx.resp_body.decode("utf-8"))
+                if isinstance(decoded_retry, dict):
+                    parsed_resp_retry = parse_response(decoded_retry, ctx.provider)
+                    ctx.parsed_resp_obj = parsed_resp_retry
+                    ctx.proc_result = self._response_processor.process(parsed_resp_retry)
+            except Exception:
+                pass
+        if self._cascade_router is not None and ctx.cascade_decision is not None and ctx.parsed_resp_obj is not None:
+            token_sum = int(getattr(ctx.parsed_resp_obj, "input_tokens", 0)) + int(
+                getattr(ctx.parsed_resp_obj, "output_tokens", 0)
+            )
+            self._cost_tracker.record_cascade_savings(
+                original_model=ctx.original_model or ctx.cascade_decision.model,
+                actual_model=ctx.cascade_decision.model,
+                tokens=token_sum,
+            )
+            if 200 <= ctx.resp_status < 300:
+                self._cascade_router.record_result(ctx.cascade_decision, ctx.parsed_resp_obj)
+                self._cascade_router.cache_response(ctx.cascade_decision, ctx.resp_body)
+        if self._behavioral_detector.enabled:
+            completion_tokens = 0
+            if ctx.parsed_resp_obj is not None:
+                completion_tokens = int(ctx.parsed_resp_obj.output_tokens)
+            self._behavioral_detector.record_response(
+                ctx.behavior_agent_id,
+                is_error=ctx.resp_status >= 400,
+                completion_tokens=completion_tokens,
+            )
+        return True
+
+    def _phase_send_response(self, ctx: _RequestContext) -> None:
+        ctx.handler.send_response(ctx.resp_status)
+        self._copy_upstream_headers(ctx.handler, ctx.resp_headers, len(ctx.resp_body))
+        ctx.handler.send_header("X-Orchesis-Cost", str(round(float(ctx.proc_result.get("cost", 0.0)), 6)))
+        ctx.handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
+        ctx.handler.send_header("X-Orchesis-Cascade-Level", ctx.cascade_level_name)
+        ctx.handler.send_header("X-Orchesis-Cascade-Model", str(ctx.body.get("model", ctx.original_model)))
+        ctx.handler.send_header("X-Orchesis-Cache", ctx.cascade_cache_state)
+        ctx.handler.send_header("X-Orchesis-Circuit", self._circuit_breaker.get_state().lower().replace("_", "-"))
+        if self._recorder is not None:
+            ctx.handler.send_header("X-Orchesis-Session-Id", ctx.session_id)
+            ctx.handler.send_header("X-Orchesis-Request-Id", ctx.request_id)
+        if ctx.loop_warning_header:
+            ctx.handler.send_header("X-Orchesis-Loop-Warning", ctx.loop_warning_header)
+        if self._behavioral_detector.enabled:
+            ctx.handler.send_header("X-Orchesis-Behavior", ctx.behavior_header)
+            if ctx.behavior_score_header:
+                ctx.handler.send_header("X-Orchesis-Anomaly-Score", ctx.behavior_score_header)
+            if ctx.behavior_dims_header:
+                ctx.handler.send_header("X-Orchesis-Anomaly-Dimensions", ctx.behavior_dims_header)
+        if self._config.cors:
+            ctx.handler.send_header("Access-Control-Allow-Origin", "*")
+        ctx.handler.end_headers()
+        ctx.handler.wfile.write(ctx.resp_body)
+        self._inc("allowed")
+        response_obj: dict[str, Any] | None = None
+        try:
+            parsed_obj = json.loads(ctx.resp_body.decode("utf-8"))
+            if isinstance(parsed_obj, dict):
+                response_obj = parsed_obj
+        except Exception:
+            response_obj = None
+        self._record_session(
+            request_id=ctx.request_id,
+            session_id=ctx.session_id,
+            request_body=ctx.body,
+            response_body=response_obj,
+            status_code=ctx.resp_status,
+            provider=ctx.provider,
+            model=str(ctx.body.get("model", ctx.original_model)),
+            latency_ms=(time.perf_counter() - ctx.request_started) * 1000.0,
+            cost=float(ctx.proc_result.get("cost", 0.0)),
+            error=None if ctx.resp_status < 400 else f"http_{ctx.resp_status}",
+            metadata={
+                "agent_id": ctx.behavior_agent_id,
+                "behavioral_state": ctx.behavior_header,
+                "cascade_level": ctx.cascade_level_name,
+                "loop_state": ctx.loop_warning_header,
+            },
+        )
+
     def _handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         self._inc("requests")
-        proc_result: dict[str, Any] = {"cost": 0.0}
-        request_started = time.perf_counter()
-        loop_warning_header = ""
-        circuit_state_header = self._circuit_breaker.get_state().lower().replace("_", "-")
-        behavior_header = "normal"
-        behavior_score_header = ""
-        behavior_dims_header = ""
-        behavior_agent_id = "default"
-        session_id = self._resolve_session_id(handler.headers) if self._recorder is not None else ""
-        request_id = uuid.uuid4().hex if self._recorder is not None else ""
-        session_headers = (
-            {
-                "X-Orchesis-Session-Id": session_id,
-                "X-Orchesis-Request-Id": request_id,
-            }
+        ctx = _RequestContext(
+            handler=handler,
+            request_started=time.perf_counter(),
+            circuit_state_header=self._circuit_breaker.get_state().lower().replace("_", "-"),
+            session_id=self._resolve_session_id(handler.headers) if self._recorder is not None else "",
+            request_id=uuid.uuid4().hex if self._recorder is not None else "",
+        )
+        ctx.session_headers = (
+            {"X-Orchesis-Session-Id": ctx.session_id, "X-Orchesis-Request-Id": ctx.request_id}
             if self._recorder is not None
             else {}
         )
@@ -1805,465 +2301,29 @@ class LLMHTTPProxy:
                     },
                 )
                 return
-
-            length = int(handler.headers.get("Content-Length", "0") or "0")
-            raw_body = handler.rfile.read(max(0, length))
-            try:
-                body = json.loads(raw_body.decode("utf-8"))
-            except Exception:
-                self._send_json(handler, 400, {"error": "Invalid JSON in request body"})
+            if not self._phase_parse(ctx):
                 return
-            if not isinstance(body, dict):
-                self._send_json(handler, 400, {"error": "Request body must be a JSON object"})
+            if not self._phase_cascade(ctx):
                 return
-
-            parsed_req = parse_request(body, handler.path)
-            task_id = body.get("task_id")
-            cascade_context = {"task_id": task_id} if isinstance(task_id, str) and task_id else {}
-            cascade_decision: CascadeDecision | None = None
-            cascade_level_name = "simple"
-            cascade_cache_state = "miss"
-            original_model = parsed_req.model or str(body.get("model", ""))
-
-            if self._cascade_router is not None:
-                pre_level = self._cascade_router.classify(parsed_req, context=cascade_context)
-                pre_level_name = self._cascade_router.level_name(pre_level)
-                pre_model = parsed_req.model or str(
-                    self._cascade_cfg.get("levels", {}).get(pre_level_name, {}).get("model", "")
-                )
-                cache_key = self._cascade_router.make_cache_key(parsed_req, pre_model or "")
-                cached_payload = self._cascade_router.get_cache(cache_key, pre_level)
-                if cached_payload is not None:
-                    handler.send_response(200)
-                    handler.send_header("Content-Type", "application/json")
-                    handler.send_header("Content-Length", str(len(cached_payload)))
-                    handler.send_header("X-Orchesis-Cost", "0.0")
-                    handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
-                    handler.send_header("X-Orchesis-Cascade-Level", pre_level_name)
-                    handler.send_header("X-Orchesis-Cascade-Model", pre_model or "")
-                    handler.send_header("X-Orchesis-Cache", "hit")
-                    if self._recorder is not None:
-                        handler.send_header("X-Orchesis-Session-Id", session_id)
-                        handler.send_header("X-Orchesis-Request-Id", request_id)
-                    if self._config.cors:
-                        handler.send_header("Access-Control-Allow-Origin", "*")
-                    handler.end_headers()
-                    handler.wfile.write(cached_payload)
-                    self._inc("allowed")
-                    cached_obj: dict[str, Any] | None = None
-                    try:
-                        decoded_cached = json.loads(cached_payload.decode("utf-8"))
-                        if isinstance(decoded_cached, dict):
-                            cached_obj = decoded_cached
-                    except Exception:
-                        cached_obj = None
-                    self._record_session(
-                        request_id=request_id,
-                        session_id=session_id,
-                        request_body=body,
-                        response_body=cached_obj,
-                        status_code=200,
-                        provider=parsed_req.provider,
-                        model=str(body.get("model", "")),
-                        latency_ms=(time.perf_counter() - request_started) * 1000.0,
-                        cost=0.0,
-                        error=None,
-                        metadata={
-                            "agent_id": behavior_agent_id,
-                            "behavioral_state": behavior_header,
-                            "cascade_level": pre_level_name,
-                            "loop_state": loop_warning_header,
-                        },
-                    )
-                    return
-
-                cascade_decision = self._cascade_router.route(parsed_req, context=cascade_context)
-                cascade_level_name = self._cascade_router.level_name(cascade_decision.cascade_level)
-                cascade_cache_state = "miss"
-                if cascade_decision.model:
-                    body["model"] = cascade_decision.model
-                if cascade_decision.max_tokens > 0:
-                    body["max_tokens"] = cascade_decision.max_tokens
-
-            if not self._circuit_breaker.should_allow():
-                self._inc("blocked")
-                fallback = {
-                    "error": {
-                        "type": "circuit_open",
-                        "message": self._circuit_breaker.fallback_message,
-                    }
-                }
-                payload_fb = json.dumps(fallback, ensure_ascii=False).encode("utf-8")
-                handler.send_response(self._circuit_breaker.fallback_status)
-                handler.send_header("Content-Type", "application/json")
-                handler.send_header("Content-Length", str(len(payload_fb)))
-                handler.send_header("X-Orchesis-Circuit", "open")
-                if self._config.cors:
-                    handler.send_header("Access-Control-Allow-Origin", "*")
-                handler.end_headers()
-                handler.wfile.write(payload_fb)
+            if not self._phase_circuit_breaker(ctx):
                 return
-            circuit_state_header = self._circuit_breaker.get_state().lower().replace("_", "-")
-
-            if self._loop_detector is not None:
-                loop_decision = self._loop_detector.check_request(
-                    {
-                        "model": body.get("model", parsed_req.model),
-                        "messages": parsed_req.messages,
-                        "tool_calls": parsed_req.tool_calls,
-                        "content_text": parsed_req.content_text,
-                    }
-                )
-                if loop_decision.action == "block":
-                    self._loop_trigger_hits += 1
-                    if self._kill_enabled and self._should_kill_for_loops():
-                        self._activate_kill_switch("auto-kill: loop threshold reached")
-                        self._inc("blocked")
-                        self._send_json(
-                            handler,
-                            503,
-                            {
-                                "error": {
-                                    "type": "kill_switch",
-                                    "message": self._kill_reason,
-                                    "killed_at": self._kill_time,
-                                }
-                            },
-                        )
-                        return
-                    self._inc("blocked")
-                    payload_lb = {
-                        "error": {
-                            "type": "loop_detected",
-                            "message": loop_decision.reason or "Fuzzy loop threshold exceeded",
-                        }
-                    }
-                    body_lb = json.dumps(payload_lb, ensure_ascii=False).encode("utf-8")
-                    handler.send_response(429)
-                    handler.send_header("Content-Type", "application/json")
-                    handler.send_header("Content-Length", str(len(body_lb)))
-                    handler.send_header("X-Orchesis-Loop-Blocked", loop_decision.reason or "Fuzzy loop threshold exceeded")
-                    handler.send_header("X-Orchesis-Loop-Saved", f"${loop_decision.estimated_cost_saved:.2f}")
-                    handler.send_header("X-Orchesis-Circuit", circuit_state_header)
-                    if self._config.cors:
-                        handler.send_header("Access-Control-Allow-Origin", "*")
-                    handler.end_headers()
-                    handler.wfile.write(body_lb)
-                    return
-                if loop_decision.action in {"warn", "downgrade_model"}:
-                    loop_warning_header = loop_decision.reason or "Loop warning"
-                    if loop_decision.action == "downgrade_model":
-                        body["model"] = self._downgrade_model
-
-            if self._behavioral_detector.enabled:
-                behavior_data = {
-                    "model": body.get("model", parsed_req.model),
-                    "messages": parsed_req.messages,
-                    "tools": parsed_req.tool_calls,
-                    "estimated_cost": float(proc_result.get("cost", 0.0)),
-                    "headers": {k: v for k, v in handler.headers.items()},
-                }
-                behavior_agent_id = extract_agent_id(behavior_data)
-                behavior_decision = self._behavioral_detector.check_request(behavior_agent_id, behavior_data)
-                if behavior_decision.action == "block":
-                    self._inc("blocked")
-                    self._send_json(
-                        handler,
-                        429,
-                        {
-                            "error": "behavioral_anomaly",
-                            "anomalies": [asdict(item) for item in behavior_decision.anomalies],
-                        },
-                        extra_headers=session_headers,
-                    )
-                    self._record_session(
-                        request_id=request_id,
-                        session_id=session_id,
-                        request_body=body,
-                        response_body=None,
-                        status_code=429,
-                        provider=parsed_req.provider,
-                        model=str(body.get("model", "")),
-                        latency_ms=(time.perf_counter() - request_started) * 1000.0,
-                        cost=float(proc_result.get("cost", 0.0)),
-                        error="behavioral_anomaly",
-                        metadata={
-                            "agent_id": behavior_agent_id,
-                            "behavioral_state": "anomaly",
-                            "cascade_level": cascade_level_name,
-                            "loop_state": loop_warning_header,
-                        },
-                    )
-                    return
-                if behavior_decision.action == "learning":
-                    behavior_header = "learning"
-                elif behavior_decision.anomalies:
-                    behavior_header = "anomaly"
-                    behavior_score_header = str(behavior_decision.anomaly_score)
-                    behavior_dims_header = ",".join(
-                        sorted({item.dimension for item in behavior_decision.anomalies})
-                    )
-
-            if self._budget_cfg:
-                budget_status = self._cost_tracker.check_budget(self._budget_cfg)
-                if self._kill_enabled and self._should_kill_for_cost(budget_status):
-                    self._activate_kill_switch("auto-kill: emergency budget multiplier exceeded")
-                    self._inc("blocked")
-                    self._send_json(
-                        handler,
-                        503,
-                        {
-                            "error": {
-                                "type": "kill_switch",
-                                "message": self._kill_reason,
-                                "killed_at": self._kill_time,
-                            }
-                        },
-                    )
-                    return
-                if bool(budget_status.get("over_budget", False)):
-                    self._inc("blocked")
-                    self._send_json(
-                        handler,
-                        429,
-                        {
-                            "error": {
-                                "type": "budget_exceeded",
-                                "message": (
-                                    f"Daily budget exceeded. Spent ${budget_status.get('daily_spent', 0):.4f}"
-                                ),
-                            }
-                        },
-                    )
-                    return
-
-            for call in parsed_req.tool_calls:
-                eval_request = {
-                    "tool": call.name,
-                    "params": call.params if isinstance(call.params, dict) else {},
-                    "context": {"path": handler.path, "provider": parsed_req.provider},
-                }
-                decision = evaluate(eval_request, self._policy, state=self._state_tracker)
-                if not decision.allowed:
-                    self._inc("blocked")
-                    reason = decision.reasons[0] if decision.reasons else "blocked_by_policy"
-                    self._send_json(
-                        handler,
-                        403,
-                        {"error": {"type": "policy_violation", "message": f"Tool '{call.name}' blocked: {reason}"}},
-                    )
-                    return
-
-
-            if self._router is not None and parsed_req.content_text:
-                route = self._router.route(
-                    parsed_req.content_text,
-                    tool_name=parsed_req.tool_calls[0].name if parsed_req.tool_calls else None,
-                )
-                routed_model = route.get("model")
-                if isinstance(routed_model, str) and routed_model and routed_model != parsed_req.model:
-                    body["model"] = routed_model
-
-            if self._scan_outbound and parsed_req.content_text:
-                for pattern, secret_type in SECRET_PATTERNS:
-                    if pattern.search(parsed_req.content_text):
-                        self._secret_trigger_hits += 1
-                        if self._kill_enabled and self._should_kill_for_secrets():
-                            self._activate_kill_switch("auto-kill: secrets detection threshold reached")
-                            self._inc("blocked")
-                            self._send_json(
-                                handler,
-                                503,
-                                {
-                                    "error": {
-                                        "type": "kill_switch",
-                                        "message": self._kill_reason,
-                                        "killed_at": self._kill_time,
-                                    }
-                                },
-                            )
-                            return
-                        self._inc("blocked")
-                        self._send_json(
-                            handler,
-                            403,
-                            {
-                                "error": {
-                                    "type": "secret_detected",
-                                    "message": f"Request contains potential {secret_type}",
-                                }
-                            },
-                        )
-                        return
-
-            provider = self._detect_provider(parsed_req.provider, handler.headers)
-            upstream_base = self._get_upstream(provider, handler.headers)
-            upstream_url = f"{upstream_base.rstrip('/')}{handler.path}"
-            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-            upstream_headers = self._build_forward_headers(handler.headers, payload)
-            req = UrlRequest(upstream_url, data=payload, headers=upstream_headers, method="POST")
-
-            resp_status = 200
-            resp_headers: dict[str, str] = {}
-            resp_body: bytes = b""
-            try:
-                with urlopen(req, timeout=self._config.timeout) as upstream_resp:
-                    resp_status = int(getattr(upstream_resp, "status", 200))
-                    resp_headers = dict(upstream_resp.headers.items())
-                    resp_body = upstream_resp.read()
-            except HTTPError as error:
-                resp_status = int(error.code)
-                resp_headers = dict(error.headers.items()) if error.headers is not None else {}
-                resp_body = error.read()
-            except URLError as error:
-                self._circuit_breaker.record_failure()
-                self._inc("errors")
-                self._send_json(
-                    handler,
-                    502,
-                    {"error": {"type": "upstream_error", "message": f"Failed to connect to upstream: {error}"}},
-                )
+            if not self._phase_loop_detection(ctx):
                 return
-
-            parsed_resp_obj: ParsedResponse | None = None
-
-            try:
-                decoded = json.loads(resp_body.decode("utf-8"))
-                if isinstance(decoded, dict):
-                    parsed_resp = parse_response(decoded, provider)
-                    parsed_resp_obj = parsed_resp
-                    proc_result = self._response_processor.process(parsed_resp)
-                    if not proc_result.get("allowed", True):
-                        self._inc("blocked")
-                        self._send_json(
-                            handler,
-                            403,
-                            {
-                                "error": {
-                                    "type": "secret_detected_in_response",
-                                    "message": proc_result.get("reason", "response contains secrets"),
-                                }
-                            },
-                        )
-                        return
-            except Exception:
-                proc_result = {"cost": 0.0}
-
-            if 200 <= resp_status < 300:
-                self._circuit_breaker.record_success()
-            elif resp_status >= 500:
-                self._circuit_breaker.record_failure()
-
-            if (
-                self._cascade_router is not None
-                and cascade_decision is not None
-                and self._cascade_router.should_escalate(resp_status, parsed_resp_obj)
-                and cascade_decision.cascade_level < CascadeLevel.COMPLEX
-            ):
-                escalated_decision = self._cascade_router.escalate(cascade_decision)
-                if escalated_decision.model:
-                    body["model"] = escalated_decision.model
-                if escalated_decision.max_tokens > 0:
-                    body["max_tokens"] = escalated_decision.max_tokens
-                payload_retry = json.dumps(body, ensure_ascii=False).encode("utf-8")
-                req_retry = UrlRequest(
-                    upstream_url,
-                    data=payload_retry,
-                    headers=self._build_forward_headers(handler.headers, payload_retry),
-                    method="POST",
-                )
-                try:
-                    with urlopen(req_retry, timeout=self._config.timeout) as upstream_retry:
-                        resp_status = int(getattr(upstream_retry, "status", 200))
-                        resp_headers = dict(upstream_retry.headers.items())
-                        resp_body = upstream_retry.read()
-                except HTTPError as error:
-                    resp_status = int(error.code)
-                    resp_headers = dict(error.headers.items()) if error.headers is not None else {}
-                    resp_body = error.read()
-                cascade_decision = escalated_decision
-                cascade_level_name = self._cascade_router.level_name(cascade_decision.cascade_level)
-                try:
-                    decoded_retry = json.loads(resp_body.decode("utf-8"))
-                    if isinstance(decoded_retry, dict):
-                        parsed_resp_retry = parse_response(decoded_retry, provider)
-                        parsed_resp_obj = parsed_resp_retry
-                        proc_result = self._response_processor.process(parsed_resp_retry)
-                except Exception:
-                    pass
-
-            if self._cascade_router is not None and cascade_decision is not None and parsed_resp_obj is not None:
-                token_sum = int(getattr(parsed_resp_obj, "input_tokens", 0)) + int(
-                    getattr(parsed_resp_obj, "output_tokens", 0)
-                )
-                self._cost_tracker.record_cascade_savings(
-                    original_model=original_model or cascade_decision.model,
-                    actual_model=cascade_decision.model,
-                    tokens=token_sum,
-                )
-                if 200 <= resp_status < 300:
-                    self._cascade_router.record_result(cascade_decision, parsed_resp_obj)
-                    self._cascade_router.cache_response(cascade_decision, resp_body)
-
-            if self._behavioral_detector.enabled:
-                completion_tokens = 0
-                if parsed_resp_obj is not None:
-                    completion_tokens = int(parsed_resp_obj.output_tokens)
-                self._behavioral_detector.record_response(
-                    behavior_agent_id,
-                    is_error=resp_status >= 400,
-                    completion_tokens=completion_tokens,
-                )
-
-            handler.send_response(resp_status)
-            self._copy_upstream_headers(handler, resp_headers, len(resp_body))
-            handler.send_header("X-Orchesis-Cost", str(round(float(proc_result.get("cost", 0.0)), 6)))
-            handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
-            handler.send_header("X-Orchesis-Cascade-Level", cascade_level_name)
-            handler.send_header("X-Orchesis-Cascade-Model", str(body.get("model", original_model)))
-            handler.send_header("X-Orchesis-Cache", cascade_cache_state)
-            handler.send_header("X-Orchesis-Circuit", self._circuit_breaker.get_state().lower().replace("_", "-"))
-            if self._recorder is not None:
-                handler.send_header("X-Orchesis-Session-Id", session_id)
-                handler.send_header("X-Orchesis-Request-Id", request_id)
-            if loop_warning_header:
-                handler.send_header("X-Orchesis-Loop-Warning", loop_warning_header)
-            if self._behavioral_detector.enabled:
-                handler.send_header("X-Orchesis-Behavior", behavior_header)
-                if behavior_score_header:
-                    handler.send_header("X-Orchesis-Anomaly-Score", behavior_score_header)
-                if behavior_dims_header:
-                    handler.send_header("X-Orchesis-Anomaly-Dimensions", behavior_dims_header)
-            if self._config.cors:
-                handler.send_header("Access-Control-Allow-Origin", "*")
-            handler.end_headers()
-            handler.wfile.write(resp_body)
-            self._inc("allowed")
-            response_obj: dict[str, Any] | None = None
-            try:
-                parsed_obj = json.loads(resp_body.decode("utf-8"))
-                if isinstance(parsed_obj, dict):
-                    response_obj = parsed_obj
-            except Exception:
-                response_obj = None
-            self._record_session(
-                request_id=request_id,
-                session_id=session_id,
-                request_body=body,
-                response_body=response_obj,
-                status_code=resp_status,
-                provider=provider,
-                model=str(body.get("model", original_model)),
-                latency_ms=(time.perf_counter() - request_started) * 1000.0,
-                cost=float(proc_result.get("cost", 0.0)),
-                error=None if resp_status < 400 else f"http_{resp_status}",
-                metadata={
-                    "agent_id": behavior_agent_id,
-                    "behavioral_state": behavior_header,
-                    "cascade_level": cascade_level_name,
-                    "loop_state": loop_warning_header,
-                },
-            )
+            if not self._phase_behavioral(ctx):
+                return
+            if not self._phase_budget(ctx):
+                return
+            if not self._phase_policy(ctx):
+                return
+            if not self._phase_model_router(ctx):
+                return
+            if not self._phase_secrets(ctx):
+                return
+            if not self._phase_upstream(ctx):
+                return
+            if not self._phase_post_upstream(ctx):
+                return
+            self._phase_send_response(ctx)
         except Exception as error:  # noqa: BLE001
             _HTTP_PROXY_LOGGER.exception("proxy runtime error")
             self._inc("errors")
@@ -2271,7 +2331,7 @@ class LLMHTTPProxy:
                 handler,
                 500,
                 {"error": {"type": "proxy_error", "message": str(error)}},
-                extra_headers=session_headers,
+                extra_headers=ctx.session_headers,
             )
 
     def _handle_kill(self, handler: BaseHTTPRequestHandler) -> None:
