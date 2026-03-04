@@ -282,7 +282,7 @@ def get_dashboard_html() -> str:
         <div><strong>Time Machine Sessions</strong></div>
         <div id="sessions-empty" class="empty" style="display:none;">No sessions recorded yet.</div>
         <table id="sessions-table" class="table">
-          <thead><tr><th>Session</th><th>Start</th><th>Duration</th><th>Requests</th><th>Cost</th><th>Errors</th><th>Status</th></tr></thead>
+          <thead><tr><th>Session</th><th>Start</th><th>Duration</th><th>Requests</th><th>Cost</th><th>Errors</th><th>Status</th><th>Export</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -540,17 +540,26 @@ def get_dashboard_html() -> str:
       document.getElementById("sessions-table").style.display = "table";
       sessions.forEach((s)=>{
         const status = Number(s.error_count || 0) > 0 ? "issues" : "ok";
+        const sid = String(s.session_id || "");
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td><strong>${String(s.session_id||"").slice(0,12)}</strong></td>
+          <td><strong>${sid.slice(0,12)}</strong></td>
           <td>${fmtTs(s.start_time)}</td>
           <td>${fmtDuration((Number(s.end_time||0)-Number(s.start_time||0)))}</td>
           <td>${fmtNum(s.request_count)}</td>
           <td>${fmtMoney(s.total_cost || 0)}</td>
           <td>${fmtNum(s.error_count)}</td>
           <td><span class="cb-pill ${status==='ok'?'closed':'open'}">${status}</span></td>
+          <td><button class="tab-btn export-air-btn" data-session-id="${sid}" style="padding:5px 9px;">Export .air</button></td>
         `;
         table.appendChild(tr);
+      });
+      document.querySelectorAll(".export-air-btn").forEach((btn)=>{
+        btn.addEventListener("click", ()=>{
+          const sid = String(btn.getAttribute("data-session-id") || "");
+          if(!sid){ return; }
+          window.open(`/api/sessions/${encodeURIComponent(sid)}/export?download=true&content_level=full`, "_blank");
+        });
       });
     }
 

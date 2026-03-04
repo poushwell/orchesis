@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request as UrlRequest, urlopen
 from urllib.error import HTTPError, URLError
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -60,6 +60,8 @@ from orchesis.recorder import SessionRecord, SessionRecorder
 from orchesis.response_handler import ResponseProcessor, SECRET_PATTERNS
 from orchesis.flow_xray import FlowAnalyzer, FlowXRayConfig
 from orchesis.dashboard import get_dashboard_html
+from orchesis.air_export import export_session_to_air
+from orchesis import __version__ as ORCHESIS_VERSION
 
 _HTTP_PROXY_LOGGER = logging.getLogger("orchesis.http_proxy")
 
@@ -1906,8 +1908,56 @@ class LLMHTTPProxy:
         agents_payload.sort(key=lambda item: float(item.get("total_requests", 0)), reverse=True)
         return {"agents": agents_payload}
 
+    def _handle_session_export(
+        self,
+        handler: BaseHTTPRequestHandler,
+        session_id: str,
+        query_params: dict[str, list[str]],
+    ) -> None:
+        if self._recorder is None:
+            self._send_json(handler, 404, {"error": "recording_not_enabled"})
+            return
+        if not session_id:
+            self._send_json(handler, 400, {"error": "session_id_required"})
+            return
+        content_level = str((query_params.get("content_level") or ["structure"])[0]).strip().lower() or "structure"
+        format_name = str((query_params.get("format") or ["air"])[0]).strip().lower() or "air"
+        download = str((query_params.get("download") or ["false"])[0]).strip().lower() == "true"
+        if format_name != "air":
+            self._send_json(handler, 400, {"error": "unsupported_format", "format": format_name})
+            return
+        try:
+            doc = export_session_to_air(
+                session_id=session_id,
+                recorder=self._recorder,
+                flow_analyzer=self._flow_analyzer,
+                behavioral_detector=self._behavioral_detector if self._behavioral_detector.enabled else None,
+                content_level=content_level,
+                version=ORCHESIS_VERSION,
+            )
+        except ValueError as exc:
+            self._send_json(handler, 400, {"error": "invalid_content_level", "message": str(exc)})
+            return
+        if "error" in doc:
+            self._send_json(handler, 404, doc)
+            return
+        if download:
+            self._send_json(
+                handler,
+                200,
+                doc,
+                extra_headers={
+                    "Content-Disposition": f'attachment; filename="session_{session_id}.air"'
+                },
+            )
+            return
+        self._send_json(handler, 200, doc)
+
     def _handle_get(self, handler: BaseHTTPRequestHandler) -> None:
-        if handler.path in {"/dashboard", "/dashboard/"}:
+        parsed = urlsplit(handler.path)
+        path = parsed.path
+        query_params = parse_qs(parsed.query, keep_blank_values=True)
+        if path in {"/dashboard", "/dashboard/"}:
             payload = get_dashboard_html().encode("utf-8")
             handler.send_response(200)
             handler.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1917,7 +1967,7 @@ class LLMHTTPProxy:
             handler.end_headers()
             handler.wfile.write(payload)
             return
-        if handler.path in {"/", "/health"}:
+        if path in {"/", "/health"}:
             self._send_json(
                 handler,
                 200,
@@ -1934,24 +1984,28 @@ class LLMHTTPProxy:
                 },
             )
             return
-        if handler.path == "/stats":
+        if path == "/stats":
             self._send_json(handler, 200, self.stats)
             return
-        if handler.path == "/api/dashboard/overview":
+        if path == "/api/dashboard/overview":
             self._send_json(handler, 200, self._build_dashboard_overview())
             return
-        if handler.path == "/api/dashboard/agents":
+        if path == "/api/dashboard/agents":
             self._send_json(handler, 200, self._build_dashboard_agents())
             return
-        if handler.path in {"/api/sessions", "/sessions"} and self._recorder is not None:
+        if path in {"/api/sessions", "/sessions"} and self._recorder is not None:
             sessions = [asdict(item) for item in self._recorder.list_sessions()]
             self._send_json(handler, 200, {"sessions": sessions})
             return
-        if (handler.path.startswith("/sessions/") or handler.path.startswith("/api/sessions/")) and self._recorder is not None:
+        if path.startswith("/api/sessions/") and path.endswith("/export"):
+            session_id = path[len("/api/sessions/") : -len("/export")].strip("/")
+            self._handle_session_export(handler, session_id, query_params)
+            return
+        if (path.startswith("/sessions/") or path.startswith("/api/sessions/")) and self._recorder is not None:
             session_id = (
-                handler.path.split("/api/sessions/", 1)[1].strip()
-                if handler.path.startswith("/api/sessions/")
-                else handler.path.split("/sessions/", 1)[1].strip()
+                path.split("/api/sessions/", 1)[1].strip()
+                if path.startswith("/api/sessions/")
+                else path.split("/sessions/", 1)[1].strip()
             )
             if not session_id:
                 self._send_json(handler, 400, {"error": "session_id_required"})
@@ -1963,35 +2017,35 @@ class LLMHTTPProxy:
                 return
             self._send_json(handler, 200, {"session": asdict(summary)})
             return
-        if handler.path == "/api/flow/sessions":
+        if path == "/api/flow/sessions":
             if self._flow_analyzer is None:
                 self._send_json(handler, 200, {"sessions": []})
                 return
             self._send_json(handler, 200, {"sessions": self._flow_analyzer.list_sessions()})
             return
-        if handler.path.startswith("/api/flow/analyze/"):
+        if path.startswith("/api/flow/analyze/"):
             if self._flow_analyzer is None:
                 self._send_json(handler, 404, {"error": "Session not found"})
                 return
-            session_id = handler.path.split("/api/flow/analyze/", 1)[1].strip()
+            session_id = path.split("/api/flow/analyze/", 1)[1].strip()
             analysis = self._flow_analyzer.analyze_session(session_id)
             if analysis is None:
                 self._send_json(handler, 404, {"error": "Session not found"})
                 return
             self._send_json(handler, 200, analysis.to_dict())
             return
-        if handler.path.startswith("/api/flow/graph/"):
+        if path.startswith("/api/flow/graph/"):
             if self._flow_analyzer is None:
                 self._send_json(handler, 404, {"error": "Session not found"})
                 return
-            session_id = handler.path.split("/api/flow/graph/", 1)[1].strip()
+            session_id = path.split("/api/flow/graph/", 1)[1].strip()
             graph_json = self._flow_analyzer.export_graph_json(session_id)
             if not graph_json:
                 self._send_json(handler, 404, {"error": "Session not found"})
                 return
             self._send_json(handler, 200, json.loads(graph_json))
             return
-        if handler.path == "/api/flow/patterns":
+        if path == "/api/flow/patterns":
             if self._flow_analyzer is None:
                 self._send_json(handler, 200, {"sessions_tracked": 0, "pattern_counts": {}})
                 return
