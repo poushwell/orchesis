@@ -65,8 +65,9 @@ class ReplayReport:
 
 
 class SessionReplayer:
-    def __init__(self, upstream_base: str = "http://127.0.0.1:8100") -> None:
+    def __init__(self, upstream_base: str = "http://127.0.0.1:8100", evaluator=None) -> None:
         self._upstream_base = upstream_base.rstrip("/")
+        self._evaluator = evaluator or evaluate
 
     @staticmethod
     def _estimate_model_cost(model: str, prompt_tokens: int, completion_tokens: int = 0) -> float:
@@ -147,7 +148,7 @@ class SessionReplayer:
                     "context": {"path": "/replay"},
                     "cost": replay_cost,
                 }
-                decision = evaluate(eval_req, policy, state=state)
+                decision = self._evaluator(eval_req, policy, state=state)
                 if not decision.allowed:
                     policy_blocked = True
                     policy_block_reason = decision.reasons[0] if decision.reasons else "blocked_by_policy"

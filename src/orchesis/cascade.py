@@ -73,6 +73,14 @@ class ResponseCache:
         with self._lock:
             return len(self._items)
 
+    def evict_expired(self) -> int:
+        now = time.time()
+        with self._lock:
+            expired = [k for k, (ts, _) in self._items.items() if (now - ts) > self._ttl_seconds]
+            for key in expired:
+                self._items.pop(key, None)
+            return len(expired)
+
 
 class CascadeClassifier:
     """Classify request complexity using stdlib heuristics."""
@@ -276,6 +284,8 @@ class CascadeRouter:
         # Reserved for future adaptive tuning hooks.
 
     def get_stats(self) -> dict[str, Any]:
+        if self._cache_enabled:
+            self._cache.evict_expired()
         with self._lock:
             lookups = self._cache_lookups
             hits = self._cache_hits

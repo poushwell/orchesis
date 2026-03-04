@@ -72,9 +72,25 @@ class SessionDiffer:
             if original_had_error and not replay_has_error:
                 fixed_errors.append(item.request_id)
             if item.policy_blocked:
-                blocked_requests.append({"request_id": item.request_id, "reason": item.policy_block_reason})
+                reason = item.policy_block_reason or ""
+                reason_lower = reason.lower()
+                if any(kw in reason_lower for kw in ("critical", "rce", "injection", "execute")):
+                    sev = "critical"
+                elif any(kw in reason_lower for kw in ("secret", "credential", "key", "token", "password")):
+                    sev = "high"
+                elif any(kw in reason_lower for kw in ("budget", "limit", "cost", "rate")):
+                    sev = "medium"
+                else:
+                    sev = "low"
+                severity_breakdown[sev] = severity_breakdown.get(sev, 0) + 1
+                blocked_requests.append(
+                    {
+                        "request_id": item.request_id,
+                        "reason": item.policy_block_reason,
+                        "severity": sev,
+                    }
+                )
                 estimated_cost_prevented += max(0.0, float(item.replay_cost))
-                severity_breakdown["high"] += 1
             per_request.append(
                 RequestDiff(
                     request_id=item.request_id,

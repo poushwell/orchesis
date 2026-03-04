@@ -21,6 +21,7 @@ class DimensionConfig:
 class BehavioralConfig:
     enabled: bool = False
     learning_window: int = 20
+    error_window_size: int = 50
     dimensions: dict[str, DimensionConfig] = field(default_factory=dict)
     persist_baselines: bool = False
     persist_path: str = ".orchesis/baselines.json"
@@ -111,7 +112,7 @@ class RunningStats:
 class BehavioralFingerprint:
     """Per-agent behavioral baseline profile."""
 
-    def __init__(self, learning_window: int = 20) -> None:
+    def __init__(self, learning_window: int = 20, error_window_size: int = 50) -> None:
         self._lock = threading.Lock()
         self._learning_window = max(1, int(learning_window))
         self.request_frequency = RunningStats()
@@ -128,7 +129,7 @@ class BehavioralFingerprint:
         now = time.monotonic()
         self.first_seen = now
         self.last_seen = now
-        self._error_window: deque[int] = deque(maxlen=50)
+        self._error_window: deque[int] = deque(maxlen=max(1, int(error_window_size)))
 
     def is_learning(self) -> bool:
         with self._lock:
@@ -273,6 +274,7 @@ class BehavioralDetector:
             cfg = BehavioralConfig(
                 enabled=bool(cfg_map.get("enabled", False)),
                 learning_window=int(cfg_map.get("learning_window", 20)),
+                error_window_size=int(cfg_map.get("error_window_size", 50)),
                 dimensions=dims,
                 persist_baselines=bool(cfg_map.get("persist_baselines", False)),
                 persist_path=str(cfg_map.get("persist_path", ".orchesis/baselines.json")),
@@ -291,7 +293,10 @@ class BehavioralDetector:
         with self._lock:
             profile = self._agents.get(agent_id)
             if profile is None:
-                profile = BehavioralFingerprint(learning_window=self._config.learning_window)
+                profile = BehavioralFingerprint(
+                    learning_window=self._config.learning_window,
+                    error_window_size=self._config.error_window_size,
+                )
                 self._agents[agent_id] = profile
             return profile
 
