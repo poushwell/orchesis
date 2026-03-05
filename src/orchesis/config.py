@@ -705,6 +705,54 @@ def _normalize_flow_xray(policy: dict[str, Any]) -> None:
     policy["flow_xray"] = raw
 
 
+def _normalize_experiments(policy: dict[str, Any]) -> None:
+    raw = policy.get("experiments")
+    if raw is None:
+        policy["experiments"] = {
+            "enabled": False,
+            "max_experiments": 10,
+            "default_min_sample_size": 30,
+            "auto_stop_on_significance": True,
+            "significance_threshold": 0.95,
+        }
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("experiments must be a mapping")
+    raw["enabled"] = bool(raw.get("enabled", False))
+    max_exp = raw.get("max_experiments", 10)
+    if not _is_number(max_exp) or int(max_exp) <= 0:
+        raise PolicyError("experiments.max_experiments must be > 0")
+    raw["max_experiments"] = int(max_exp)
+    raw["default_min_sample_size"] = int(raw.get("default_min_sample_size", 30)) if _is_number(raw.get("default_min_sample_size", 30)) else 30
+    raw["auto_stop_on_significance"] = bool(raw.get("auto_stop_on_significance", True))
+    raw["significance_threshold"] = float(raw.get("significance_threshold", 0.95)) if _is_number(raw.get("significance_threshold", 0.95)) else 0.95
+    policy["experiments"] = raw
+
+
+def _normalize_task_tracking(policy: dict[str, Any]) -> None:
+    raw = policy.get("task_tracking")
+    if raw is None:
+        policy["task_tracking"] = {
+            "enabled": False,
+            "max_tracked_sessions": 5000,
+            "idle_timeout_seconds": 300.0,
+            "min_turns_for_success": 1,
+            "consecutive_errors_threshold": 3,
+        }
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("task_tracking must be a mapping")
+    raw["enabled"] = bool(raw.get("enabled", False))
+    max_sess = raw.get("max_tracked_sessions", 5000)
+    if not _is_number(max_sess) or int(max_sess) <= 0:
+        raise PolicyError("task_tracking.max_tracked_sessions must be > 0")
+    raw["max_tracked_sessions"] = int(max_sess)
+    raw["idle_timeout_seconds"] = float(raw.get("idle_timeout_seconds", 300)) if _is_number(raw.get("idle_timeout_seconds", 300)) else 300.0
+    raw["min_turns_for_success"] = int(raw.get("min_turns_for_success", 1)) if _is_number(raw.get("min_turns_for_success", 1)) else 1
+    raw["consecutive_errors_threshold"] = int(raw.get("consecutive_errors_threshold", 3)) if _is_number(raw.get("consecutive_errors_threshold", 3)) else 3
+    policy["task_tracking"] = raw
+
+
 def _normalize_compliance(policy: dict[str, Any]) -> None:
     raw = policy.get("compliance")
     if raw is None:
@@ -838,6 +886,8 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     _normalize_behavioral_fingerprint(loaded)
     _normalize_recording(loaded)
     _normalize_flow_xray(loaded)
+    _normalize_experiments(loaded)
+    _normalize_task_tracking(loaded)
     _normalize_compliance(loaded)
     _normalize_capabilities(loaded)
     return loaded

@@ -66,6 +66,7 @@ from orchesis.air_export import export_session_to_air
 from orchesis import __version__ as ORCHESIS_VERSION
 from orchesis.compliance import ComplianceEngine, Framework, Severity
 from orchesis.connection_pool import ConnectionPool, PoolConfig, PooledConnection
+from orchesis.experiment import ExperimentConfig, ExperimentManager
 
 _HTTP_PROXY_LOGGER = logging.getLogger("orchesis.http_proxy")
 
@@ -1621,6 +1622,10 @@ class _RequestContext:
     streaming_events: list[str] = field(default_factory=list)
     streaming_text: str = ""
     streaming_chunks: int = 0
+    experiment_id: str = ""
+    variant_name: str = ""
+    was_escalated: bool = False
+    was_loop_detected: bool = False
 
 
 class LLMHTTPProxy:
@@ -1734,6 +1739,23 @@ class LLMHTTPProxy:
             if bool(self._flow_cfg.get("enabled", False))
             else None
         )
+        exp_cfg_raw = self._policy.get("experiments")
+        task_cfg_raw = self._policy.get("task_tracking")
+        exp_cfg = exp_cfg_raw if isinstance(exp_cfg_raw, dict) else {}
+        task_cfg = task_cfg_raw if isinstance(task_cfg_raw, dict) else {}
+        self._experiment_manager: ExperimentManager | None = None
+        if bool(exp_cfg.get("enabled", False)) or bool(task_cfg.get("enabled", False)):
+            cfg = ExperimentConfig(
+                max_experiments=int(exp_cfg.get("max_experiments", 10)),
+                default_min_sample_size=int(exp_cfg.get("default_min_sample_size", 30)),
+                auto_stop_on_significance=bool(exp_cfg.get("auto_stop_on_significance", True)),
+                significance_threshold=float(exp_cfg.get("significance_threshold", 0.95)),
+                max_tracked_sessions=int(task_cfg.get("max_tracked_sessions", 5000)),
+                idle_timeout_seconds=float(task_cfg.get("idle_timeout_seconds", 300)),
+                min_turns_for_success=int(task_cfg.get("min_turns_for_success", 1)),
+                consecutive_errors_threshold=int(task_cfg.get("consecutive_errors_threshold", 3)),
+            )
+            self._experiment_manager = ExperimentManager(cfg)
         behavioral_cfg = self._policy.get("behavioral_fingerprint")
         self._behavioral_cfg = behavioral_cfg if isinstance(behavioral_cfg, dict) else {}
         self._behavioral_detector = BehavioralDetector(self._behavioral_cfg)
@@ -1833,6 +1855,20 @@ class LLMHTTPProxy:
             payload["recorder"] = self._recorder.get_stats()
         if self._flow_analyzer is not None:
             payload["flow_xray"] = self._flow_analyzer.get_stats()
+        if self._experiment_manager is not None:
+            exps = self._experiment_manager.list_experiments()
+            running = sum(1 for e in exps if e.get("status") == "running")
+            total_assignments = sum(
+                sum(v.get("requests", 0) for v in e.get("variants", []))
+                for e in exps
+            )
+            task_stats = self._experiment_manager._task_tracker.get_stats()
+            payload["experiments"] = {
+                "active": running,
+                "total": len(exps),
+                "total_assignments": total_assignments,
+            }
+            payload["task_tracking"] = task_stats
         if self._compliance_engine is not None:
             payload["compliance"] = self._compliance_engine.get_stats()
         thread_queue = 0
@@ -2238,6 +2274,52 @@ class LLMHTTPProxy:
                 },
             )
             return
+        if path == "/api/experiments" and self._experiment_manager is not None:
+            self._send_json(handler, 200, {"experiments": self._experiment_manager.list_experiments()})
+            return
+        if path.startswith("/api/experiments/") and path.endswith("/results") and self._experiment_manager is not None:
+            parts = path.split("/")
+            exp_id = parts[3] if len(parts) > 3 else ""
+            if exp_id:
+                try:
+                    result = self._experiment_manager.get_results(exp_id)
+                    self._send_json(handler, 200, result.to_dict())
+                except ValueError:
+                    self._send_json(handler, 404, {"error": "experiment_not_found"})
+            else:
+                self._send_json(handler, 404, {"error": "experiment_id_required"})
+            return
+        if path.startswith("/api/experiments/") and path.endswith("/live") and self._experiment_manager is not None:
+            parts = path.split("/")
+            exp_id = parts[3] if len(parts) > 3 else ""
+            if exp_id:
+                stats = self._experiment_manager.get_live_stats(exp_id)
+                self._send_json(handler, 200, stats)
+            else:
+                self._send_json(handler, 404, {"error": "experiment_id_required"})
+            return
+        if path == "/api/tasks/outcomes" and self._experiment_manager is not None:
+            outcomes = self._experiment_manager._task_tracker.get_outcome_distribution()
+            self._send_json(handler, 200, outcomes)
+            return
+        if path == "/api/tasks/correlations" and self._experiment_manager is not None:
+            correlations = self._experiment_manager._task_tracker.get_correlations()
+            self._send_json(handler, 200, correlations)
+            return
+        if path.startswith("/api/tasks/sessions/") and self._experiment_manager is not None:
+            session_id = path.split("/api/tasks/sessions/", 1)[1].strip()
+            if session_id:
+                state = self._experiment_manager._task_tracker.get_session_state(session_id)
+                if state:
+                    sess_dict = asdict(state)
+                    if hasattr(state.outcome, "value"):
+                        sess_dict["outcome"] = state.outcome.value
+                    self._send_json(handler, 200, {"session": sess_dict})
+                else:
+                    self._send_json(handler, 404, {"error": "session_not_found"})
+            else:
+                self._send_json(handler, 400, {"error": "session_id_required"})
+            return
         if path == "/api/compliance/report":
             fmt = str((query_params.get("format") or ["json"])[0]).strip().lower()
             report = self._compliance_engine.export_report(format=fmt)
@@ -2269,6 +2351,45 @@ class LLMHTTPProxy:
         ctx.body = body
         ctx.parsed_req = parse_request(body, ctx.handler.path)
         ctx.original_model = ctx.parsed_req.model or str(body.get("model", ""))
+        return True
+
+    def _phase_experiment(self, ctx: _RequestContext) -> bool:
+        """Assign A/B variant and override model if needed."""
+        if not self._experiment_manager:
+            return True
+        session_id = ctx.session_id or "default"
+        agent_id = (
+            ctx.handler.headers.get("X-Orchesis-Agent")
+            or ctx.handler.headers.get("x-orchesis-agent")
+            or ctx.behavior_agent_id
+            or "default"
+        )
+        model = str(ctx.body.get("model", ""))
+        tools_raw = ctx.body.get("tools", [])
+        tools = []
+        if isinstance(tools_raw, list):
+            for t in tools_raw:
+                if isinstance(t, dict):
+                    name = t.get("name", "")
+                    if isinstance(name, str) and name:
+                        tools.append(name)
+                elif isinstance(t, str) and t:
+                    tools.append(t)
+        assignment = self._experiment_manager.assign_variant(
+            session_id=session_id,
+            agent_id=agent_id,
+            model=model,
+            tools=tools,
+        )
+        if assignment:
+            ctx.experiment_id = assignment.experiment_id
+            ctx.variant_name = assignment.variant_name
+            if assignment.model_override:
+                ctx.body["model"] = assignment.model_override
+                if not ctx.original_model:
+                    ctx.original_model = model
+            ctx.session_headers["X-Orchesis-Experiment"] = assignment.experiment_id
+            ctx.session_headers["X-Orchesis-Variant"] = assignment.variant_name
         return True
 
     def _phase_cascade(self, ctx: _RequestContext) -> bool:
@@ -2428,6 +2549,7 @@ class LLMHTTPProxy:
             return False
         if loop_decision.action in {"warn", "downgrade_model"}:
             ctx.loop_warning_header = loop_decision.reason or "Loop warning"
+            ctx.was_loop_detected = True
             if loop_decision.action == "downgrade_model":
                 ctx.body["model"] = self._downgrade_model
         return True
@@ -2817,6 +2939,7 @@ class LLMHTTPProxy:
             and self._cascade_router.should_escalate(ctx.resp_status, ctx.parsed_resp_obj)
             and ctx.cascade_decision.cascade_level < CascadeLevel.COMPLEX
         ):
+            ctx.was_escalated = True
             escalated_decision = self._cascade_router.escalate(ctx.cascade_decision)
             if escalated_decision.model:
                 ctx.body["model"] = escalated_decision.model
@@ -2898,6 +3021,44 @@ class LLMHTTPProxy:
                 status="ok" if ctx.resp_status < 400 else "error",
                 tool_calls=tool_calls_for_flow,
             )
+        if self._experiment_manager:
+            if ctx.experiment_id and ctx.variant_name:
+                tokens_in = int(getattr(ctx.parsed_resp_obj, "input_tokens", 0)) if ctx.parsed_resp_obj else 0
+                tokens_out = int(getattr(ctx.parsed_resp_obj, "output_tokens", 0)) if ctx.parsed_resp_obj else 0
+                tool_count = len(getattr(ctx.parsed_resp_obj, "tool_calls", [])) if ctx.parsed_resp_obj else 0
+                self._experiment_manager.record_request(
+                    experiment_id=ctx.experiment_id,
+                    variant_name=ctx.variant_name,
+                    cost_usd=float(ctx.proc_result.get("cost", 0.0)),
+                    latency_ms=(time.perf_counter() - ctx.request_started) * 1000.0,
+                    tokens=tokens_in + tokens_out,
+                    tool_calls=tool_count,
+                    is_error=ctx.resp_status >= 400,
+                    turns=1,
+                )
+            session_id = ctx.session_id or "default"
+            stop_reason = ""
+            if ctx.parsed_resp_obj is not None:
+                stop_reason = str(getattr(ctx.parsed_resp_obj, "stop_reason", "") or "")
+            self._experiment_manager._task_tracker.record_turn(
+                session_id=session_id,
+                model=str(ctx.body.get("model", ctx.original_model)),
+                tokens_in=int(getattr(ctx.parsed_resp_obj, "input_tokens", 0)) if ctx.parsed_resp_obj else 0,
+                tokens_out=int(getattr(ctx.parsed_resp_obj, "output_tokens", 0)) if ctx.parsed_resp_obj else 0,
+                cost_usd=float(ctx.proc_result.get("cost", 0.0)),
+                latency_ms=(time.perf_counter() - ctx.request_started) * 1000.0,
+                tool_calls=len(getattr(ctx.parsed_resp_obj, "tool_calls", [])) if ctx.parsed_resp_obj else 0,
+                stop_reason=stop_reason,
+                is_error=ctx.resp_status >= 400,
+                was_escalated=ctx.was_escalated,
+                was_loop_detected=ctx.was_loop_detected,
+                experiment_id=ctx.experiment_id,
+                variant_name=ctx.variant_name,
+            )
+            if stop_reason == "end_turn":
+                outcome = self._experiment_manager._task_tracker.finalize_session(session_id)
+                if ctx.experiment_id and ctx.variant_name:
+                    self._experiment_manager.record_task_outcome(ctx.experiment_id, ctx.variant_name, outcome)
         return True
 
     def _finalize_response_recording(self, ctx: _RequestContext) -> None:
@@ -2954,6 +3115,10 @@ class LLMHTTPProxy:
             if self._recorder is not None:
                 ctx.handler.send_header("X-Orchesis-Session-Id", ctx.session_id)
                 ctx.handler.send_header("X-Orchesis-Request-Id", ctx.request_id)
+            if ctx.experiment_id:
+                ctx.handler.send_header("X-Orchesis-Experiment", ctx.experiment_id)
+            if ctx.variant_name:
+                ctx.handler.send_header("X-Orchesis-Variant", ctx.variant_name)
             if ctx.loop_warning_header:
                 ctx.handler.send_header("X-Orchesis-Loop-Warning", ctx.loop_warning_header)
             if self._behavioral_detector.enabled:
@@ -2991,6 +3156,40 @@ class LLMHTTPProxy:
             if handler.path == "/resume":
                 self._handle_resume(handler)
                 return
+            if self._experiment_manager is not None and handler.path == "/api/experiments":
+                body = self._read_json_body(handler)
+                if isinstance(body, dict) and body.get("name") and body.get("variants"):
+                    try:
+                        exp = self._experiment_manager.create_experiment(**body)
+                        self._send_json(handler, 201, exp.to_dict())
+                    except ValueError as e:
+                        self._send_json(handler, 400, {"error": str(e)})
+                else:
+                    self._send_json(handler, 400, {"error": "name and variants required"})
+                return
+            if self._experiment_manager is not None and "/api/experiments/" in handler.path:
+                parts = handler.path.split("/")
+                if len(parts) >= 4:
+                    exp_id = parts[3]
+                    if handler.path.endswith("/start"):
+                        ok = self._experiment_manager.start_experiment(exp_id)
+                        self._send_json(handler, 200 if ok else 409, {"started": ok})
+                        return
+                    if handler.path.endswith("/stop"):
+                        try:
+                            result = self._experiment_manager.stop_experiment(exp_id)
+                            self._send_json(handler, 200, result.to_dict())
+                        except ValueError:
+                            self._send_json(handler, 404, {"error": "experiment_not_found"})
+                        return
+                    if handler.path.endswith("/pause"):
+                        ok = self._experiment_manager.pause_experiment(exp_id)
+                        self._send_json(handler, 200 if ok else 409, {"paused": ok})
+                        return
+                    if handler.path.endswith("/resume"):
+                        ok = self._experiment_manager.resume_experiment(exp_id)
+                        self._send_json(handler, 200 if ok else 409, {"resumed": ok})
+                        return
             if self._killed:
                 self._inc("blocked")
                 self._send_json(
@@ -3006,6 +3205,8 @@ class LLMHTTPProxy:
                 )
                 return
             if not self._phase_parse(ctx):
+                return
+            if not self._phase_experiment(ctx):
                 return
             if not self._phase_flow_xray_record(ctx):
                 return
@@ -3055,6 +3256,13 @@ class LLMHTTPProxy:
         )
 
     def _handle_delete(self, handler: BaseHTTPRequestHandler) -> None:
+        if self._experiment_manager is not None and handler.path.startswith("/api/experiments/"):
+            parts = handler.path.split("/")
+            if len(parts) >= 4 and parts[3]:
+                exp_id = parts[3]
+                ok = self._experiment_manager.delete_experiment(exp_id)
+                self._send_json(handler, 200 if ok else 404, {"deleted": ok})
+                return
         if handler.path.startswith("/sessions/") and self._recorder is not None:
             session_id = handler.path.split("/sessions/", 1)[1].strip()
             if not session_id:
