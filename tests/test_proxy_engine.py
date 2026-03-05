@@ -69,6 +69,26 @@ def _start_server(handler_cls: type[BaseHTTPRequestHandler]) -> tuple[PooledThre
     return server, thread
 
 
+def _wait_for_server_ready(host: str, port: int, timeout: float = 2.0) -> None:
+    """Poll until server accepts connections. Reduces flakiness from socket bind race."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.5)
+            sock.connect((host, port))
+            return
+        except (ConnectionRefusedError, OSError):
+            time.sleep(0.02)
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+
 def _make_proxy(tmp_path: Path, policy_text: str) -> tuple[LLMHTTPProxy, PooledThreadHTTPServer]:
     upstream, _ = _start_server(_JsonUpstreamHandler)
     policy = tmp_path / "policy.yaml"
@@ -85,6 +105,7 @@ def _make_proxy(tmp_path: Path, policy_text: str) -> tuple[LLMHTTPProxy, PooledT
         ),
     )
     proxy.start(blocking=False)
+    _wait_for_server_ready("127.0.0.1", proxy._config.port)
     return proxy, upstream
 
 
@@ -485,6 +506,7 @@ def test_streaming_empty_response(tmp_path: Path) -> None:
         ),
     )
     proxy.start(blocking=False)
+    _wait_for_server_ready("127.0.0.1", proxy._config.port)
     try:
         req = UrlRequest(
             f"http://127.0.0.1:{proxy._config.port}/v1/chat/completions",
