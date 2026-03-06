@@ -29,7 +29,7 @@ def test_all_doc_files_exist() -> None:
 def test_readme_has_required_sections() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
     for section in (
-        "## Quickstart",
+        "## Quick Start",
         "## Architecture",
         "## Features",
         "## Documentation",
@@ -55,23 +55,19 @@ def test_policy_reference_covers_all_rules() -> None:
 def test_api_reference_covers_all_endpoints() -> None:
     text = Path("docs/API_REFERENCE.md").read_text(encoding="utf-8")
     endpoints = (
-        "/api/v1/policy",
-        "/api/v1/policy/history",
-        "/api/v1/policy/rollback",
-        "/api/v1/policy/validate",
-        "/api/v1/agents",
-        "/api/v1/agents/{agent_id}",
-        "/api/v1/agents/{agent_id}/tier",
-        "/api/v1/status",
-        "/api/v1/audit/stats",
-        "/api/v1/audit/anomalies",
-        "/api/v1/audit/timeline/{agent_id}",
-        "/api/v1/reliability",
-        "/api/v1/evaluate",
+        "/api/dashboard/overview",
+        "/api/dashboard/agents",
+        "/api/flow/sessions",
+        "/api/flow/analyze",
+        "/api/experiments",
+        "/api/tasks/outcomes",
+        "/api/threats",
+        "/api/threats/stats",
+        "/stats",
+        "/v1/chat/completions",
     )
     for endpoint in endpoints:
         assert endpoint in text
-    assert "## Endpoints (14)" in text
 
 
 def test_package_builds_cleanly(tmp_path: Path) -> None:

@@ -1,49 +1,63 @@
 # Architecture
 
-## System components
+## Overview
+
+Orchesis is a transparent HTTP proxy that sits between AI agents and LLM providers. Every request passes through a 17-phase pipeline before reaching the upstream.
+
+## Request flow
 
 ```text
 AI Agent / MCP Client
         |
         v
-  Proxy or Control API
+   Orchesis Proxy
         |
         v
-     evaluate()
+   17-phase pipeline
         |
   +-----+------------------------------+
   |                                    |
 ALLOW                                DENY
   |                                    |
-Tool execution                    Block + reason
+Upstream (OpenAI/Anthropic)      Block + reason
   |                                    |
   +-------------> Telemetry/Event Bus <+
                     |      |      |
-                  JSONL  Metrics  Webhooks
+                  JSONL  Metrics  Dashboard
                     |
                   Replay/Audit
 ```
 
-## Data flow
+## 17-phase pipeline
 
-1. Request arrives with tool, params, cost, and optional agent/session context.
-2. Identity tier checks run first.
-3. Rule pipeline executes in deterministic order.
-4. Decision is returned (`ALLOW`/`DENY`) and telemetry event is emitted.
-5. State tracker updates counters and budgets for allowed calls.
+Phases execute in order. Early phases can short-circuit (e.g., circuit breaker open).
 
-## Evaluation pipeline
+1. **parse** — Parse request body, extract tool/model/params
+2. **experiment** — A/B experiment assignment (if enabled)
+3. **flow_xray** — Record conversation topology
+4. **cascade** — Adaptive model cascade (route by complexity)
+5. **circuit_breaker** — Fail-fast on upstream errors
+6. **loop** — Loop detection (exact + fuzzy)
+7. **behavioral** — Agent DNA fingerprinting
+8. **budget** — Cost limits (daily, per-session)
+9. **policy** — YAML policy evaluation (tool_access, rules)
+10. **threat_intel** — 25 built-in threat signatures
+11. **model_router** — Model override / routing
+12. **secrets** — Secret scanner (API keys, tokens)
+13. **context** — Context engine (dedup, trim)
+14. **semantic_cache** — SimHash + Jaccard cache lookup
+15. **upstream** — Forward to LLM provider
+16. **post_upstream** — Store cache, record metrics
+17. **send** — Stream/return response
 
-Fixed order:
+## Key components
 
-1. `identity_check`
-2. `budget_limit`
-3. `rate_limit`
-4. `file_access`
-5. `sql_restriction`
-6. `regex_match`
-7. `context_rules`
-8. `composite`
+- **Policy engine** — YAML-based tool allowlist/denylist, rules, budgets
+- **Threat matcher** — Prompt injection, command injection, data exfiltration, memory poisoning
+- **Semantic cache** — No vector DB; SimHash + Jaccard similarity
+- **Context engine** — Dedup, trim, sliding window, token budget
+- **Experiment manager** — A/B testing, task completion tracking
+- **Flow analyzer** — Conversation topology, pattern detection
 
 ## State management
 
@@ -52,16 +66,9 @@ Fixed order:
 - Budget spend tracking (24h)
 - Persistent JSONL state (optional)
 
-## Telemetry pipeline
+## Telemetry
 
-- `DecisionEvent` emitted for every evaluation
-- JSONL audit sink for forensics
-- Prometheus metrics aggregation
-- OTel-compatible span export (`traces.jsonl`)
-- Replay engine for deterministic verification
-
-## Event bus architecture
-
-- Central pub/sub bus fan-outs events to multiple subscribers
-- Built-in emitters: JSONL, metrics, webhooks, OTel
-- Subscribers can be filtered and dynamically reconfigured
+- `DecisionEvent` for every evaluation
+- JSONL audit sink
+- Prometheus metrics
+- Dashboard polling (`/stats`, `/api/dashboard/*`)

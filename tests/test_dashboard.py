@@ -132,6 +132,74 @@ def test_dashboard_html_size_reasonable() -> None:
     assert len(html) < 500_000
 
 
+# Dashboard v2 tests (10)
+def test_dashboard_html_contains_experiments_tab() -> None:
+    html = get_dashboard_html()
+    assert "Experiments" in html or "experiments" in html
+
+
+def test_dashboard_html_contains_threats_tab() -> None:
+    html = get_dashboard_html()
+    assert "Threats" in html or "threats" in html
+
+
+def test_dashboard_html_contains_cache_tab() -> None:
+    html = get_dashboard_html()
+    assert "Cache" in html or "cache" in html
+
+
+def test_dashboard_experiments_section_ids() -> None:
+    html = get_dashboard_html()
+    assert "exp-active" in html
+    assert "exp-cards" in html
+    assert "exp-correlations" in html
+
+
+def test_dashboard_threats_section_ids() -> None:
+    html = get_dashboard_html()
+    assert "th-sigs" in html
+    assert "th-scans" in html
+    assert "th-matches" in html
+    assert "th-blocks" in html
+
+
+def test_dashboard_cache_section_ids() -> None:
+    html = get_dashboard_html()
+    assert "c-hit-rate" in html
+    assert "c-tokens" in html
+    assert "c-cost" in html
+    assert "c-entries" in html
+
+
+def test_dashboard_shield_new_metrics() -> None:
+    html = get_dashboard_html()
+    assert "m-threats" in html
+    assert "m-cache-rate" in html
+    assert "m-experiments" in html
+    assert "m-task-success" in html
+
+
+def test_dashboard_poll_functions_exist() -> None:
+    html = get_dashboard_html()
+    assert "pollExperiments" in html
+    assert "pollThreats" in html
+    assert "pollCache" in html
+
+
+def test_dashboard_severity_css_classes() -> None:
+    html = get_dashboard_html()
+    assert "sev-critical" in html
+    assert "sev-high" in html
+    assert "sev-medium" in html
+    assert "sev-low" in html
+
+
+def test_dashboard_variant_card_css() -> None:
+    html = get_dashboard_html()
+    assert "variant-card" in html
+    assert "variant-pair" in html
+
+
 # Overview endpoint tests (8)
 def test_dashboard_overview_returns_expected_keys(tmp_path: Path) -> None:
     proxy, upstream = _make_proxy(tmp_path, "rules: []\n")

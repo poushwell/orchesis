@@ -1,4 +1,6 @@
-# Quickstart
+# Quick Start
+
+Get Orchesis running in 3 commands.
 
 ## Install
 
@@ -6,49 +8,40 @@
 pip install orchesis
 ```
 
-## 1) Initialize project
+## Initialize
 
 ```bash
 orchesis init
 ```
 
-This creates starter `policy.yaml` and `request.json`.
+Creates `policy.yaml` and starter config.
 
-## 2) Write your first policy
-
-```yaml
-rules:
-  - name: budget_limit
-    max_cost_per_call: 1.0
-  - name: file_access
-    allowed_paths: ["/data", "/tmp"]
-    denied_paths: ["/etc", "/root"]
-```
-
-## 3) Verify your first request
+## Run the proxy
 
 ```bash
-orchesis verify request.json --policy policy.yaml
+orchesis proxy --port 8080
 ```
 
-Allow returns exit code `0`, deny returns `1`.
+Point your AI agent at `http://localhost:8080` as the LLM API base URL. Orchesis transparently proxies to OpenAI, Anthropic, or your configured upstream.
 
-## 4) Run the synthetic fuzzer
+## Dashboard
 
-```bash
-orchesis fuzz --policy policy.yaml --count 1000 --seed 42
-```
+Open `http://localhost:8080/dashboard` for the embedded control plane:
 
-## 5) Verify formal invariants
+- Shield Overview — status, cost, circuit breaker
+- Agents — behavioral DNA
+- Sessions — Time Machine
+- Flow X-Ray — conversation topology
+- Experiments — A/B testing
+- Threats — threat intel
+- Cache — semantic cache + context engine
+- Compliance — OWASP/NIST coverage
 
-```bash
-orchesis invariants --policy policy.yaml
-```
+## 5-minute checklist
 
-## 5-Minute setup checklist
-
-- Install package
-- Initialize files
-- Add baseline policy rules
-- Verify one safe and one unsafe request
-- Run fuzzer and invariants before production rollout
+1. `pip install orchesis`
+2. `orchesis init`
+3. Edit `policy.yaml` (optional: add rules, budgets, threat_intel)
+4. `orchesis proxy --port 8080`
+5. Point your agent at `http://localhost:8080`
+6. Open `/dashboard` to monitor

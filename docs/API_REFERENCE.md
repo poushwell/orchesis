@@ -1,98 +1,89 @@
 # API Reference
 
-Base path: `/api/v1`  
-Auth: `Authorization: Bearer <token>` (except `/status`)
+Orchesis proxy exposes HTTP endpoints for the dashboard, stats, and control plane.
 
-## Endpoints (14)
+## Base
 
-### Policy Management
+- **Host** — `127.0.0.1` (default) or configured host
+- **Port** — `8080` (default) or `--port`
+- **Auth** — None by default; add reverse proxy auth if needed
 
-1. `POST /api/v1/policy` — upload and activate policy YAML
-2. `GET /api/v1/policy` — current policy and metadata
-3. `GET /api/v1/policy/history` — policy version history
-4. `POST /api/v1/policy/rollback` — rollback to previous version
-5. `POST /api/v1/policy/validate` — validate YAML without activation
+## Dashboard
 
-### Agent Management
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/dashboard` | Embedded HTML dashboard |
+| GET | `/dashboard/` | Same |
 
-6. `GET /api/v1/agents` — list registered agents
-7. `GET /api/v1/agents/{agent_id}` — agent details and stats
-8. `PUT /api/v1/agents/{agent_id}/tier` — update trust tier
+## Dashboard API (JSON)
 
-### Status and Monitoring
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/dashboard/overview` | Shield metrics, cost timeline, events |
+| GET | `/api/dashboard/agents` | Agent DNA profiles |
+| GET | `/api/dashboard/timeline` | Cost timeline |
 
-9. `GET /api/v1/status` — runtime status (no auth)
-10. `GET /api/v1/audit/stats` — aggregated audit stats
-11. `GET /api/v1/audit/anomalies` — anomaly list
-12. `GET /api/v1/audit/timeline/{agent_id}` — agent timeline
-13. `GET /api/v1/reliability` — reliability report
+## Flow X-Ray
 
-### Evaluation
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/flow/sessions` | List sessions |
+| GET | `/api/flow/analyze/{id}` | Session analysis |
+| GET | `/api/flow/graph/{id}` | Session graph |
+| GET | `/api/flow/patterns` | Pattern counts |
 
-14. `POST /api/v1/evaluate` — remote policy evaluation
+## Experiments (A/B testing)
 
-## Request/response examples
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/experiments` | List experiments |
+| GET | `/api/experiments/{id}/results` | Experiment results |
+| GET | `/api/experiments/{id}/live` | Live variant stats |
+| GET | `/api/tasks/outcomes` | Task outcome distribution |
+| GET | `/api/tasks/correlations` | Task correlations & insights |
 
-### `POST /api/v1/evaluate`
+## Threat Intel
 
-Request:
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/threats` | List threat signatures |
+| GET | `/api/threats/stats` | Threat stats (scans, matches, blocks) |
+| GET | `/api/threats/{id}` | Single threat details |
 
-```json
-{
-  "tool": "read_file",
-  "params": {"path": "/data/report.csv"},
-  "cost": 0.1,
-  "context": {"agent": "cursor", "session": "sess-1"},
-  "debug": true
-}
-```
+## Stats (aggregate)
 
-Response:
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/stats` | Full stats: requests, cost, circuit_breaker, experiments, threat_intel, semantic_cache, context_engine, etc. |
 
-```json
-{
-  "allowed": true,
-  "reasons": [],
-  "rules_checked": ["budget_limit", "rate_limit", "file_access", "sql_restriction", "regex_match", "context_rules", "composite"],
-  "evaluation_us": 42,
-  "policy_version": "abc123...",
-  "debug_trace": {
-    "evaluation_order": ["budget_limit", "rate_limit", "file_access", "sql_restriction", "regex_match", "context_rules", "composite"]
-  }
-}
-```
+## Sessions
 
-### `POST /api/v1/policy/validate`
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/sessions` | List recorded sessions |
+| GET | `/sessions` | Same |
+| GET | `/api/sessions/{id}/export` | Export session (.air) |
 
-Request:
+## Compliance
 
-```json
-{"yaml_content": "rules: []"}
-```
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/compliance/summary` | Framework coverage summary |
+| GET | `/api/compliance/coverage` | Detailed coverage |
+| GET | `/api/compliance/findings` | Recent findings |
+| GET | `/api/compliance/report` | Export report (JSON/MD) |
 
-Response:
+## LLM proxy
 
-```json
-{"valid": true, "errors": [], "warnings": []}
-```
-
-### `GET /api/v1/agents`
-
-Response:
-
-```json
-{
-  "agents": [
-    {"id": "cursor", "trust_tier": "operator"}
-  ],
-  "default_tier": "intern"
-}
-```
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v1/chat/completions` | OpenAI-compatible chat |
+| POST | `/v1/completions` | OpenAI completions |
+| POST | `/messages` | Anthropic Messages API |
 
 ## Error codes
 
-- `200` success
-- `400` invalid request payload or policy
-- `401` unauthorized / missing token
-- `404` entity not found (for example agent id)
-- `500` unexpected internal error
+- `200` — success
+- `400` — invalid request
+- `404` — not found (e.g., experiment/threat disabled)
+- `500` — internal error

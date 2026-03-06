@@ -207,6 +207,51 @@ def get_dashboard_html() -> str:
       display: grid; gap: 8px;
     }
     .node-row { font-size: 12px; color: var(--text-secondary); }
+    .variant-card {
+      background: rgba(255,255,255,0.04);
+      border-radius: 10px;
+      padding: 14px;
+      flex: 1;
+    }
+    .variant-card.winner {
+      border: 1px solid var(--ok);
+      box-shadow: 0 0 12px rgba(0,229,160,0.2);
+    }
+    .variant-pair {
+      display: flex;
+      gap: 12px;
+      margin: 12px 0;
+    }
+    .h-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 4px 0;
+    }
+    .h-bar-fill {
+      height: 18px;
+      background: linear-gradient(90deg, var(--ok), rgba(0,229,160,0.4));
+      border-radius: 4px;
+      transition: width 0.5s ease;
+    }
+    .sev-critical { background: #ef4444; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+    .sev-high { background: #f97316; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+    .sev-medium { background: #eab308; color: #111; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+    .sev-low { background: #6b7280; color: white; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+    .outcome-bar {
+      display: flex;
+      height: 24px;
+      border-radius: 6px;
+      overflow: hidden;
+      margin: 8px 0;
+    }
+    .outcome-bar > div { transition: width 0.5s ease; }
+    .outcome-success { background: var(--ok); }
+    .outcome-failure { background: #ef4444; }
+    .outcome-loop { background: #f97316; }
+    .outcome-abandoned { background: #6b7280; }
+    .outcome-timeout { background: #eab308; }
+    .outcome-escalated { background: #8b5cf6; }
     @media (max-width: 1100px) {
       .grid-4 { grid-template-columns: repeat(2, minmax(160px, 1fr)); }
       .grid-2 { grid-template-columns: 1fr; }
@@ -229,6 +274,9 @@ def get_dashboard_html() -> str:
       <button class="tab-btn" data-tab="agents">🤖 Agents</button>
       <button class="tab-btn" data-tab="sessions">💾 Sessions</button>
       <button class="tab-btn" data-tab="flow">🔬 Flow X-Ray</button>
+      <button class="tab-btn" data-tab="experiments">🧪 Experiments</button>
+      <button class="tab-btn" data-tab="threats">🛡️ Threats</button>
+      <button class="tab-btn" data-tab="cache">⚡ Cache</button>
       <button class="tab-btn" data-tab="compliance">📘 Compliance</button>
     </div>
 
@@ -267,6 +315,90 @@ def get_dashboard_html() -> str:
       <div class="panel">
         <div><strong>Recent Events</strong></div>
         <div id="events" class="event-feed"></div>
+      </div>
+      <div class="grid-4" style="margin-top: 12px;">
+        <div class="panel">
+          <div class="subtle">🔍 Threats Detected</div>
+          <div id="m-threats" class="metric-value">0</div>
+        </div>
+        <div class="panel">
+          <div class="subtle">⚡ Cache Hit Rate</div>
+          <div id="m-cache-rate" class="metric-value">0%</div>
+        </div>
+        <div class="panel">
+          <div class="subtle">🧪 Active Experiments</div>
+          <div id="m-experiments" class="metric-value">0</div>
+        </div>
+        <div class="panel">
+          <div class="subtle">📊 Task Success</div>
+          <div id="m-task-success" class="metric-value">0%</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="experiments" class="screen">
+      <div class="grid-4">
+        <div class="panel"><div class="subtle">Active Experiments</div><div id="exp-active" class="metric-value">0</div></div>
+        <div class="panel"><div class="subtle">Total Assignments</div><div id="exp-assignments" class="metric-value">0</div></div>
+        <div class="panel"><div class="subtle">Task Success Rate</div><div id="exp-success-rate" class="metric-value">0%</div></div>
+        <div class="panel"><div class="subtle">Tracked Sessions</div><div id="exp-sessions" class="metric-value">0</div></div>
+      </div>
+      <div id="exp-cards"></div>
+      <div class="panel">
+        <strong>Task Correlations & Insights</strong>
+        <div id="exp-correlations" class="event-feed"></div>
+      </div>
+      <div class="panel">
+        <strong>Outcome Distribution</strong>
+        <div id="exp-outcome-bar" class="outcome-bar"></div>
+        <div id="exp-outcomes" class="grid-4"></div>
+      </div>
+    </section>
+
+    <section id="threats" class="screen">
+      <div class="grid-4">
+        <div class="panel"><div class="subtle">Signatures</div><div id="th-sigs" class="metric-value">0</div></div>
+        <div class="panel"><div class="subtle">Scans</div><div id="th-scans" class="metric-value">0</div></div>
+        <div class="panel"><div class="subtle">Matches</div><div id="th-matches" class="metric-value">0</div></div>
+        <div class="panel"><div class="subtle">Blocks</div><div id="th-blocks" class="metric-value">0</div></div>
+      </div>
+      <div class="panel">
+        <strong>Top Threats</strong>
+        <div id="th-top"></div>
+      </div>
+      <div class="grid-2">
+        <div class="panel">
+          <strong>Matches by Category</strong>
+          <div id="th-by-cat"></div>
+        </div>
+        <div class="panel">
+          <strong>Matches by Severity</strong>
+          <div id="th-by-sev"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <strong>All Signatures</strong>
+        <table id="th-table" class="table">
+          <thead><tr><th>ID</th><th>Name</th><th>Category</th><th>Severity</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="cache" class="screen">
+      <div class="grid-4">
+        <div class="panel"><div class="subtle">Cache Hit Rate</div><div id="c-hit-rate" class="metric-value">0%</div></div>
+        <div class="panel"><div class="subtle">Tokens Saved</div><div id="c-tokens" class="metric-value">0</div></div>
+        <div class="panel"><div class="subtle">Cost Saved</div><div id="c-cost" class="metric-value">$0.00</div></div>
+        <div class="panel"><div class="subtle">Entries</div><div id="c-entries" class="metric-value">0/0</div></div>
+      </div>
+      <div class="panel">
+        <strong>Semantic Cache</strong>
+        <div id="c-semantic-breakdown"></div>
+      </div>
+      <div class="panel">
+        <strong>Context Engine</strong>
+        <div id="c-context"></div>
       </div>
     </section>
 
@@ -483,7 +615,7 @@ def get_dashboard_html() -> str:
       document.getElementById("health-score").textContent = val.toFixed(2);
     }
 
-    function renderOverview(data){
+    function renderOverview(data, stats){
       if(!data){ return; }
       lastOverview = data;
       setStatus(data.status || "clear");
@@ -494,6 +626,16 @@ def get_dashboard_html() -> str:
       document.getElementById("m-blocked").textContent = `${fmtNum(blocked)} (${((blocked/total)*100).toFixed(1)}%)`;
       document.getElementById("m-cost").textContent = fmtMoney(data.total_cost_usd);
       document.getElementById("m-agents").textContent = fmtNum(data.active_agents);
+
+      const ti = (stats && stats.threat_intel) ? stats.threat_intel : {};
+      const sc = (stats && stats.semantic_cache) ? stats.semantic_cache : {};
+      const exp = (stats && stats.experiments) ? stats.experiments : {};
+      const task = (stats && stats.task_tracking) ? stats.task_tracking : {};
+      document.getElementById("m-threats").textContent = fmtNum(ti.total_matches || 0);
+      document.getElementById("m-cache-rate").textContent = (sc.hit_rate_percent != null ? sc.hit_rate_percent.toFixed(1) : "0") + "%";
+      document.getElementById("m-experiments").textContent = fmtNum(exp.active || 0);
+      const sr = Number(task.overall_success_rate || 0);
+      document.getElementById("m-task-success").textContent = (sr * 100).toFixed(1) + "%";
 
       const eventsEl = document.getElementById("events");
       eventsEl.innerHTML = "";
@@ -670,6 +812,135 @@ def get_dashboard_html() -> str:
       }
     }
 
+    function renderExperiments(experiments, outcomes, correlations, stats){
+      const exp = (stats && stats.experiments) ? stats.experiments : {};
+      const task = (stats && stats.task_tracking) ? stats.task_tracking : {};
+      document.getElementById("exp-active").textContent = fmtNum(exp.active || 0);
+      document.getElementById("exp-assignments").textContent = fmtNum(exp.total_assignments || 0);
+      const sr = Number(task.overall_success_rate || 0);
+      document.getElementById("exp-success-rate").textContent = (sr * 100).toFixed(1) + "%";
+      document.getElementById("exp-sessions").textContent = fmtNum(task.tracked_sessions || 0);
+
+      const cards = document.getElementById("exp-cards");
+      cards.innerHTML = "";
+      const exps = (experiments && Array.isArray(experiments.experiments)) ? experiments.experiments : [];
+      const running = exps.filter((e)=> String(e.status || "").toLowerCase() === "running");
+      if(running.length === 0){
+        cards.innerHTML = `<div class="panel empty">Not configured or no active experiments.</div>`;
+      }else{
+        running.forEach((exp)=>{
+          const card = document.createElement("div");
+          card.className = "panel";
+          card.innerHTML = `<strong>${exp.name || "Experiment"}</strong> <span class="cb-pill closed">RUNNING</span>`;
+          cards.appendChild(card);
+        });
+      }
+
+      const corrEl = document.getElementById("exp-correlations");
+      const insights = (correlations && Array.isArray(correlations.insights)) ? correlations.insights : [];
+      if(insights.length === 0){
+        corrEl.innerHTML = `<div class="empty">No correlations yet.</div>`;
+      }else{
+        corrEl.innerHTML = insights.slice(0, 10).map((s)=> `<div class="event"><span class="sev info">INSIGHT</span><span>${s}</span></div>`).join("");
+      }
+
+      const outEl = document.getElementById("exp-outcomes");
+      const barEl = document.getElementById("exp-outcome-bar");
+      const out = (task && task.outcomes) ? task.outcomes : {};
+      const total = Object.values(out).reduce((a,b)=> a + Number(b||0), 0);
+      const order = ["success","failure","loop","abandoned","timeout","escalated"];
+      const cls = { success: "outcome-success", failure: "outcome-failure", loop: "outcome-loop", abandoned: "outcome-abandoned", timeout: "outcome-timeout", escalated: "outcome-escalated" };
+      if(total === 0){
+        barEl.innerHTML = "";
+        outEl.innerHTML = `<div class="empty">No outcome data.</div>`;
+      }else{
+        barEl.innerHTML = order.map((k)=>{
+          const v = Number(out[k] || 0);
+          const pct = (v / total * 100).toFixed(1);
+          return `<div class="${cls[k] || "outcome-abandoned"}" style="width:${pct}%"></div>`;
+        }).join("");
+        outEl.innerHTML = order.map((k)=>{
+          const v = Number(out[k] || 0);
+          const pct = (v / total * 100).toFixed(1);
+          return `<div class="panel"><div class="subtle">${k}</div><div class="metric-value">${fmtNum(v)} (${pct}%)</div></div>`;
+        }).join("");
+      }
+    }
+
+    function renderThreats(threats, stats){
+      const s = (stats && stats.enabled) ? stats : {};
+      document.getElementById("th-sigs").textContent = fmtNum(s.total_signatures || 0);
+      document.getElementById("th-scans").textContent = fmtNum(s.total_scans || 0);
+      document.getElementById("th-matches").textContent = fmtNum(s.total_matches || 0);
+      document.getElementById("th-blocks").textContent = fmtNum(s.blocks || 0);
+
+      const topEl = document.getElementById("th-top");
+      const top = Array.isArray(s.top_threats) ? s.top_threats : [];
+      if(top.length === 0){
+        topEl.innerHTML = `<div class="empty">Not configured or no matches.</div>`;
+      }else{
+        const maxC = Math.max(...top.map((t)=> Number(t[1]||0)), 1);
+        topEl.innerHTML = top.map((t)=>{
+          const pct = (Number(t[1]||0) / maxC * 100).toFixed(0);
+          return `<div class="h-bar"><div class="h-bar-fill" style="width:${pct}%;min-width:40px;"></div><span>${t[0] || ""} (${t[1]})</span></div>`;
+        }).join("");
+      }
+
+      const byCat = (s.matches_by_category && typeof s.matches_by_category === "object") ? s.matches_by_category : {};
+      document.getElementById("th-by-cat").innerHTML = Object.entries(byCat).map(([k,v])=> `<div class="h-bar"><div class="h-bar-fill" style="width:${Math.min(100, Number(v)*10)}%;min-width:30px;"></div><span>${k}: ${v}</span></div>`).join("") || '<div class="empty">No data</div>';
+      const bySev = (s.matches_by_severity && typeof s.matches_by_severity === "object") ? s.matches_by_severity : {};
+      document.getElementById("th-by-sev").innerHTML = Object.entries(bySev).map(([k,v])=> `<div class="h-bar"><div class="h-bar-fill" style="width:${Math.min(100, Number(v)*10)}%;min-width:30px;"></div><span>${k}: ${v}</span></div>`).join("") || '<div class="empty">No data</div>';
+
+      const table = document.querySelector("#th-table tbody");
+      table.innerHTML = "";
+      const list = (threats && Array.isArray(threats.threats)) ? threats.threats : [];
+      list.forEach((t)=>{
+        const sev = String(t.severity || "low").toLowerCase();
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td>${t.threat_id || ""}</td><td>${t.name || ""}</td><td>${t.category || ""}</td><td><span class="sev-${sev}">${(t.severity||"").toUpperCase()}</span></td>`;
+        table.appendChild(tr);
+      });
+    }
+
+    function renderCache(stats){
+      const sc = (stats && stats.semantic_cache) ? stats.semantic_cache : {};
+      const ce = (stats && stats.context_engine) ? stats.context_engine : {};
+      document.getElementById("c-hit-rate").textContent = (sc.hit_rate_percent != null ? sc.hit_rate_percent.toFixed(1) : "0") + "%";
+      document.getElementById("c-tokens").textContent = fmtNum((sc.total_tokens_saved || 0) + (ce.total_tokens_saved || 0));
+      document.getElementById("c-cost").textContent = fmtMoney(sc.total_cost_saved_usd || 0);
+      document.getElementById("c-entries").textContent = `${fmtNum(sc.entries || 0)}/${fmtNum(sc.max_entries || 0)}`;
+
+      const semEl = document.getElementById("c-semantic-breakdown");
+      if(!sc.enabled){
+        semEl.innerHTML = `<div class="empty">Semantic cache not configured.</div>`;
+      }else{
+        const exact = Number(sc.exact_hits || 0);
+        const sem = Number(sc.semantic_hits || 0);
+        const miss = Number(sc.misses || 0);
+        const tot = exact + sem + miss || 1;
+        semEl.innerHTML = `
+          <div>Exact hits: ${fmtNum(exact)} | Semantic hits: ${fmtNum(sem)} | Misses: ${fmtNum(miss)}</div>
+          <div class="outcome-bar" style="margin-top:8px;">
+            <div class="outcome-success" style="width:${(exact/tot*100).toFixed(1)}%"></div>
+            <div class="outcome-escalated" style="width:${(sem/tot*100).toFixed(1)}%"></div>
+            <div class="outcome-abandoned" style="width:${(miss/tot*100).toFixed(1)}%"></div>
+          </div>
+        `;
+      }
+
+      const ctxEl = document.getElementById("c-context");
+      if(!ce.enabled){
+        ctxEl.innerHTML = `<div class="empty">Context engine not configured.</div>`;
+      }else{
+        const hits = (ce.strategy_hits && typeof ce.strategy_hits === "object") ? ce.strategy_hits : {};
+        const maxH = Math.max(...Object.values(hits).map(Number), 1);
+        ctxEl.innerHTML = `
+          <div>Optimizations: ${fmtNum(ce.total_optimizations || 0)} | Tokens saved: ${fmtNum(ce.total_tokens_saved || 0)}</div>
+          <div style="margin-top:10px;">${Object.entries(hits).map(([k,v])=> `<div class="h-bar"><div class="h-bar-fill" style="width:${(Number(v)/maxH*100).toFixed(0)}%;min-width:30px;"></div><span>${k}: ${v}</span></div>`).join("") || "<div class="empty">No strategy hits</div>"}</div>
+        `;
+      }
+    }
+
     function renderCompliance(summary, coverage, findings){
       const fw = (summary && summary.frameworks) ? summary.frameworks : {};
       const owasp = fw["owasp_llm_top10_2025"] || { percent: 0 };
@@ -716,8 +987,11 @@ def get_dashboard_html() -> str:
     }
 
     async function pollShield(){
-      const data = await fetchData("/api/dashboard/overview");
-      renderOverview(data);
+      const [data, stats] = await Promise.all([
+        fetchData("/api/dashboard/overview"),
+        fetchData("/stats"),
+      ]);
+      renderOverview(data, stats);
     }
     async function pollAgents(){
       const data = await fetchData("/api/dashboard/agents");
@@ -751,11 +1025,37 @@ def get_dashboard_html() -> str:
       renderCompliance(summary, coverage, findings);
     }
 
+    async function pollExperiments(){
+      const [experiments, outcomes, correlations, stats] = await Promise.all([
+        fetchData("/api/experiments"),
+        fetchData("/api/tasks/outcomes"),
+        fetchData("/api/tasks/correlations"),
+        fetchData("/stats"),
+      ]);
+      renderExperiments(experiments, outcomes, correlations, stats);
+    }
+
+    async function pollThreats(){
+      const [threats, stats] = await Promise.all([
+        fetchData("/api/threats"),
+        fetchData("/api/threats/stats"),
+      ]);
+      renderThreats(threats, stats);
+    }
+
+    async function pollCache(){
+      const stats = await fetchData("/stats");
+      renderCache(stats);
+    }
+
     async function pollCurrent(){
       if(currentTab === "shield") return pollShield();
       if(currentTab === "agents") return pollAgents();
       if(currentTab === "sessions") return pollSessions();
       if(currentTab === "flow") return pollFlow();
+      if(currentTab === "experiments") return pollExperiments();
+      if(currentTab === "threats") return pollThreats();
+      if(currentTab === "cache") return pollCache();
       if(currentTab === "compliance") return pollCompliance();
     }
 
