@@ -644,9 +644,6 @@ class ThreatMatcher:
         matches: list[ThreatMatch] = []
         seen: set[str] = set()
         text = self._extract_all_text(messages)
-        headers_str = ""
-        if headers:
-            headers_str = json.dumps(headers, sort_keys=True)
 
         for threat_id, pat in self._compiled_content:
             if threat_id in seen:

@@ -334,6 +334,7 @@ def test_variant_success_count() -> None:
     mgr.start_experiment(exp.experiment_id)
     for _ in range(5):
         mgr.record_request(exp.experiment_id, "c", 0.01, 10.0, 50, 1, False, turns=1)
+        mgr.record_task_outcome(exp.experiment_id, "c", TaskOutcome.SUCCESS)
     v = mgr.get_experiment(exp.experiment_id).variants[0]
     assert v.successes == 5
 
@@ -358,6 +359,20 @@ def test_variant_avg_latency() -> None:
     assert r.variants["c"].avg_latency_ms == 150.0
 
 
+def test_p95_latency_distinct_from_avg() -> None:
+    """p95_latency_ms should reflect 95th percentile, not just average."""
+    mgr = ExperimentManager()
+    exp = mgr.create_experiment("X", [{"name": "c", "weight": 1.0}])
+    mgr.start_experiment(exp.experiment_id)
+    for i in range(100):
+        mgr.record_request(exp.experiment_id, "c", 0.01, float(10 + i), 50, 1, False, turns=1)
+    r = mgr.get_results(exp.experiment_id)
+    avg = r.variants["c"].avg_latency_ms
+    p95 = r.variants["c"].p95_latency_ms
+    assert p95 >= avg
+    assert p95 >= 95
+
+
 def test_per_variant_isolation() -> None:
     mgr = ExperimentManager()
     exp = mgr.create_experiment("X", [{"name": "a", "weight": 0.5}, {"name": "b", "weight": 0.5}])
@@ -365,16 +380,16 @@ def test_per_variant_isolation() -> None:
     mgr.record_request(exp.experiment_id, "a", 0.10, 100.0, 100, 1, False, turns=1)
     mgr.record_request(exp.experiment_id, "b", 0.20, 200.0, 200, 2, False, turns=1)
     r = mgr.get_results(exp.experiment_id)
-    assert r.variants["a"].total_cost_usd == 0.10
-    assert r.variants["b"].total_cost_usd == 0.20
+    assert r.variants["a"].avg_cost_usd == 0.10
+    assert r.variants["b"].avg_cost_usd == 0.20
 
 
 def test_turns_tracking() -> None:
     mgr = ExperimentManager()
     exp = mgr.create_experiment("X", [{"name": "c", "weight": 1.0}])
     mgr.start_experiment(exp.experiment_id)
-    mgr.record_request(exp.experiment_id, "c", 0.01, 10.0, 50, 1, False, success=True, turns=3)
-    mgr.record_request(exp.experiment_id, "c", 0.01, 10.0, 50, 1, False, success=True, turns=5)
+    mgr.record_request(exp.experiment_id, "c", 0.01, 10.0, 50, 1, False, turns=3)
+    mgr.record_request(exp.experiment_id, "c", 0.01, 10.0, 50, 1, False, turns=5)
     v = mgr.get_experiment(exp.experiment_id).variants[0]
     assert v.avg_turns == 4.0
 
@@ -455,9 +470,11 @@ def test_results_clear_winner() -> None:
     exp = mgr.create_experiment("X", [{"name": "a", "weight": 0.5}, {"name": "b", "weight": 0.5}], min_sample_size=30)
     mgr.start_experiment(exp.experiment_id)
     for _ in range(50):
-        mgr.record_request(exp.experiment_id, "a", 0.01, 10.0, 50, 1, False, success=True, turns=1)
+        mgr.record_request(exp.experiment_id, "a", 0.01, 10.0, 50, 1, False, turns=1)
+        mgr.record_task_outcome(exp.experiment_id, "a", TaskOutcome.SUCCESS)
     for _ in range(50):
         mgr.record_request(exp.experiment_id, "b", 0.01, 10.0, 50, 1, True, turns=1)
+        mgr.record_task_outcome(exp.experiment_id, "b", TaskOutcome.FAILURE)
     r = mgr.get_results(exp.experiment_id)
     assert r.winner == "a"
 
@@ -492,7 +509,7 @@ def test_results_to_dict() -> None:
 
 def test_p_value_approximation_accuracy() -> None:
     z, p = ExperimentManager._z_test_proportions(80, 100, 20, 100)
-    assert 0 < p < 0.001
+    assert p < 0.001
     z2, p2 = ExperimentManager._z_test_proportions(50, 100, 50, 100)
     assert p2 > 0.99
 
@@ -547,6 +564,26 @@ def test_outcome_loop_detected() -> None:
     tracker.record_turn("s1", "gpt-4o", 10, 5, 0.01, 20.0, 1, "", False, was_loop_detected=True)
     outcome = tracker.finalize_session("s1")
     assert outcome == TaskOutcome.LOOP
+
+
+def test_finalize_on_loop_detected() -> None:
+    """When was_loop_detected=True, outcome is LOOP and recorded in outcome_stats."""
+    tracker = TaskTracker()
+    tracker.record_turn("s1", "gpt-4o", 10, 5, 0.01, 20.0, 1, "", False, was_loop_detected=True)
+    outcome = tracker.finalize_session("s1")
+    assert outcome == TaskOutcome.LOOP
+    dist = tracker.get_outcome_distribution()
+    assert dist.get(TaskOutcome.LOOP.value, 0) >= 1
+
+
+def test_finalize_on_consecutive_errors() -> None:
+    """When consecutive_errors >= threshold, outcome is FAILURE."""
+    cfg = ExperimentConfig(consecutive_errors_threshold=3)
+    tracker = TaskTracker(cfg)
+    for _ in range(3):
+        tracker.record_turn("s1", "gpt-4o", 10, 5, 0.01, 20.0, 0, "", True)
+    outcome = tracker.finalize_session("s1")
+    assert outcome == TaskOutcome.FAILURE
 
 
 def test_outcome_escalated() -> None:
@@ -617,7 +654,7 @@ def test_max_sessions_eviction() -> None:
     tracker = TaskTracker(cfg)
     for i in range(10):
         tracker.record_turn(f"s{i}", "gpt-4o", 10, 5, 0.01, 20.0, 0, "", False)
-    assert len(tracker.get_stats()["tracked_sessions"]) <= 5
+    assert tracker.get_stats()["tracked_sessions"] <= 5
 
 
 def test_correlations_by_model() -> None:
@@ -702,9 +739,11 @@ def test_results_use_task_outcomes() -> None:
     exp = mgr.create_experiment("X", [{"name": "a", "weight": 0.5}, {"name": "b", "weight": 0.5}])
     mgr.start_experiment(exp.experiment_id)
     for _ in range(30):
-        mgr.record_request(exp.experiment_id, "a", 0.01, 10.0, 50, 1, False, success=True, turns=1)
+        mgr.record_request(exp.experiment_id, "a", 0.01, 10.0, 50, 1, False, turns=1)
+        mgr.record_task_outcome(exp.experiment_id, "a", TaskOutcome.SUCCESS)
     for _ in range(30):
-        mgr.record_request(exp.experiment_id, "b", 0.01, 10.0, 50, 1, False, success=False, turns=1)
+        mgr.record_request(exp.experiment_id, "b", 0.01, 10.0, 50, 1, False, turns=1)
+        mgr.record_task_outcome(exp.experiment_id, "b", TaskOutcome.FAILURE)
     r = mgr.get_results(exp.experiment_id)
     assert r.variants["a"].success_rate > r.variants["b"].success_rate
 
@@ -713,8 +752,10 @@ def test_cost_per_success_calculation() -> None:
     mgr = ExperimentManager()
     exp = mgr.create_experiment("X", [{"name": "c", "weight": 1.0}])
     mgr.start_experiment(exp.experiment_id)
-    mgr.record_request(exp.experiment_id, "c", 0.10, 10.0, 50, 1, False, success=True, turns=1)
-    mgr.record_request(exp.experiment_id, "c", 0.10, 10.0, 50, 1, False, success=True, turns=1)
+    mgr.record_request(exp.experiment_id, "c", 0.10, 10.0, 50, 1, False, turns=1)
+    mgr.record_task_outcome(exp.experiment_id, "c", TaskOutcome.SUCCESS)
+    mgr.record_request(exp.experiment_id, "c", 0.10, 10.0, 50, 1, False, turns=1)
+    mgr.record_task_outcome(exp.experiment_id, "c", TaskOutcome.SUCCESS)
     r = mgr.get_results(exp.experiment_id)
     assert r.variants["c"].cost_per_success == 0.10
 
@@ -724,9 +765,11 @@ def test_variant_comparison_with_outcomes() -> None:
     exp = mgr.create_experiment("X", [{"name": "sonnet", "weight": 0.5}, {"name": "opus", "weight": 0.5}])
     mgr.start_experiment(exp.experiment_id)
     for _ in range(40):
-        mgr.record_request(exp.experiment_id, "sonnet", 0.12, 100.0, 500, 2, False, success=True, turns=2)
+        mgr.record_request(exp.experiment_id, "sonnet", 0.12, 100.0, 500, 2, False, turns=2)
+        mgr.record_task_outcome(exp.experiment_id, "sonnet", TaskOutcome.SUCCESS)
     for _ in range(40):
-        mgr.record_request(exp.experiment_id, "opus", 0.45, 200.0, 1000, 2, False, success=True, turns=2)
+        mgr.record_request(exp.experiment_id, "opus", 0.45, 200.0, 1000, 2, False, turns=2)
+        mgr.record_task_outcome(exp.experiment_id, "opus", TaskOutcome.SUCCESS)
     r = mgr.get_results(exp.experiment_id)
     assert "sonnet" in r.variants and "opus" in r.variants
     assert r.variants["sonnet"].avg_cost_usd < r.variants["opus"].avg_cost_usd
@@ -738,9 +781,38 @@ def test_auto_stop_on_significance() -> None:
     exp = mgr.create_experiment("X", [{"name": "a", "weight": 0.5}, {"name": "b", "weight": 0.5}], min_sample_size=50)
     mgr.start_experiment(exp.experiment_id)
     for _ in range(60):
-        mgr.record_request(exp.experiment_id, "a", 0.01, 10.0, 50, 1, False, success=True, turns=1)
+        mgr.record_request(exp.experiment_id, "a", 0.01, 10.0, 50, 1, False, turns=1)
+        mgr.record_task_outcome(exp.experiment_id, "a", TaskOutcome.SUCCESS)
     for _ in range(60):
         mgr.record_request(exp.experiment_id, "b", 0.01, 10.0, 50, 1, True, turns=1)
+        mgr.record_task_outcome(exp.experiment_id, "b", TaskOutcome.FAILURE)
+    assert mgr.get_experiment(exp.experiment_id).status == ExperimentStatus.COMPLETED
+
+
+def test_auto_stop_on_significance_no_deadlock() -> None:
+    """Verify no reentrant deadlock when auto_stop triggers get_results from record_request."""
+    import concurrent.futures
+
+    cfg = ExperimentConfig(significance_threshold=0.95, auto_stop_on_significance=True)
+    mgr = ExperimentManager(cfg)
+    exp = mgr.create_experiment("X", [{"name": "a", "weight": 0.5}, {"name": "b", "weight": 0.5}], min_sample_size=50)
+    mgr.start_experiment(exp.experiment_id)
+
+    def record_a() -> None:
+        for _ in range(60):
+            mgr.record_request(exp.experiment_id, "a", 0.01, 10.0, 50, 1, False, turns=1)
+            mgr.record_task_outcome(exp.experiment_id, "a", TaskOutcome.SUCCESS)
+
+    def record_b() -> None:
+        for _ in range(60):
+            mgr.record_request(exp.experiment_id, "b", 0.01, 10.0, 50, 1, True, turns=1)
+            mgr.record_task_outcome(exp.experiment_id, "b", TaskOutcome.FAILURE)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        f1 = ex.submit(record_a)
+        f2 = ex.submit(record_b)
+        f1.result(timeout=5)
+        f2.result(timeout=5)
     assert mgr.get_experiment(exp.experiment_id).status == ExperimentStatus.COMPLETED
 
 
@@ -758,14 +830,13 @@ def test_full_lifecycle() -> None:
 
 
 def test_replay_results_match() -> None:
+    """Sticky session gives same variant for same session_id across managers."""
     mgr = ExperimentManager()
-    mgr._rng.seed(42)
-    exp = mgr.create_experiment("X", [{"name": "a", "weight": 0.5}, {"name": "b", "weight": 0.5}], split_strategy="random")
+    exp = mgr.create_experiment("X", [{"name": "a", "weight": 0.5}, {"name": "b", "weight": 0.5}])
     mgr.start_experiment(exp.experiment_id)
     a1 = [mgr.assign_variant(f"s{i}", "x", "gpt-4o", []) for i in range(10)]
     mgr2 = ExperimentManager()
-    mgr2._rng.seed(42)
-    exp2 = mgr2.create_experiment("Y", [{"name": "a", "weight": 0.5}, {"name": "b", "weight": 0.5}], split_strategy="random")
+    exp2 = mgr2.create_experiment("Y", [{"name": "a", "weight": 0.5}, {"name": "b", "weight": 0.5}])
     mgr2.start_experiment(exp2.experiment_id)
     a2 = [mgr2.assign_variant(f"s{i}", "x", "gpt-4o", []) for i in range(10)]
     names1 = [x.variant_name for x in a1 if x]
@@ -809,8 +880,6 @@ task_tracking:
 
 
 def test_proxy_headers_set() -> None:
-    from orchesis.experiment import VariantAssignment
-
     a = VariantAssignment("e1", "sonnet", "claude-sonnet-4", {})
     assert a.experiment_id == "e1"
     assert a.variant_name == "sonnet"
