@@ -67,6 +67,9 @@ from orchesis import __version__ as ORCHESIS_VERSION
 from orchesis.compliance import ComplianceEngine, Framework, Severity
 from orchesis.connection_pool import ConnectionPool, PoolConfig, PooledConnection
 from orchesis.experiment import ExperimentConfig, ExperimentManager
+from orchesis.context_engine import ContextConfig, ContextEngine
+from orchesis.threat_intel import ThreatIntelConfig, ThreatMatcher
+from orchesis.semantic_cache import SemanticCache, SemanticCacheConfig
 
 _HTTP_PROXY_LOGGER = logging.getLogger("orchesis.http_proxy")
 
@@ -198,6 +201,59 @@ class OrchesisProxy:
             if bool(self._recording_cfg.get("enabled", False))
             else None
         )
+        context_cfg = self._policy.get("context_engine")
+        self._context_engine: ContextEngine | None = None
+        if isinstance(context_cfg, dict) and bool(context_cfg.get("enabled", False)):
+            cfg = ContextConfig(
+                enabled=True,
+                strategies=list(context_cfg.get("strategies", ["dedup", "trim_tool_results", "trim_system_dups"])),
+                max_context_tokens=int(context_cfg.get("max_context_tokens", 0)),
+                token_budget_reserve=int(context_cfg.get("token_budget_reserve", 4096)),
+                sliding_window_size=int(context_cfg.get("sliding_window_size", 0)),
+                preserve_system=bool(context_cfg.get("preserve_system", True)),
+                max_tool_result_tokens=int(context_cfg.get("max_tool_result_tokens", 2000)),
+                dedup_window=int(context_cfg.get("dedup_window", 50)),
+                track_savings=bool(context_cfg.get("track_savings", True)),
+            )
+            self._context_engine = ContextEngine(cfg)
+        threat_cfg = self._policy.get("threat_intel")
+        self._threat_matcher: ThreatMatcher | None = None
+        if isinstance(threat_cfg, dict) and bool(threat_cfg.get("enabled", False)):
+            default_severity = {
+                "critical": "block",
+                "high": "warn",
+                "medium": "log",
+                "low": "log",
+                "info": "log",
+            }
+            policy_sev = threat_cfg.get("severity_actions")
+            if isinstance(policy_sev, dict):
+                default_severity = {**default_severity, **policy_sev}
+            ti_cfg = ThreatIntelConfig(
+                enabled=True,
+                default_action=str(threat_cfg.get("default_action", "warn")),
+                severity_actions=default_severity,
+                custom_signatures=list(threat_cfg.get("custom_signatures", [])),
+                disabled_threats=list(threat_cfg.get("disabled_threats", [])),
+                max_matches_per_request=int(threat_cfg.get("max_matches_per_request", 10)),
+            )
+            self._threat_matcher = ThreatMatcher(ti_cfg)
+        semantic_cfg = self._policy.get("semantic_cache")
+        self._semantic_cache: SemanticCache | None = None
+        if isinstance(semantic_cfg, dict) and bool(semantic_cfg.get("enabled", False)):
+            sc_cfg = SemanticCacheConfig(
+                enabled=True,
+                max_entries=int(semantic_cfg.get("max_entries", 2000)),
+                ttl_seconds=float(semantic_cfg.get("ttl_seconds", 600)),
+                simhash_threshold=int(semantic_cfg.get("simhash_threshold", 8)),
+                jaccard_threshold=float(semantic_cfg.get("jaccard_threshold", 0.6)),
+                min_content_length=int(semantic_cfg.get("min_content_length", 20)),
+                max_content_length=int(semantic_cfg.get("max_content_length", 50000)),
+                cacheable_models=list(semantic_cfg.get("cacheable_models", [])),
+                exclude_tool_calls=bool(semantic_cfg.get("exclude_tool_calls", True)),
+                track_savings=bool(semantic_cfg.get("track_savings", True)),
+            )
+            self._semantic_cache = SemanticCache(sc_cfg)
         compliance_cfg = self._policy.get("compliance")
         self._compliance_cfg = compliance_cfg if isinstance(compliance_cfg, dict) else {}
         framework_tokens = self._compliance_cfg.get("frameworks", ["owasp_llm_top10", "nist_ai_rmf"])
@@ -1626,6 +1682,10 @@ class _RequestContext:
     variant_name: str = ""
     was_escalated: bool = False
     was_loop_detected: bool = False
+    context_tokens_saved: int = 0
+    context_strategies: list[str] = field(default_factory=list)
+    threat_matches: list[Any] = field(default_factory=list)
+    from_semantic_cache: bool = False
 
 
 class LLMHTTPProxy:
@@ -1770,6 +1830,59 @@ class LLMHTTPProxy:
             if bool(self._recording_cfg.get("enabled", False))
             else None
         )
+        context_cfg = self._policy.get("context_engine")
+        self._context_engine: ContextEngine | None = None
+        if isinstance(context_cfg, dict) and bool(context_cfg.get("enabled", False)):
+            cfg = ContextConfig(
+                enabled=True,
+                strategies=list(context_cfg.get("strategies", ["dedup", "trim_tool_results", "trim_system_dups"])),
+                max_context_tokens=int(context_cfg.get("max_context_tokens", 0)),
+                token_budget_reserve=int(context_cfg.get("token_budget_reserve", 4096)),
+                sliding_window_size=int(context_cfg.get("sliding_window_size", 0)),
+                preserve_system=bool(context_cfg.get("preserve_system", True)),
+                max_tool_result_tokens=int(context_cfg.get("max_tool_result_tokens", 2000)),
+                dedup_window=int(context_cfg.get("dedup_window", 50)),
+                track_savings=bool(context_cfg.get("track_savings", True)),
+            )
+            self._context_engine = ContextEngine(cfg)
+        threat_cfg = self._policy.get("threat_intel")
+        self._threat_matcher: ThreatMatcher | None = None
+        if isinstance(threat_cfg, dict) and bool(threat_cfg.get("enabled", False)):
+            default_severity = {
+                "critical": "block",
+                "high": "warn",
+                "medium": "log",
+                "low": "log",
+                "info": "log",
+            }
+            policy_sev = threat_cfg.get("severity_actions")
+            if isinstance(policy_sev, dict):
+                default_severity = {**default_severity, **policy_sev}
+            ti_cfg = ThreatIntelConfig(
+                enabled=True,
+                default_action=str(threat_cfg.get("default_action", "warn")),
+                severity_actions=default_severity,
+                custom_signatures=list(threat_cfg.get("custom_signatures", [])),
+                disabled_threats=list(threat_cfg.get("disabled_threats", [])),
+                max_matches_per_request=int(threat_cfg.get("max_matches_per_request", 10)),
+            )
+            self._threat_matcher = ThreatMatcher(ti_cfg)
+        semantic_cfg = self._policy.get("semantic_cache")
+        self._semantic_cache: SemanticCache | None = None
+        if isinstance(semantic_cfg, dict) and bool(semantic_cfg.get("enabled", False)):
+            sc_cfg = SemanticCacheConfig(
+                enabled=True,
+                max_entries=int(semantic_cfg.get("max_entries", 2000)),
+                ttl_seconds=float(semantic_cfg.get("ttl_seconds", 600)),
+                simhash_threshold=int(semantic_cfg.get("simhash_threshold", 8)),
+                jaccard_threshold=float(semantic_cfg.get("jaccard_threshold", 0.6)),
+                min_content_length=int(semantic_cfg.get("min_content_length", 20)),
+                max_content_length=int(semantic_cfg.get("max_content_length", 50000)),
+                cacheable_models=list(semantic_cfg.get("cacheable_models", [])),
+                exclude_tool_calls=bool(semantic_cfg.get("exclude_tool_calls", True)),
+                track_savings=bool(semantic_cfg.get("track_savings", True)),
+            )
+            self._semantic_cache = SemanticCache(sc_cfg)
         compliance_cfg = self._policy.get("compliance")
         self._compliance_cfg = compliance_cfg if isinstance(compliance_cfg, dict) else {}
         framework_tokens = self._compliance_cfg.get("frameworks", ["owasp_llm_top10", "nist_ai_rmf"])
@@ -1871,6 +1984,12 @@ class LLMHTTPProxy:
             payload["task_tracking"] = task_stats
         if self._compliance_engine is not None:
             payload["compliance"] = self._compliance_engine.get_stats()
+        if self._context_engine is not None:
+            payload["context_engine"] = self._context_engine.get_stats()
+        if self._threat_matcher is not None:
+            payload["threat_intel"] = self._threat_matcher.get_stats()
+        if self._semantic_cache is not None:
+            payload["semantic_cache"] = self._semantic_cache.get_stats()
         thread_queue = 0
         if isinstance(self._server, PooledThreadHTTPServer):
             try:
@@ -2163,6 +2282,50 @@ class LLMHTTPProxy:
             return
         if path == "/stats":
             self._send_json(handler, 200, self.stats)
+            return
+        if path == "/api/threats" or path == "/api/threats/":
+            if self._threat_matcher is None:
+                self._send_json(handler, 200, {"threats": []})
+                return
+            category = (query_params.get("category") or [""])[0]
+            severity = (query_params.get("severity") or [""])[0]
+            threats = self._threat_matcher.list_threats(
+                category=str(category) if category else "",
+                severity=str(severity) if severity else "",
+            )
+            self._send_json(handler, 200, {"threats": threats})
+            return
+        if path.startswith("/api/threats/") and path != "/api/threats/stats":
+            threat_id = path.split("/api/threats/", 1)[1].strip("/")
+            if self._threat_matcher is None:
+                self._send_json(handler, 404, {"error": "threat_intel_not_enabled"})
+                return
+            sig = self._threat_matcher.get_threat(threat_id)
+            if sig is None:
+                self._send_json(handler, 404, {"error": "threat_not_found", "threat_id": threat_id})
+                return
+            self._send_json(
+                handler,
+                200,
+                {
+                    "threat_id": sig.threat_id,
+                    "name": sig.name,
+                    "category": sig.category.value,
+                    "severity": sig.severity.value,
+                    "description": sig.description,
+                    "detection": sig.detection,
+                    "mitigation": sig.mitigation,
+                    "owasp_ref": sig.owasp_ref,
+                    "mitre_ref": sig.mitre_ref,
+                    "references": list(sig.references),
+                },
+            )
+            return
+        if path == "/api/threats/stats":
+            if self._threat_matcher is None:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            self._send_json(handler, 200, self._threat_matcher.get_stats())
             return
         if path == "/api/dashboard/overview":
             self._send_json(handler, 200, self._build_dashboard_overview())
@@ -2638,6 +2801,66 @@ class LLMHTTPProxy:
                 return False
         return True
 
+    def _phase_threat_intel(self, ctx: _RequestContext) -> bool:
+        """Scan request against threat intelligence database."""
+        if self._threat_matcher is None or not self._threat_matcher._config.enabled:
+            return True
+        messages = ctx.body.get("messages", [])
+        if not isinstance(messages, list):
+            messages = []
+        tools = [
+            str(t.get("name", ""))
+            for t in ctx.body.get("tools", [])
+            if isinstance(t, dict) and t.get("name")
+        ]
+        parsed = ctx.parsed_req
+        tool_calls: list[dict[str, Any]] = []
+        if parsed and hasattr(parsed, "tool_calls"):
+            for tc in parsed.tool_calls:
+                name = getattr(tc, "name", None) or (tc.get("name") if isinstance(tc, dict) else "")
+                inp = getattr(tc, "params", None) or getattr(tc, "input", None)
+                if inp is None and isinstance(tc, dict):
+                    inp = tc.get("input", tc.get("params", {}))
+                tool_calls.append({"name": str(name) if name else "", "input": inp or {}})
+        model = str(ctx.body.get("model", ""))
+        headers_dict: dict[str, str] = {}
+        if hasattr(ctx.handler, "headers"):
+            h = ctx.handler.headers
+            if hasattr(h, "items"):
+                headers_dict = dict(h)
+            elif hasattr(h, "keys"):
+                headers_dict = {k: h.get(k, "") for k in h.keys()}
+        matches = self._threat_matcher.scan_request(
+            messages=messages,
+            tools=tools,
+            tool_calls=tool_calls,
+            model=model,
+            headers=headers_dict or None,
+        )
+        if not matches:
+            return True
+        ctx.threat_matches = matches
+        for match in matches:
+            if match.action == "block":
+                self._inc("blocked")
+                self._send_json(
+                    ctx.handler,
+                    403,
+                    {
+                        "error": "threat_detected",
+                        "threat_id": match.threat_id,
+                        "name": match.name,
+                        "severity": match.severity,
+                        "description": match.description,
+                        "mitigation": match.mitigation,
+                    },
+                )
+                return False
+        threat_ids = ",".join(m.threat_id for m in matches)
+        ctx.session_headers["X-Orchesis-Threat-Detected"] = threat_ids
+        ctx.session_headers["X-Orchesis-Threat-Severity"] = matches[0].severity
+        return True
+
     def _phase_policy(self, ctx: _RequestContext) -> bool:
         for call in ctx.parsed_req.tool_calls:
             eval_request = {
@@ -2700,6 +2923,28 @@ class LLMHTTPProxy:
                         },
                     )
                     return False
+        return True
+
+    def _phase_context(self, ctx: _RequestContext) -> bool:
+        """Optimize context window before sending to LLM."""
+        if self._context_engine is None or not self._context_engine.enabled:
+            return True
+        messages = ctx.body.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return True
+        max_tokens = int(ctx.body.get("max_tokens", 0) or 0)
+        model = str(ctx.body.get("model", ""))
+        result = self._context_engine.optimize(
+            messages=messages,
+            model=model,
+            max_tokens=max_tokens,
+        )
+        ctx.body["messages"] = result.messages
+        if result.tokens_saved > 0:
+            ctx.session_headers["X-Orchesis-Context-Tokens-Saved"] = str(result.tokens_saved)
+            ctx.session_headers["X-Orchesis-Context-Strategies"] = ",".join(result.strategies_applied)
+        ctx.context_tokens_saved = result.tokens_saved
+        ctx.context_strategies = result.strategies_applied
         return True
 
     def _is_streaming_request(self, ctx: _RequestContext) -> bool:
@@ -2872,6 +3117,28 @@ class LLMHTTPProxy:
 
     def _phase_upstream(self, ctx: _RequestContext) -> bool:
         ctx.provider = self._detect_provider(ctx.parsed_req.provider, ctx.handler.headers)
+        if (
+            self._semantic_cache is not None
+            and self._semantic_cache._config.enabled
+            and not self._is_streaming_request(ctx)
+        ):
+            messages = ctx.body.get("messages", [])
+            if isinstance(messages, list) and messages:
+                model = str(ctx.body.get("model", ""))
+                tools = [
+                    str(t.get("name", ""))
+                    for t in ctx.body.get("tools", [])
+                    if isinstance(t, dict) and t.get("name")
+                ]
+                cache_result = self._semantic_cache.lookup(messages, model, tools or None)
+                if cache_result.hit:
+                    ctx.resp_body = cache_result.response_body
+                    ctx.resp_status = 200
+                    ctx.resp_headers = {}
+                    ctx.from_semantic_cache = True
+                    ctx.session_headers["X-Orchesis-Cache"] = cache_result.match_type
+                    ctx.session_headers["X-Orchesis-Cache-Similarity"] = f"{cache_result.similarity:.2f}"
+                    return True
         upstream_base = self._get_upstream(ctx.provider, ctx.handler.headers)
         upstream_url = f"{upstream_base.rstrip('/')}{ctx.handler.path}"
         payload = json.dumps(ctx.body, ensure_ascii=False).encode("utf-8")
@@ -3055,10 +3322,41 @@ class LLMHTTPProxy:
                 experiment_id=ctx.experiment_id,
                 variant_name=ctx.variant_name,
             )
+            should_finalize = False
             if stop_reason == "end_turn":
+                should_finalize = True
+            elif ctx.was_loop_detected:
+                should_finalize = True
+            elif ctx.resp_status >= 400:
+                state = self._experiment_manager._task_tracker.get_session_state(session_id)
+                if state and state.consecutive_errors >= self._experiment_manager._task_tracker._config.consecutive_errors_threshold:
+                    should_finalize = True
+
+            if should_finalize:
                 outcome = self._experiment_manager._task_tracker.finalize_session(session_id)
                 if ctx.experiment_id and ctx.variant_name:
                     self._experiment_manager.record_task_outcome(ctx.experiment_id, ctx.variant_name, outcome)
+        if (
+            self._semantic_cache is not None
+            and ctx.resp_status == 200
+            and not ctx.from_semantic_cache
+            and not ctx.is_streaming
+        ):
+            messages = ctx.body.get("messages", [])
+            if isinstance(messages, list) and messages:
+                model = str(ctx.body.get("model", ""))
+                tools = [
+                    str(t.get("name", ""))
+                    for t in ctx.body.get("tools", [])
+                    if isinstance(t, dict) and t.get("name")
+                ]
+                tokens = 0
+                if ctx.parsed_resp_obj is not None:
+                    tokens = int(getattr(ctx.parsed_resp_obj, "input_tokens", 0) or 0) + int(
+                        getattr(ctx.parsed_resp_obj, "output_tokens", 0) or 0
+                    )
+                cost = float(ctx.proc_result.get("cost", 0.0))
+                self._semantic_cache.store(messages, model, tools or None, ctx.resp_body, tokens, cost)
         return True
 
     def _finalize_response_recording(self, ctx: _RequestContext) -> None:
@@ -3110,7 +3408,11 @@ class LLMHTTPProxy:
             ctx.handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
             ctx.handler.send_header("X-Orchesis-Cascade-Level", ctx.cascade_level_name)
             ctx.handler.send_header("X-Orchesis-Cascade-Model", str(ctx.body.get("model", ctx.original_model)))
-            ctx.handler.send_header("X-Orchesis-Cache", ctx.cascade_cache_state)
+            if ctx.from_semantic_cache:
+                ctx.handler.send_header("X-Orchesis-Cache", ctx.session_headers.get("X-Orchesis-Cache", "semantic"))
+                ctx.handler.send_header("X-Orchesis-Cache-Similarity", ctx.session_headers.get("X-Orchesis-Cache-Similarity", "1.00"))
+            else:
+                ctx.handler.send_header("X-Orchesis-Cache", ctx.cascade_cache_state)
             ctx.handler.send_header("X-Orchesis-Circuit", self._circuit_breaker.get_state().lower().replace("_", "-"))
             if self._recorder is not None:
                 ctx.handler.send_header("X-Orchesis-Session-Id", ctx.session_id)
@@ -3121,6 +3423,12 @@ class LLMHTTPProxy:
                 ctx.handler.send_header("X-Orchesis-Variant", ctx.variant_name)
             if ctx.loop_warning_header:
                 ctx.handler.send_header("X-Orchesis-Loop-Warning", ctx.loop_warning_header)
+            if ctx.context_tokens_saved > 0:
+                ctx.handler.send_header("X-Orchesis-Context-Tokens-Saved", str(ctx.context_tokens_saved))
+                ctx.handler.send_header("X-Orchesis-Context-Strategies", ",".join(ctx.context_strategies))
+            if ctx.threat_matches:
+                ctx.handler.send_header("X-Orchesis-Threat-Detected", ",".join(m.threat_id for m in ctx.threat_matches))
+                ctx.handler.send_header("X-Orchesis-Threat-Severity", ctx.threat_matches[0].severity)
             if self._behavioral_detector.enabled:
                 ctx.handler.send_header("X-Orchesis-Behavior", ctx.behavior_header)
                 if ctx.behavior_score_header:
@@ -3222,9 +3530,13 @@ class LLMHTTPProxy:
                 return
             if not self._phase_policy(ctx):
                 return
+            if not self._phase_threat_intel(ctx):
+                return
             if not self._phase_model_router(ctx):
                 return
             if not self._phase_secrets(ctx):
+                return
+            if not self._phase_context(ctx):
                 return
             if not self._phase_upstream(ctx):
                 return

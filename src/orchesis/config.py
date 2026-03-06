@@ -790,6 +790,71 @@ def _normalize_compliance(policy: dict[str, Any]) -> None:
     policy["compliance"] = raw
 
 
+def _normalize_threat_intel(policy: dict[str, Any]) -> None:
+    raw = policy.get("threat_intel")
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("threat_intel must be a mapping")
+    raw["enabled"] = bool(raw.get("enabled", False))
+    raw["default_action"] = str(raw.get("default_action", "warn")).lower()
+    if raw["default_action"] not in ("block", "warn", "log", "quarantine"):
+        raw["default_action"] = "warn"
+    sev = raw.get("severity_actions")
+    if isinstance(sev, dict):
+        raw["severity_actions"] = {str(k).lower(): str(v).lower() for k, v in sev.items()}
+    else:
+        raw["severity_actions"] = {}
+    custom = raw.get("custom_signatures")
+    raw["custom_signatures"] = [c for c in custom if isinstance(c, dict)] if isinstance(custom, list) else []
+    disabled = raw.get("disabled_threats")
+    raw["disabled_threats"] = [str(d) for d in disabled if d] if isinstance(disabled, list) else []
+    raw["max_matches_per_request"] = max(1, int(raw.get("max_matches_per_request", 10)))
+    policy["threat_intel"] = raw
+
+
+def _normalize_semantic_cache(policy: dict[str, Any]) -> None:
+    raw = policy.get("semantic_cache")
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("semantic_cache must be a mapping")
+    raw["enabled"] = bool(raw.get("enabled", False))
+    raw["max_entries"] = max(1, int(raw.get("max_entries", 2000)))
+    raw["ttl_seconds"] = max(1.0, float(raw.get("ttl_seconds", 600)))
+    raw["simhash_threshold"] = max(0, min(64, int(raw.get("simhash_threshold", 8))))
+    raw["jaccard_threshold"] = max(0.0, min(1.0, float(raw.get("jaccard_threshold", 0.6))))
+    raw["min_content_length"] = max(0, int(raw.get("min_content_length", 20)))
+    raw["max_content_length"] = max(100, int(raw.get("max_content_length", 50000)))
+    cacheable = raw.get("cacheable_models")
+    raw["cacheable_models"] = [str(m) for m in cacheable if m] if isinstance(cacheable, list) else []
+    raw["exclude_tool_calls"] = bool(raw.get("exclude_tool_calls", True))
+    raw["track_savings"] = bool(raw.get("track_savings", True))
+    policy["semantic_cache"] = raw
+
+
+def _normalize_context_engine(policy: dict[str, Any]) -> None:
+    raw = policy.get("context_engine")
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("context_engine must be a mapping")
+    raw["enabled"] = bool(raw.get("enabled", False))
+    strategies = raw.get("strategies")
+    if isinstance(strategies, list):
+        raw["strategies"] = [str(s) for s in strategies if isinstance(s, str)]
+    else:
+        raw["strategies"] = ["dedup", "trim_tool_results", "trim_system_dups"]
+    raw["max_context_tokens"] = max(0, int(raw.get("max_context_tokens", 0)))
+    raw["token_budget_reserve"] = max(0, int(raw.get("token_budget_reserve", 4096)))
+    raw["sliding_window_size"] = max(0, int(raw.get("sliding_window_size", 0)))
+    raw["preserve_system"] = bool(raw.get("preserve_system", True))
+    raw["max_tool_result_tokens"] = max(1, int(raw.get("max_tool_result_tokens", 2000)))
+    raw["dedup_window"] = max(1, int(raw.get("dedup_window", 50)))
+    raw["track_savings"] = bool(raw.get("track_savings", True))
+    policy["context_engine"] = raw
+
+
 def _normalize_capability_constraints(raw: Any, *, key: str, index: int, section: str) -> list[str]:
     if raw is None:
         return []
@@ -889,6 +954,9 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     _normalize_experiments(loaded)
     _normalize_task_tracking(loaded)
     _normalize_compliance(loaded)
+    _normalize_threat_intel(loaded)
+    _normalize_semantic_cache(loaded)
+    _normalize_context_engine(loaded)
     _normalize_capabilities(loaded)
     return loaded
 
