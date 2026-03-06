@@ -63,6 +63,8 @@ class Variant:
     avg_turns: float = 0.0
     _turns_sum: int = 0
     _tasks_completed: int = 0
+    _latency_reservoir: list[float] = field(default_factory=list)
+    _reservoir_max: int = 1000
 
 
 @dataclass
@@ -274,30 +276,39 @@ class TaskCorrelations:
                 by_turn_count[label] = {"success_rate": data["success"] / total, "sample": total}
 
         insights: list[str] = []
-        for label, data in by_tool_count.items():
-            sr = data["success_rate"]
-            sample = data["sample"]
-            if sample >= 10:
-                for other_label, other_data in by_tool_count.items():
-                    if other_label != label and other_data["sample"] >= 10:
-                        diff = abs(sr - other_data["success_rate"])
-                        if diff >= 0.15:
-                            insights.append(
-                                f"Tasks with {label} tool calls have {sr:.0%} success rate vs "
-                                f"{other_data['success_rate']:.0%} for {other_label}"
-                            )
-                        break
-        for model, data in by_model.items():
-            if data["sample"] >= 20:
-                for other_model, other_data in by_model.items():
-                    if other_model != model and other_data["sample"] >= 20:
-                        diff = abs(data["success_rate"] - other_data["success_rate"])
-                        if diff >= 0.1:
-                            insights.append(
-                                f"{model} success rate is {data['success_rate']:.0%} vs "
-                                f"{other_data['success_rate']:.0%} for {other_model}"
-                            )
-                        break
+        if len(by_tool_count) >= 2:
+            sorted_tc = sorted(by_tool_count.items(), key=lambda x: x[1]["success_rate"])
+            worst = sorted_tc[0]
+            best = sorted_tc[-1]
+            if worst[1]["sample"] >= 10 and best[1]["sample"] >= 10:
+                diff = best[1]["success_rate"] - worst[1]["success_rate"]
+                if diff >= 0.15:
+                    insights.append(
+                        f"Tasks with {worst[0]} tool calls have {worst[1]['success_rate']:.0%} "
+                        f"success rate vs {best[1]['success_rate']:.0%} for {best[0]}"
+                    )
+        if len(by_model) >= 2:
+            sorted_m = sorted(by_model.items(), key=lambda x: x[1]["success_rate"])
+            worst_m = sorted_m[0]
+            best_m = sorted_m[-1]
+            if worst_m[1]["sample"] >= 20 and best_m[1]["sample"] >= 20:
+                diff = best_m[1]["success_rate"] - worst_m[1]["success_rate"]
+                if diff >= 0.1:
+                    insights.append(
+                        f"{worst_m[0]} success rate is {worst_m[1]['success_rate']:.0%} vs "
+                        f"{best_m[1]['success_rate']:.0%} for {best_m[0]}"
+                    )
+        if len(by_turn_count) >= 2:
+            sorted_turns = sorted(by_turn_count.items(), key=lambda x: x[1]["success_rate"])
+            worst_t = sorted_turns[0]
+            best_t = sorted_turns[-1]
+            if worst_t[1]["sample"] >= 10 and best_t[1]["sample"] >= 10:
+                diff = best_t[1]["success_rate"] - worst_t[1]["success_rate"]
+                if diff >= 0.15:
+                    insights.append(
+                        f"Sessions with {worst_t[0]} turns have {worst_t[1]['success_rate']:.0%} "
+                        f"success rate vs {best_t[1]['success_rate']:.0%} for {best_t[0]}"
+                    )
 
         return {
             "by_model": by_model,
@@ -423,9 +434,8 @@ class ExperimentManager:
 
     def __init__(self, config: Optional[ExperimentConfig] = None) -> None:
         self._config = config or ExperimentConfig()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._experiments: dict[str, Experiment] = {}
-        self._assignments: dict[str, str] = {}
         self._task_tracker = TaskTracker(config)
         self._rng = random.Random()
 
@@ -516,9 +526,6 @@ class ExperimentManager:
         with self._lock:
             if experiment_id in self._experiments:
                 del self._experiments[experiment_id]
-                keys_to_remove = [k for k, v in self._assignments.items() if v == experiment_id]
-                for k in keys_to_remove:
-                    del self._assignments[k]
                 return True
             return False
 
@@ -595,9 +602,10 @@ class ExperimentManager:
         tokens: int,
         tool_calls: int,
         is_error: bool,
-        success: bool | None = None,
         turns: int = 1,
     ) -> None:
+        """Record per-request metrics. Does NOT update success/failure counters —
+        those come from record_task_outcome() when session finalizes."""
         with self._lock:
             exp = self._experiments.get(experiment_id)
             if exp is None:
@@ -607,16 +615,15 @@ class ExperimentManager:
                     v.requests += 1
                     v.total_cost_usd += cost_usd
                     v.total_latency_ms += latency_ms
+                    v._latency_reservoir.append(latency_ms)
+                    if len(v._latency_reservoir) > v._reservoir_max:
+                        v._latency_reservoir.pop(0)
                     v.total_tokens += tokens
                     v.total_tool_calls += tool_calls
                     if is_error:
                         v.failures += 1
-                    elif success is True:
-                        v.successes += 1
-                    elif success is None and not is_error:
-                        v.successes += 1
                     v._turns_sum += turns
-                    v._tasks_completed += 1 if (success is True or (success is None and not is_error)) else 0
+                    v._tasks_completed += 1
                     if v._tasks_completed > 0:
                         v.avg_turns = v._turns_sum / v._tasks_completed
                     if self._check_auto_stop(exp):
@@ -689,7 +696,6 @@ class ExperimentManager:
             if exp is None:
                 raise ValueError("experiment not found")
         variants_stats: dict[str, VariantStats] = {}
-        latencies: dict[str, list[float]] = {}
         for v in exp.variants:
             n = v.requests
             if n == 0:
@@ -715,6 +721,13 @@ class ExperimentManager:
             avg_tc = (v.total_tool_calls / n) if n > 0 else 0.0
             avg_t = v.avg_turns
             cps = (v.total_cost_usd / v.successes) if v.successes > 0 else 0.0
+            reservoir = list(v._latency_reservoir)
+            if reservoir:
+                reservoir.sort()
+                p95_idx = int(len(reservoir) * 0.95)
+                p95 = reservoir[min(p95_idx, len(reservoir) - 1)]
+            else:
+                p95 = 0.0
             variants_stats[v.name] = VariantStats(
                 name=v.name,
                 sample_size=n,
@@ -724,11 +737,10 @@ class ExperimentManager:
                 avg_tokens=avg_tok,
                 avg_tool_calls=avg_tc,
                 avg_turns=avg_t,
-                p95_latency_ms=avg_lat,
+                p95_latency_ms=p95,
                 error_rate=err_rate,
                 cost_per_success=cps,
             )
-            latencies[v.name] = []
 
         is_sig = False
         winner = ""
@@ -744,11 +756,10 @@ class ExperimentManager:
                     winner = v0.name if v0.successes / max(1, n0) > v1.successes / max(1, n1) else v1.name
 
         best = max(exp.variants, key=lambda v: (v.successes / max(1, v.requests), -v.total_cost_usd))
-        if not winner:
-            winner = best.name
-        rec = f"Variant {winner} shows best performance."
         if is_sig:
             rec = f"Statistically significant: {winner} is recommended (confidence {confidence:.2%})."
+        else:
+            rec = f"Insufficient data for statistical significance. Current leader: {best.name} ({best.successes}/{max(1, best.requests)} success rate)."
         cost_comp = ""
         if len(exp.variants) >= 2:
             v0, v1 = exp.variants[0], exp.variants[1]

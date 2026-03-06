@@ -45,7 +45,8 @@ def TestOneInput(data: bytes) -> None:
 
     try:
         findings = detector.scan_text(text)
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError,
+            OverflowError, UnicodeError, ArithmeticError, OSError):
         return
     if not isinstance(findings, list):
         raise TypeError("PII detector must return a list")

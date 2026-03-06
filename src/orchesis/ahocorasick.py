@@ -62,6 +62,10 @@ class AhoCorasickMatcher:
     def search(self, text: str) -> list[Match]:
         if not self._patterns or not isinstance(text, str) or text == "":
             return []
+        try:
+            text = text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+        except Exception:
+            return []
         if not self._built:
             self.build()
         haystack = text.lower() if self._case_insensitive else text

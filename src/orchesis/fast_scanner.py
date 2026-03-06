@@ -74,6 +74,10 @@ class FastSecretScanner:
     def scan(self, text: str) -> list[dict[str, Any]]:
         if not isinstance(text, str) or text == "":
             return []
+        try:
+            text = text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+        except Exception:
+            return []
         matched_rule_names: set[str] = set()
         for match in self._matcher.search(text):
             rule_name = str(match.pattern_id).split(":", 1)[0]
@@ -148,6 +152,10 @@ class FastPIIDetector:
         severity_rank: dict[str, int],
     ) -> list[dict[str, Any]]:
         if not isinstance(text, str) or text == "":
+            return []
+        try:
+            text = text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+        except Exception:
             return []
         matched_rule_names: set[str] = set()
         for match in self._matcher.search(text):

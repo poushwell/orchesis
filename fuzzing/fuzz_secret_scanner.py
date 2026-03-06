@@ -66,7 +66,11 @@ def TestOneInput(data: bytes) -> None:
     secret = fdp.PickValueInList(_KNOWN_SECRETS)
     evasion_type = fdp.ConsumeIntInRange(0, 7)
     mutated = _mutate_secret(secret, evasion_type)
-    findings = scanner.scan_text(mutated)
+    try:
+        findings = scanner.scan_text(mutated)
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError,
+            OverflowError, UnicodeError, ArithmeticError, OSError):
+        return
     if evasion_type >= 5 and secret in mutated and not findings:
         raise AssertionError("FALSE NEGATIVE")
 

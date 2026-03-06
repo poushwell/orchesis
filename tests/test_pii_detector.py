@@ -93,3 +93,15 @@ def test_scan_text_handles_fuzzed_binary_input_gracefully() -> None:
     )
     findings = detector.scan_text(crash_input)  # type: ignore[arg-type]
     assert isinstance(findings, list)
+
+
+def test_fuzz_crash_2f4fc2fec4e() -> None:
+    """Regression: crash-2f4fc2fec4e0 — invalid UTF-8 with SSN pattern."""
+    detector = PiiDetector()
+    crash_input = (
+        b'n\xf4\x83\x91\x8d\xf4\x83\x8c\xb1\xf1\x83\xa4\xb3\xe1\x84\x80\xf4\x81\xa0\x80'
+        b' 123-45-6789t\xad\xf1\xf1\xf1\xf1\xad\xad:Int\xad\xf1\xf1\xf1\xad\xad:\xad1'
+        b'\xad\xad\xad\xadt\xad\xf1\xf1\xad\xad39"0'
+    )
+    findings = detector.scan_text(crash_input)  # type: ignore[arg-type]
+    assert isinstance(findings, list)

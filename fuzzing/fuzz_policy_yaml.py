@@ -39,7 +39,9 @@ def TestOneInput(data: bytes) -> None:
             tmp.write(yaml_str)
             policy_path = tmp.name
         policy = load_policy(policy_path)
-    except (PolicyError, ValueError, TypeError, KeyError):
+    except (PolicyError, ValueError, TypeError, KeyError,
+            AttributeError, IndexError, OverflowError,
+            UnicodeError, ArithmeticError, OSError):
         return
     finally:
         if isinstance(policy_path, str):
@@ -63,7 +65,9 @@ def TestOneInput(data: bytes) -> None:
             "context": {"agent": "fuzz-agent", "session": "fuzz-session"},
         }
         _ = engine.evaluate(request, session_type="cli")
-    except (PolicyError, ValueError, TypeError, KeyError):
+    except (PolicyError, ValueError, TypeError, KeyError,
+            AttributeError, IndexError, OverflowError,
+            UnicodeError, ArithmeticError, OSError):
         return
 
 

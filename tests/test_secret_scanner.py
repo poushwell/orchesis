@@ -100,3 +100,11 @@ def test_scan_text_handles_fuzzed_binary_input_gracefully() -> None:
     crash_input = b"1\x00\x00\xff\xff\xff],\x00\x00\x88"
     findings = scanner.scan_text(crash_input)  # type: ignore[arg-type]
     assert isinstance(findings, list)
+
+
+def test_fuzz_crash_ed9e87f9026() -> None:
+    """Regression: crash-ed9e87f90268 — null bytes + 0xff."""
+    scanner = SecretScanner()
+    crash_input = b'\x00\x00\xff\xff\x8cu,\x00\x00\x88'
+    findings = scanner.scan_text(crash_input)  # type: ignore[arg-type]
+    assert isinstance(findings, list)

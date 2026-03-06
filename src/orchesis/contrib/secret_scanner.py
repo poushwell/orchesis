@@ -154,6 +154,10 @@ def preprocess_for_scanning(text: str) -> list[str]:
         text = text.replace("\x00", "")
     except Exception:
         pass
+    try:
+        text = text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+    except Exception:
+        pass
 
     versions: list[str] = [text]
     cleaned = text
