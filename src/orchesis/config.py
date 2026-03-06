@@ -855,6 +855,35 @@ def _normalize_context_engine(policy: dict[str, Any]) -> None:
     policy["context_engine"] = raw
 
 
+def _normalize_otel_export(policy: dict[str, Any]) -> None:
+    raw = policy.get("otel_export")
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("otel_export must be a mapping")
+    raw["enabled"] = bool(raw.get("enabled", False))
+    raw["endpoint"] = str(raw.get("endpoint", "http://localhost:4318")).rstrip("/")
+    raw["traces_path"] = str(raw.get("traces_path", "/v1/traces"))
+    raw["metrics_path"] = str(raw.get("metrics_path", "/v1/metrics"))
+    headers = raw.get("headers")
+    raw["headers"] = dict(headers) if isinstance(headers, dict) else {}
+    raw["timeout_seconds"] = max(1.0, float(raw.get("timeout_seconds", 10.0)))
+    raw["batch_size"] = max(1, int(raw.get("batch_size", 50)))
+    raw["flush_interval_seconds"] = max(0.5, float(raw.get("flush_interval_seconds", 5.0)))
+    raw["max_queue_size"] = max(10, int(raw.get("max_queue_size", 2000)))
+    raw["retry_count"] = max(1, int(raw.get("retry_count", 2)))
+    raw["service_name"] = str(raw.get("service_name", "orchesis-proxy"))
+    res_attrs = raw.get("resource_attributes")
+    base_attrs = {
+        "service.name": raw["service_name"],
+        "service.version": "0.8.0",
+    }
+    if isinstance(res_attrs, dict):
+        base_attrs.update({str(k): str(v) for k, v in res_attrs.items()})
+    raw["resource_attributes"] = base_attrs
+    policy["otel_export"] = raw
+
+
 def _normalize_capability_constraints(raw: Any, *, key: str, index: int, section: str) -> list[str]:
     if raw is None:
         return []
@@ -957,6 +986,7 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     _normalize_threat_intel(loaded)
     _normalize_semantic_cache(loaded)
     _normalize_context_engine(loaded)
+    _normalize_otel_export(loaded)
     _normalize_capabilities(loaded)
     return loaded
 

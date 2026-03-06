@@ -51,7 +51,8 @@ from orchesis.loop_detector import LoopDetector
 from orchesis.metrics import MetricsCollector
 from orchesis.model_router import ModelRouter
 from orchesis.cascade import CascadeDecision, CascadeLevel, CascadeRouter
-from orchesis.otel import OTelEmitter, TraceContext
+from orchesis.otel import OTelEmitter, ProxySpanEmitter, TraceContext
+from orchesis.otel_export import OTLPExportConfig, OTLPSpanExporter
 from orchesis.policy_store import PolicyStore
 from orchesis.state import RateLimitTracker
 from orchesis.structured_log import StructuredLogger
@@ -1686,6 +1687,9 @@ class _RequestContext:
     context_strategies: list[str] = field(default_factory=list)
     threat_matches: list[Any] = field(default_factory=list)
     from_semantic_cache: bool = False
+    trace_ctx: Any = None  # TraceContext when otel enabled
+    root_span: Any = None  # SpanData when otel enabled
+    semantic_cache_type: str = ""  # "exact" or "semantic"
 
 
 class LLMHTTPProxy:
@@ -1883,6 +1887,30 @@ class LLMHTTPProxy:
                 track_savings=bool(semantic_cfg.get("track_savings", True)),
             )
             self._semantic_cache = SemanticCache(sc_cfg)
+        otel_cfg = self._policy.get("otel_export")
+        self._otlp_exporter = None
+        self._span_emitter = None
+        if isinstance(otel_cfg, dict) and bool(otel_cfg.get("enabled", False)):
+            export_cfg = OTLPExportConfig(
+                enabled=True,
+                endpoint=str(otel_cfg.get("endpoint", "http://localhost:4318")),
+                traces_path=str(otel_cfg.get("traces_path", "/v1/traces")),
+                headers=dict(otel_cfg.get("headers", {})),
+                batch_size=int(otel_cfg.get("batch_size", 50)),
+                flush_interval_seconds=float(otel_cfg.get("flush_interval_seconds", 5.0)),
+                max_queue_size=int(otel_cfg.get("max_queue_size", 2000)),
+                resource_attributes={
+                    "service.name": str(otel_cfg.get("service_name", "orchesis-proxy")),
+                    "service.version": "0.8.0",
+                    **(otel_cfg.get("resource_attributes") or {}),
+                },
+            )
+            self._otlp_exporter = OTLPSpanExporter(export_cfg)
+            self._otlp_exporter.start()
+            self._span_emitter = ProxySpanEmitter(
+                jsonl_path=".orchesis/traces.jsonl",
+                otlp_exporter=self._otlp_exporter,
+            )
         compliance_cfg = self._policy.get("compliance")
         self._compliance_cfg = compliance_cfg if isinstance(compliance_cfg, dict) else {}
         framework_tokens = self._compliance_cfg.get("frameworks", ["owasp_llm_top10", "nist_ai_rmf"])
@@ -1996,6 +2024,8 @@ class LLMHTTPProxy:
                 thread_queue = int(self._server._pool._work_queue.qsize())  # noqa: SLF001
             except Exception:
                 thread_queue = 0
+        if self._otlp_exporter is not None:
+            payload["otel_export"] = self._otlp_exporter.get_stats()
         payload["proxy_engine"] = {
             "thread_pool": {
                 "max_workers": int(self._max_workers),
@@ -2062,6 +2092,8 @@ class LLMHTTPProxy:
         self._connection_pool.close_all()
         if self._recorder is not None:
             self._recorder.close_all()
+        if self._otlp_exporter is not None:
+            self._otlp_exporter.stop()
 
     def _inc(self, field: str) -> None:
         with self._stats_lock:
@@ -2499,6 +2531,41 @@ class LLMHTTPProxy:
             self._send_json(handler, 200, report)
             return
         self._send_json(handler, 404, {"error": "Not found"})
+
+    def _run_phase_span(
+        self,
+        ctx: _RequestContext,
+        phase_name: str,
+        phase_fn: Any,
+        extra_attrs: dict[str, str | int | float | bool] | None = None,
+    ) -> bool:
+        """Run a phase and optionally emit a span. Returns phase result."""
+        if self._span_emitter is None or ctx.trace_ctx is None:
+            return phase_fn(ctx)
+        parent_id = ctx.root_span.span_id if ctx.root_span else None
+        span = self._span_emitter.create_phase_span(phase_name, ctx.trace_ctx, parent_id or "")
+        try:
+            ok = phase_fn(ctx)
+            attrs = dict(extra_attrs or {})
+            if phase_name == "cascade":
+                attrs["orchesis.cascade_level"] = getattr(ctx, "cascade_level_name", "") or ""
+                attrs["orchesis.cache_hit"] = getattr(ctx, "cascade_cache_state", "") == "hit"
+            elif phase_name == "threat_intel":
+                attrs["orchesis.threat_detected"] = bool(getattr(ctx, "threat_matches", []))
+                matches = getattr(ctx, "threat_matches", []) or []
+                attrs["orchesis.threat_ids"] = ",".join(getattr(m, "threat_id", str(m)) for m in matches[:5])[:200]
+            elif phase_name == "loop_detection":
+                attrs["orchesis.loop_detected"] = getattr(ctx, "was_loop_detected", False)
+            elif phase_name == "context":
+                attrs["orchesis.context_tokens_saved"] = getattr(ctx, "context_tokens_saved", 0)
+            elif phase_name == "post_upstream" and getattr(ctx, "from_semantic_cache", False):
+                attrs["orchesis.cache_hit"] = True
+                attrs["orchesis.cache_type"] = "semantic"
+            self._span_emitter.end_span(span, status="OK" if ok else "ERROR", attributes=attrs)
+            return ok
+        except Exception:
+            self._span_emitter.end_span(span, status="ERROR")
+            raise
 
     def _phase_parse(self, ctx: _RequestContext) -> bool:
         length = int(ctx.handler.headers.get("Content-Length", "0") or "0")
@@ -3457,6 +3524,9 @@ class LLMHTTPProxy:
             if self._recorder is not None
             else {}
         )
+        if self._span_emitter:
+            headers_dict = {k: v for k, v in handler.headers.items()}
+            ctx.trace_ctx = TraceContext.from_headers(headers_dict)
         try:
             if handler.path == "/kill":
                 self._handle_kill(handler)
@@ -3514,34 +3584,91 @@ class LLMHTTPProxy:
                 return
             if not self._phase_parse(ctx):
                 return
-            if not self._phase_experiment(ctx):
+            if self._span_emitter and ctx.trace_ctx:
+                agent_id = (
+                    ctx.handler.headers.get("X-Orchesis-Agent")
+                    or ctx.handler.headers.get("x-orchesis-agent")
+                    or ctx.behavior_agent_id
+                    or ""
+                )
+                ctx.root_span = self._span_emitter.create_request_span(
+                    ctx.trace_ctx,
+                    model=str(ctx.body.get("model", ctx.parsed_req.model or "")),
+                    provider=ctx.parsed_req.provider or "",
+                    session_id=ctx.session_id or "",
+                    agent_id=agent_id,
+                )
+            if not self._run_phase_span(ctx, "experiment", self._phase_experiment):
                 return
-            if not self._phase_flow_xray_record(ctx):
+            if not self._run_phase_span(ctx, "flow_xray_record", self._phase_flow_xray_record):
                 return
-            if not self._phase_cascade(ctx):
+            if not self._run_phase_span(ctx, "cascade", self._phase_cascade):
+                if ctx.root_span:
+                    self._span_emitter.end_span(
+                        ctx.root_span,
+                        attributes={
+                            "orchesis.cascade_level": str(getattr(ctx, "cascade_level_name", "")),
+                            "orchesis.cache_hit": bool(getattr(ctx, "cascade_cache_state", "") == "hit"),
+                        },
+                    )
                 return
-            if not self._phase_circuit_breaker(ctx):
+            def _end_root_early() -> None:
+                if ctx.root_span and self._span_emitter:
+                    self._span_emitter.end_span(
+                        ctx.root_span,
+                        status="OK",
+                        attributes={"orchesis.decision": "block"},
+                    )
+
+            if not self._run_phase_span(ctx, "circuit_breaker", self._phase_circuit_breaker):
+                _end_root_early()
                 return
-            if not self._phase_loop_detection(ctx):
+            if not self._run_phase_span(ctx, "loop_detection", self._phase_loop_detection):
+                _end_root_early()
                 return
-            if not self._phase_behavioral(ctx):
+            if not self._run_phase_span(ctx, "behavioral", self._phase_behavioral):
+                _end_root_early()
                 return
-            if not self._phase_budget(ctx):
+            if not self._run_phase_span(ctx, "budget", self._phase_budget):
+                _end_root_early()
                 return
-            if not self._phase_policy(ctx):
+            if not self._run_phase_span(ctx, "policy", self._phase_policy):
+                _end_root_early()
                 return
-            if not self._phase_threat_intel(ctx):
+            if not self._run_phase_span(ctx, "threat_intel", self._phase_threat_intel):
+                _end_root_early()
                 return
-            if not self._phase_model_router(ctx):
+            if not self._run_phase_span(ctx, "model_router", self._phase_model_router):
+                _end_root_early()
                 return
-            if not self._phase_secrets(ctx):
+            if not self._run_phase_span(ctx, "secrets", self._phase_secrets):
+                _end_root_early()
                 return
-            if not self._phase_context(ctx):
+            if not self._run_phase_span(ctx, "context", self._phase_context):
+                _end_root_early()
                 return
-            if not self._phase_upstream(ctx):
+            if not self._run_phase_span(ctx, "upstream", self._phase_upstream):
+                _end_root_early()
                 return
-            if not self._phase_post_upstream(ctx):
+            if not self._run_phase_span(ctx, "post_upstream", self._phase_post_upstream):
+                _end_root_early()
                 return
+            if ctx.root_span:
+                cost = (ctx.proc_result or {}).get("cost", 0.0) if isinstance(ctx.proc_result, dict) else 0.0
+                parsed = ctx.parsed_resp_obj
+                self._span_emitter.end_span(
+                    ctx.root_span,
+                    attributes={
+                        "gen_ai.response.model": str(ctx.body.get("model", "")),
+                        "gen_ai.usage.input_tokens": getattr(parsed, "input_tokens", 0) if parsed else 0,
+                        "gen_ai.usage.output_tokens": getattr(parsed, "output_tokens", 0) if parsed else 0,
+                        "gen_ai.response.finish_reasons": getattr(parsed, "stop_reason", "") if parsed else "",
+                        "orchesis.cost_usd": float(cost) if isinstance(ctx.proc_result, dict) else 0.0,
+                        "orchesis.decision": "allow",
+                        "orchesis.experiment_id": getattr(ctx, "experiment_id", "") or "",
+                        "orchesis.variant_name": getattr(ctx, "variant_name", "") or "",
+                    },
+                )
             self._phase_send_response(ctx)
         except Exception as error:  # noqa: BLE001
             _HTTP_PROXY_LOGGER.exception("proxy runtime error")
