@@ -178,6 +178,148 @@ class PooledThreadHTTPServer(HTTPServer):
 _SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
 
+@dataclass
+class ProxyComponents:
+    """Shared policy-driven component instances used by both proxy classes."""
+
+    behavioral_detector: BehavioralDetector
+    recorder: SessionRecorder | None
+    context_engine: ContextEngine | None
+    threat_matcher: ThreatMatcher | None
+    semantic_cache: SemanticCache | None
+    compliance_engine: ComplianceEngine
+    flow_tracker: FlowAnalyzer | None
+
+
+def _resolve_compliance_frameworks(compliance_cfg: dict[str, Any]) -> list[Framework]:
+    tokens = compliance_cfg.get("frameworks", ["owasp_llm_top10", "nist_ai_rmf"])
+    resolved: list[Framework] = []
+    if isinstance(tokens, list):
+        for token in tokens:
+            framework = ComplianceEngine._framework_from_alias(token if isinstance(token, str) else None)
+            if framework is not None and framework not in resolved:
+                resolved.append(framework)
+    if not resolved:
+        resolved = [Framework.OWASP_LLM_TOP_10, Framework.NIST_AI_RMF]
+    return resolved
+
+
+def _init_components(policy: dict[str, Any], *, policy_path: str = "policy.yaml") -> ProxyComponents:
+    """Initialize shared proxy components from policy configuration."""
+    behavioral_cfg = policy.get("behavioral_fingerprint")
+    behavioral_cfg = behavioral_cfg if isinstance(behavioral_cfg, dict) else {}
+    behavioral_detector = BehavioralDetector(behavioral_cfg)
+
+    recording_cfg = policy.get("recording")
+    recording_cfg = recording_cfg if isinstance(recording_cfg, dict) else {}
+    recorder = (
+        SessionRecorder(
+            storage_path=str(recording_cfg.get("storage_path", ".orchesis/sessions")),
+            compress=bool(recording_cfg.get("compress", True)),
+            max_file_size_mb=int(recording_cfg.get("max_file_size_mb", 10)),
+        )
+        if bool(recording_cfg.get("enabled", False))
+        else None
+    )
+
+    context_engine: ContextEngine | None = None
+    context_cfg = policy.get("context_engine")
+    if isinstance(context_cfg, dict) and bool(context_cfg.get("enabled", False)):
+        cfg = ContextConfig(
+            enabled=True,
+            strategies=list(context_cfg.get("strategies", ["dedup", "trim_tool_results", "trim_system_dups"])),
+            max_context_tokens=int(context_cfg.get("max_context_tokens", 0)),
+            token_budget_reserve=int(context_cfg.get("token_budget_reserve", 4096)),
+            sliding_window_size=int(context_cfg.get("sliding_window_size", 0)),
+            preserve_system=bool(context_cfg.get("preserve_system", True)),
+            max_tool_result_tokens=int(context_cfg.get("max_tool_result_tokens", 2000)),
+            dedup_window=int(context_cfg.get("dedup_window", 50)),
+            track_savings=bool(context_cfg.get("track_savings", True)),
+        )
+        context_engine = ContextEngine(cfg)
+
+    threat_matcher: ThreatMatcher | None = None
+    threat_cfg = policy.get("threat_intel")
+    if isinstance(threat_cfg, dict) and bool(threat_cfg.get("enabled", False)):
+        default_severity = {
+            "critical": "block",
+            "high": "warn",
+            "medium": "log",
+            "low": "log",
+            "info": "log",
+        }
+        policy_sev = threat_cfg.get("severity_actions")
+        if isinstance(policy_sev, dict):
+            default_severity = {**default_severity, **policy_sev}
+        ti_cfg = ThreatIntelConfig(
+            enabled=True,
+            default_action=str(threat_cfg.get("default_action", "warn")),
+            severity_actions=default_severity,
+            custom_signatures=list(threat_cfg.get("custom_signatures", [])),
+            disabled_threats=list(threat_cfg.get("disabled_threats", [])),
+            max_matches_per_request=int(threat_cfg.get("max_matches_per_request", 10)),
+        )
+        threat_matcher = ThreatMatcher(ti_cfg)
+
+    semantic_cache: SemanticCache | None = None
+    semantic_cfg = policy.get("semantic_cache")
+    if isinstance(semantic_cfg, dict) and bool(semantic_cfg.get("enabled", False)):
+        sc_cfg = SemanticCacheConfig(
+            enabled=True,
+            max_entries=int(semantic_cfg.get("max_entries", 2000)),
+            ttl_seconds=float(semantic_cfg.get("ttl_seconds", 600)),
+            simhash_threshold=int(semantic_cfg.get("simhash_threshold", 8)),
+            jaccard_threshold=float(semantic_cfg.get("jaccard_threshold", 0.6)),
+            min_content_length=int(semantic_cfg.get("min_content_length", 20)),
+            max_content_length=int(semantic_cfg.get("max_content_length", 50000)),
+            cacheable_models=list(semantic_cfg.get("cacheable_models", [])),
+            exclude_tool_calls=bool(semantic_cfg.get("exclude_tool_calls", True)),
+            track_savings=bool(semantic_cfg.get("track_savings", True)),
+        )
+        semantic_cache = SemanticCache(sc_cfg)
+
+    flow_cfg = policy.get("flow_xray")
+    flow_cfg = flow_cfg if isinstance(flow_cfg, dict) else {}
+    flow_tracker: FlowAnalyzer | None = (
+        FlowAnalyzer(
+            FlowXRayConfig(
+                enabled=bool(flow_cfg.get("enabled", False)),
+                max_sessions=int(flow_cfg.get("max_sessions", 1000)),
+                redundancy_window_seconds=float(flow_cfg.get("redundancy_window_seconds", 30.0)),
+                retry_threshold=int(flow_cfg.get("retry_threshold", 3)),
+                ping_pong_min_repetitions=int(flow_cfg.get("ping_pong_min_repetitions", 3)),
+                token_waste_stddev_threshold=float(flow_cfg.get("token_waste_stddev_threshold", 2.0)),
+                latency_spike_threshold=float(flow_cfg.get("latency_spike_threshold", 0.5)),
+                suspicious_tool_chains=flow_cfg.get("suspicious_tool_chains", []),
+                enable_security_patterns=bool(flow_cfg.get("enable_security_patterns", True)),
+                enable_efficiency_patterns=bool(flow_cfg.get("enable_efficiency_patterns", True)),
+                enable_performance_patterns=bool(flow_cfg.get("enable_performance_patterns", True)),
+            )
+        )
+        if bool(flow_cfg.get("enabled", False))
+        else None
+    )
+
+    compliance_cfg = policy.get("compliance")
+    compliance_cfg = compliance_cfg if isinstance(compliance_cfg, dict) else {}
+    compliance_engine = ComplianceEngine(
+        policy_path=policy_path or "policy.yaml",
+        frameworks=_resolve_compliance_frameworks(compliance_cfg),
+        max_findings=int(compliance_cfg.get("max_findings", 10000)),
+        enabled=bool(compliance_cfg.get("enabled", True)),
+    )
+
+    return ProxyComponents(
+        behavioral_detector=behavioral_detector,
+        recorder=recorder,
+        context_engine=context_engine,
+        threat_matcher=threat_matcher,
+        semantic_cache=semantic_cache,
+        compliance_engine=compliance_engine,
+        flow_tracker=flow_tracker,
+    )
+
+
 class OrchesisProxy:
     """Asyncio HTTP proxy that can enforce Orchesis policy checks."""
 
@@ -191,88 +333,20 @@ class OrchesisProxy:
         self._server: asyncio.base_events.Server | None = None
         behavioral_cfg = self._policy.get("behavioral_fingerprint")
         self._behavioral_cfg = behavioral_cfg if isinstance(behavioral_cfg, dict) else {}
-        self._behavioral_detector = BehavioralDetector(self._behavioral_cfg)
         recording_cfg = self._policy.get("recording")
         self._recording_cfg = recording_cfg if isinstance(recording_cfg, dict) else {}
-        self._recorder = (
-            SessionRecorder(
-                storage_path=str(self._recording_cfg.get("storage_path", ".orchesis/sessions")),
-                compress=bool(self._recording_cfg.get("compress", True)),
-                max_file_size_mb=int(self._recording_cfg.get("max_file_size_mb", 10)),
-            )
-            if bool(self._recording_cfg.get("enabled", False))
-            else None
-        )
-        context_cfg = self._policy.get("context_engine")
-        self._context_engine: ContextEngine | None = None
-        if isinstance(context_cfg, dict) and bool(context_cfg.get("enabled", False)):
-            cfg = ContextConfig(
-                enabled=True,
-                strategies=list(context_cfg.get("strategies", ["dedup", "trim_tool_results", "trim_system_dups"])),
-                max_context_tokens=int(context_cfg.get("max_context_tokens", 0)),
-                token_budget_reserve=int(context_cfg.get("token_budget_reserve", 4096)),
-                sliding_window_size=int(context_cfg.get("sliding_window_size", 0)),
-                preserve_system=bool(context_cfg.get("preserve_system", True)),
-                max_tool_result_tokens=int(context_cfg.get("max_tool_result_tokens", 2000)),
-                dedup_window=int(context_cfg.get("dedup_window", 50)),
-                track_savings=bool(context_cfg.get("track_savings", True)),
-            )
-            self._context_engine = ContextEngine(cfg)
-        threat_cfg = self._policy.get("threat_intel")
-        self._threat_matcher: ThreatMatcher | None = None
-        if isinstance(threat_cfg, dict) and bool(threat_cfg.get("enabled", False)):
-            default_severity = {
-                "critical": "block",
-                "high": "warn",
-                "medium": "log",
-                "low": "log",
-                "info": "log",
-            }
-            policy_sev = threat_cfg.get("severity_actions")
-            if isinstance(policy_sev, dict):
-                default_severity = {**default_severity, **policy_sev}
-            ti_cfg = ThreatIntelConfig(
-                enabled=True,
-                default_action=str(threat_cfg.get("default_action", "warn")),
-                severity_actions=default_severity,
-                custom_signatures=list(threat_cfg.get("custom_signatures", [])),
-                disabled_threats=list(threat_cfg.get("disabled_threats", [])),
-                max_matches_per_request=int(threat_cfg.get("max_matches_per_request", 10)),
-            )
-            self._threat_matcher = ThreatMatcher(ti_cfg)
-        semantic_cfg = self._policy.get("semantic_cache")
-        self._semantic_cache: SemanticCache | None = None
-        if isinstance(semantic_cfg, dict) and bool(semantic_cfg.get("enabled", False)):
-            sc_cfg = SemanticCacheConfig(
-                enabled=True,
-                max_entries=int(semantic_cfg.get("max_entries", 2000)),
-                ttl_seconds=float(semantic_cfg.get("ttl_seconds", 600)),
-                simhash_threshold=int(semantic_cfg.get("simhash_threshold", 8)),
-                jaccard_threshold=float(semantic_cfg.get("jaccard_threshold", 0.6)),
-                min_content_length=int(semantic_cfg.get("min_content_length", 20)),
-                max_content_length=int(semantic_cfg.get("max_content_length", 50000)),
-                cacheable_models=list(semantic_cfg.get("cacheable_models", [])),
-                exclude_tool_calls=bool(semantic_cfg.get("exclude_tool_calls", True)),
-                track_savings=bool(semantic_cfg.get("track_savings", True)),
-            )
-            self._semantic_cache = SemanticCache(sc_cfg)
         compliance_cfg = self._policy.get("compliance")
         self._compliance_cfg = compliance_cfg if isinstance(compliance_cfg, dict) else {}
-        framework_tokens = self._compliance_cfg.get("frameworks", ["owasp_llm_top10", "nist_ai_rmf"])
-        resolved_frameworks: list[Framework] = []
-        if isinstance(framework_tokens, list):
-            for token in framework_tokens:
-                framework = ComplianceEngine._framework_from_alias(token if isinstance(token, str) else None)
-                if framework is not None and framework not in resolved_frameworks:
-                    resolved_frameworks.append(framework)
-        if not resolved_frameworks:
-            resolved_frameworks = [Framework.OWASP_LLM_TOP_10, Framework.NIST_AI_RMF]
-        self._compliance_engine = ComplianceEngine(
-            policy_path="policy.yaml",
-            frameworks=resolved_frameworks,
-            max_findings=int(self._compliance_cfg.get("max_findings", 10000)),
-            enabled=bool(self._compliance_cfg.get("enabled", True)),
-        )
+        flow_cfg = self._policy.get("flow_xray")
+        self._flow_cfg = flow_cfg if isinstance(flow_cfg, dict) else {}
+        components = _init_components(self._policy, policy_path="policy.yaml")
+        self._behavioral_detector = components.behavioral_detector
+        self._recorder = components.recorder
+        self._context_engine = components.context_engine
+        self._threat_matcher = components.threat_matcher
+        self._semantic_cache = components.semantic_cache
+        self._compliance_engine = components.compliance_engine
+        self._flow_tracker = components.flow_tracker
         self._compliance_enabled = bool(self._compliance_cfg.get("enabled", True))
         proxy_cfg = self._policy.get("proxy") if isinstance(self._policy.get("proxy"), dict) else {}
         secret_cfg = proxy_cfg.get("secret_scanning") if isinstance(proxy_cfg.get("secret_scanning"), dict) else {}
@@ -1822,25 +1896,6 @@ class LLMHTTPProxy:
         )
         flow_cfg_raw = self._policy.get("flow_xray")
         self._flow_cfg = flow_cfg_raw if isinstance(flow_cfg_raw, dict) else {}
-        self._flow_analyzer = (
-            FlowAnalyzer(
-                FlowXRayConfig(
-                    enabled=bool(self._flow_cfg.get("enabled", False)),
-                    max_sessions=int(self._flow_cfg.get("max_sessions", 1000)),
-                    redundancy_window_seconds=float(self._flow_cfg.get("redundancy_window_seconds", 30.0)),
-                    retry_threshold=int(self._flow_cfg.get("retry_threshold", 3)),
-                    ping_pong_min_repetitions=int(self._flow_cfg.get("ping_pong_min_repetitions", 3)),
-                    token_waste_stddev_threshold=float(self._flow_cfg.get("token_waste_stddev_threshold", 2.0)),
-                    latency_spike_threshold=float(self._flow_cfg.get("latency_spike_threshold", 0.5)),
-                    suspicious_tool_chains=self._flow_cfg.get("suspicious_tool_chains", []),
-                    enable_security_patterns=bool(self._flow_cfg.get("enable_security_patterns", True)),
-                    enable_efficiency_patterns=bool(self._flow_cfg.get("enable_efficiency_patterns", True)),
-                    enable_performance_patterns=bool(self._flow_cfg.get("enable_performance_patterns", True)),
-                )
-            )
-            if bool(self._flow_cfg.get("enabled", False))
-            else None
-        )
         exp_cfg_raw = self._policy.get("experiments")
         task_cfg_raw = self._policy.get("task_tracking")
         exp_cfg = exp_cfg_raw if isinstance(exp_cfg_raw, dict) else {}
@@ -1860,71 +1915,18 @@ class LLMHTTPProxy:
             self._experiment_manager = ExperimentManager(cfg)
         behavioral_cfg = self._policy.get("behavioral_fingerprint")
         self._behavioral_cfg = behavioral_cfg if isinstance(behavioral_cfg, dict) else {}
-        self._behavioral_detector = BehavioralDetector(self._behavioral_cfg)
         recording_cfg = self._policy.get("recording")
         self._recording_cfg = recording_cfg if isinstance(recording_cfg, dict) else {}
-        self._recorder = (
-            SessionRecorder(
-                storage_path=str(self._recording_cfg.get("storage_path", ".orchesis/sessions")),
-                compress=bool(self._recording_cfg.get("compress", True)),
-                max_file_size_mb=int(self._recording_cfg.get("max_file_size_mb", 10)),
-            )
-            if bool(self._recording_cfg.get("enabled", False))
-            else None
-        )
-        context_cfg = self._policy.get("context_engine")
-        self._context_engine: ContextEngine | None = None
-        if isinstance(context_cfg, dict) and bool(context_cfg.get("enabled", False)):
-            cfg = ContextConfig(
-                enabled=True,
-                strategies=list(context_cfg.get("strategies", ["dedup", "trim_tool_results", "trim_system_dups"])),
-                max_context_tokens=int(context_cfg.get("max_context_tokens", 0)),
-                token_budget_reserve=int(context_cfg.get("token_budget_reserve", 4096)),
-                sliding_window_size=int(context_cfg.get("sliding_window_size", 0)),
-                preserve_system=bool(context_cfg.get("preserve_system", True)),
-                max_tool_result_tokens=int(context_cfg.get("max_tool_result_tokens", 2000)),
-                dedup_window=int(context_cfg.get("dedup_window", 50)),
-                track_savings=bool(context_cfg.get("track_savings", True)),
-            )
-            self._context_engine = ContextEngine(cfg)
-        threat_cfg = self._policy.get("threat_intel")
-        self._threat_matcher: ThreatMatcher | None = None
-        if isinstance(threat_cfg, dict) and bool(threat_cfg.get("enabled", False)):
-            default_severity = {
-                "critical": "block",
-                "high": "warn",
-                "medium": "log",
-                "low": "log",
-                "info": "log",
-            }
-            policy_sev = threat_cfg.get("severity_actions")
-            if isinstance(policy_sev, dict):
-                default_severity = {**default_severity, **policy_sev}
-            ti_cfg = ThreatIntelConfig(
-                enabled=True,
-                default_action=str(threat_cfg.get("default_action", "warn")),
-                severity_actions=default_severity,
-                custom_signatures=list(threat_cfg.get("custom_signatures", [])),
-                disabled_threats=list(threat_cfg.get("disabled_threats", [])),
-                max_matches_per_request=int(threat_cfg.get("max_matches_per_request", 10)),
-            )
-            self._threat_matcher = ThreatMatcher(ti_cfg)
-        semantic_cfg = self._policy.get("semantic_cache")
-        self._semantic_cache: SemanticCache | None = None
-        if isinstance(semantic_cfg, dict) and bool(semantic_cfg.get("enabled", False)):
-            sc_cfg = SemanticCacheConfig(
-                enabled=True,
-                max_entries=int(semantic_cfg.get("max_entries", 2000)),
-                ttl_seconds=float(semantic_cfg.get("ttl_seconds", 600)),
-                simhash_threshold=int(semantic_cfg.get("simhash_threshold", 8)),
-                jaccard_threshold=float(semantic_cfg.get("jaccard_threshold", 0.6)),
-                min_content_length=int(semantic_cfg.get("min_content_length", 20)),
-                max_content_length=int(semantic_cfg.get("max_content_length", 50000)),
-                cacheable_models=list(semantic_cfg.get("cacheable_models", [])),
-                exclude_tool_calls=bool(semantic_cfg.get("exclude_tool_calls", True)),
-                track_savings=bool(semantic_cfg.get("track_savings", True)),
-            )
-            self._semantic_cache = SemanticCache(sc_cfg)
+        compliance_cfg = self._policy.get("compliance")
+        self._compliance_cfg = compliance_cfg if isinstance(compliance_cfg, dict) else {}
+        components = _init_components(self._policy, policy_path=self._policy_path or "policy.yaml")
+        self._behavioral_detector = components.behavioral_detector
+        self._recorder = components.recorder
+        self._context_engine = components.context_engine
+        self._threat_matcher = components.threat_matcher
+        self._semantic_cache = components.semantic_cache
+        self._flow_analyzer = components.flow_tracker
+        self._compliance_engine = components.compliance_engine
         otel_cfg = self._policy.get("otel_export")
         self._otlp_exporter = None
         self._span_emitter = None
@@ -1949,23 +1951,6 @@ class LLMHTTPProxy:
                 jsonl_path=".orchesis/traces.jsonl",
                 otlp_exporter=self._otlp_exporter,
             )
-        compliance_cfg = self._policy.get("compliance")
-        self._compliance_cfg = compliance_cfg if isinstance(compliance_cfg, dict) else {}
-        framework_tokens = self._compliance_cfg.get("frameworks", ["owasp_llm_top10", "nist_ai_rmf"])
-        resolved_frameworks: list[Framework] = []
-        if isinstance(framework_tokens, list):
-            for token in framework_tokens:
-                resolved = ComplianceEngine._framework_from_alias(token if isinstance(token, str) else None)
-                if resolved is not None and resolved not in resolved_frameworks:
-                    resolved_frameworks.append(resolved)
-        if not resolved_frameworks:
-            resolved_frameworks = [Framework.OWASP_LLM_TOP_10, Framework.NIST_AI_RMF]
-        self._compliance_engine = ComplianceEngine(
-            policy_path=self._policy_path or "policy.yaml",
-            frameworks=resolved_frameworks,
-            max_findings=int(self._compliance_cfg.get("max_findings", 10000)),
-            enabled=bool(self._compliance_cfg.get("enabled", True)),
-        )
         self._compliance_enabled = bool(self._compliance_cfg.get("enabled", True))
         kill_cfg = self._policy.get("kill_switch")
         self._kill_cfg = kill_cfg if isinstance(kill_cfg, dict) else {}
