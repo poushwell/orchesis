@@ -99,7 +99,11 @@ def get_dashboard_html() -> str:
       color: var(--ok);
     }
     .screen { display: none; gap: 12px; }
-    .screen.active { display: grid; }
+    .screen.active { display: grid; animation: fadeIn 0.25s ease; }
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
     .grid-4 { display: grid; gap: 12px; grid-template-columns: repeat(4, minmax(160px, 1fr)); }
     .grid-2 { display: grid; gap: 12px; grid-template-columns: 1.4fr 1fr; }
     .panel {
@@ -108,6 +112,11 @@ def get_dashboard_html() -> str:
       border-radius: var(--radius);
       padding: 12px;
       backdrop-filter: blur(12px);
+      transition: border-color 0.3s ease, box-shadow 0.3s ease;
+    }
+    .panel:hover {
+      border-color: rgba(0,229,160,0.15);
+      box-shadow: 0 0 20px rgba(0,229,160,0.05);
     }
     .hero { display: grid; grid-template-columns: auto 1fr; gap: 14px; align-items: center; }
     .pulse {
@@ -120,17 +129,27 @@ def get_dashboard_html() -> str:
       border-radius: 50%;
       background: currentColor;
       opacity: 0.28;
-      animation: pulse 1.8s infinite;
+      animation: pulseRing 1.8s infinite;
     }
     .pulse::after { animation-delay: 0.9s; }
-    @keyframes pulse {
+    @keyframes pulseRing {
       from { transform: scale(1); opacity: 0.32; }
       to { transform: scale(2.2); opacity: 0; }
     }
-    .status-clear { color: var(--ok); }
+    .status-clear { color: var(--ok); animation: pulseGlow 2s ease infinite; }
     .status-monitoring { color: var(--warn); }
     .status-alert { color: var(--danger); }
-    .metric-value { font-size: 28px; font-weight: 750; }
+    @keyframes pulseGlow {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(0,229,160,0.4); }
+      50% { box-shadow: 0 0 0 12px rgba(0,229,160,0); }
+    }
+    .metric-value {
+      font-size: 28px;
+      font-weight: 750;
+      font-variant-numeric: tabular-nums;
+      transition: opacity 0.2s ease;
+    }
+    .metric-value.updating { opacity: 0.6; }
     .metric-label { color: var(--text-secondary); font-size: 12px; }
     .event-feed { max-height: 260px; overflow-y: auto; display: grid; gap: 8px; }
     .event {
@@ -142,6 +161,11 @@ def get_dashboard_html() -> str:
       grid-template-columns: auto auto 1fr;
       gap: 8px;
       align-items: center;
+    }
+    .event-item { animation: fadeSlideIn 0.3s ease; }
+    @keyframes fadeSlideIn {
+      from { opacity: 0; transform: translateY(-8px); }
+      to { opacity: 1; transform: translateY(0); }
     }
     .sev { padding: 2px 7px; border-radius: 999px; font-size: 11px; font-weight: 700; }
     .sev.info { background: rgba(90,168,255,0.15); color: var(--info); }
@@ -252,6 +276,81 @@ def get_dashboard_html() -> str:
     .outcome-abandoned { background: #6b7280; }
     .outcome-timeout { background: #eab308; }
     .outcome-escalated { background: #8b5cf6; }
+    .sparkline {
+      width: 100%;
+      height: 24px;
+      margin-top: 6px;
+      opacity: 0.7;
+    }
+    .sparkline polyline {
+      fill: none;
+      stroke: var(--ok);
+      stroke-width: 1.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .savings-panel {
+      background: linear-gradient(135deg, rgba(0,229,160,0.05) 0%, var(--panel) 60%);
+      border: 1px solid rgba(0,229,160,0.15);
+    }
+    .savings-total {
+      font-size: 28px;
+      background: linear-gradient(90deg, var(--ok), #5AA8FF);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .savings-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .savings-item {
+      background: rgba(255,255,255,0.03);
+      border-radius: var(--radius-sm);
+      padding: 10px;
+    }
+    .savings-item .label { font-size: 11px; color: var(--text-secondary); }
+    .savings-item .amount { font-size: 16px; font-weight: 600; color: var(--ok); }
+    .savings-bar {
+      height: 3px;
+      background: rgba(255,255,255,0.06);
+      border-radius: 2px;
+      margin-top: 6px;
+      overflow: hidden;
+    }
+    .savings-bar-fill {
+      height: 100%;
+      background: var(--ok);
+      border-radius: 2px;
+      transition: width 0.8s ease;
+    }
+    .flow-graph {
+      background: rgba(0,0,0,0.2);
+      border-radius: var(--radius-sm);
+      overflow: visible;
+    }
+    .flow-node {
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    .flow-node:hover { opacity: 0.8; }
+    .flow-edge {
+      stroke: rgba(255,255,255,0.15);
+      stroke-width: 1.5;
+      fill: none;
+    }
+    .flow-label {
+      fill: var(--text-secondary);
+      font-size: 10px;
+      text-anchor: middle;
+      pointer-events: none;
+    }
+    .flow-cost-label {
+      fill: var(--ok);
+      font-size: 9px;
+      text-anchor: middle;
+    }
     @media (max-width: 1100px) {
       .grid-4 { grid-template-columns: repeat(2, minmax(160px, 1fr)); }
       .grid-2 { grid-template-columns: 1fr; }
@@ -289,10 +388,26 @@ def get_dashboard_html() -> str:
         </div>
       </div>
       <div class="grid-4">
-        <div class="panel"><div class="subtle">📥 Total Requests</div><div id="m-requests" class="metric-value">0</div></div>
-        <div class="panel"><div class="subtle">🚫 Blocked / Flagged</div><div id="m-blocked" class="metric-value">0</div></div>
-        <div class="panel"><div class="subtle">💰 Total Cost USD</div><div id="m-cost" class="metric-value">$0.00</div></div>
-        <div class="panel"><div class="subtle">🤖 Active Agents</div><div id="m-agents" class="metric-value">0</div></div>
+        <div class="panel">
+          <div class="subtle">📥 Total Requests</div>
+          <div id="m-requests" class="metric-value" data-raw="0">0</div>
+          <svg id="spark-requests" class="sparkline" viewBox="0 0 60 20" preserveAspectRatio="none"></svg>
+        </div>
+        <div class="panel">
+          <div class="subtle">🚫 Blocked / Flagged</div>
+          <div id="m-blocked" class="metric-value" data-raw="0">0</div>
+          <svg id="spark-blocked" class="sparkline" viewBox="0 0 60 20" preserveAspectRatio="none"></svg>
+        </div>
+        <div class="panel">
+          <div class="subtle">💰 Total Cost USD</div>
+          <div id="m-cost" class="metric-value" data-raw="0">$0.00</div>
+          <svg id="spark-cost" class="sparkline" viewBox="0 0 60 20" preserveAspectRatio="none"></svg>
+        </div>
+        <div class="panel">
+          <div class="subtle">🤖 Active Agents</div>
+          <div id="m-agents" class="metric-value" data-raw="0">0</div>
+          <svg id="spark-agents" class="sparkline" viewBox="0 0 60 20" preserveAspectRatio="none"></svg>
+        </div>
       </div>
       <div class="grid-2">
         <div class="panel">
@@ -300,16 +415,12 @@ def get_dashboard_html() -> str:
           <div class="chart-wrap"><svg id="cost-chart" width="100%" height="220" viewBox="0 0 900 220"></svg></div>
           <div id="cost-tooltip" class="chart-tooltip"></div>
         </div>
-        <div class="panel">
-          <div><strong>Circuit Breaker</strong></div>
-          <div id="cb-list" class="subtle">No data</div>
-          <hr style="border-color: var(--border); border-width: 1px 0 0; margin: 10px 0;">
-          <div><strong>Connection Pool</strong></div>
-          <div id="pool-stats" class="subtle">No pool data</div>
-          <hr style="border-color: var(--border); border-width: 1px 0 0; margin: 10px 0;">
-          <div><strong>Budget Progress</strong></div>
-          <div id="budget-label" class="subtle">No budget configured</div>
-          <div class="progress"><div id="budget-bar" style="width:0%"></div></div>
+        <div class="panel savings-panel">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <strong>💰 Cost Savings</strong>
+            <div id="total-savings" class="metric-value savings-total" data-raw="0">$0.00</div>
+          </div>
+          <div id="savings-breakdown" class="savings-grid"></div>
         </div>
       </div>
       <div class="panel">
@@ -319,20 +430,31 @@ def get_dashboard_html() -> str:
       <div class="grid-4" style="margin-top: 12px;">
         <div class="panel">
           <div class="subtle">🔍 Threats Detected</div>
-          <div id="m-threats" class="metric-value">0</div>
+          <div id="m-threats" class="metric-value" data-raw="0">0</div>
         </div>
         <div class="panel">
           <div class="subtle">⚡ Cache Hit Rate</div>
-          <div id="m-cache-rate" class="metric-value">0%</div>
+          <div id="m-cache-rate" class="metric-value" data-raw="0">0%</div>
         </div>
         <div class="panel">
           <div class="subtle">🧪 Active Experiments</div>
-          <div id="m-experiments" class="metric-value">0</div>
+          <div id="m-experiments" class="metric-value" data-raw="0">0</div>
         </div>
         <div class="panel">
           <div class="subtle">📊 Task Success</div>
-          <div id="m-task-success" class="metric-value">0%</div>
+          <div id="m-task-success" class="metric-value" data-raw="0">0%</div>
         </div>
+      </div>
+      <div class="panel">
+        <div><strong>System Runtime</strong></div>
+        <div id="cb-list" class="subtle">No data</div>
+        <hr style="border-color: var(--border); border-width: 1px 0 0; margin: 10px 0;">
+        <div><strong>Connection Pool</strong></div>
+        <div id="pool-stats" class="subtle">No pool data</div>
+        <hr style="border-color: var(--border); border-width: 1px 0 0; margin: 10px 0;">
+        <div><strong>Budget Progress</strong></div>
+        <div id="budget-label" class="subtle">No budget configured</div>
+        <div class="progress"><div id="budget-bar" style="width:0%"></div></div>
       </div>
     </section>
 
@@ -448,9 +570,9 @@ def get_dashboard_html() -> str:
           </div>
           <div class="subtle">Critical Path: <span id="critical-path">n/a</span></div>
         </div>
-        <div class="panel">
-          <div><strong>Flow Graph (Timeline)</strong></div>
-          <div id="flow-timeline" class="timeline"></div>
+        <div class="panel" style="min-height: 300px;">
+          <div><strong>Flow Graph</strong></div>
+          <svg id="flow-graph-svg" width="100%" height="400" class="flow-graph"></svg>
         </div>
       </div>
       <div class="panel">
@@ -500,6 +622,8 @@ def get_dashboard_html() -> str:
     let currentTab = "shield";
     let pollTimer = null;
     let lastOverview = null;
+    const sparkHistory = {};
+    const SPARK_MAX = 20;
 
     function fmtNum(v){ return Number(v||0).toLocaleString(); }
     function fmtMoney(v){ return "$" + Number(v||0).toFixed(2); }
@@ -517,6 +641,64 @@ def get_dashboard_html() -> str:
       if (h > 0) return `${h}h ${m}m ${s}s`;
       if (m > 0) return `${m}m ${s}s`;
       return `${s}s`;
+    }
+    function animateValue(el, start, end, duration, formatter) {
+      if (!el) return;
+      if (start === end) {
+        el.textContent = formatter(end);
+        return;
+      }
+      const range = end - start;
+      const startTime = performance.now();
+      el.classList.add("updating");
+      function step(now) {
+        const elapsed = now - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        const current = start + range * eased;
+        el.textContent = formatter(current);
+        if (progress < 1) {
+          requestAnimationFrame(step);
+        } else {
+          el.classList.remove("updating");
+        }
+      }
+      requestAnimationFrame(step);
+    }
+    function updateAnimatedMetric(id, value, formatter, duration = 600) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const prev = Number(el.dataset.raw || "0");
+      el.dataset.raw = String(value);
+      animateValue(el, prev, Number(value || 0), duration, formatter);
+    }
+    function updateSparkline(id, value) {
+      if (!sparkHistory[id]) sparkHistory[id] = [];
+      sparkHistory[id].push(Number(value || 0));
+      if (sparkHistory[id].length > SPARK_MAX) sparkHistory[id].shift();
+      const data = sparkHistory[id];
+      const svg = document.getElementById(`spark-${id}`);
+      if (!svg || data.length < 2) return;
+      const min = Math.min(...data);
+      const max = Math.max(...data);
+      const range = max - min || 1;
+      const w = 60, h = 20;
+      const points = data.map((v, i) => {
+        const x = (i / (data.length - 1)) * w;
+        const y = h - ((v - min) / range) * (h - 2) - 1;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      }).join(" ");
+      const areaPoints = points + ` ${w},${h} 0,${h}`;
+      const lastY = (h - ((data[data.length - 1] - min) / range) * (h - 2) - 1).toFixed(1);
+      svg.innerHTML = `
+        <defs><linearGradient id="sg-${id}" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="var(--ok)" stop-opacity="0.3"/>
+          <stop offset="100%" stop-color="var(--ok)" stop-opacity="0"/>
+        </linearGradient></defs>
+        <polygon points="${areaPoints}" fill="url(#sg-${id})" opacity="0.4"/>
+        <polyline points="${points}" fill="none" stroke="var(--ok)" stroke-width="1.5" stroke-linecap="round"/>
+        <circle cx="${w}" cy="${lastY}" r="2" fill="var(--ok)"/>
+      `;
     }
 
     async function fetchData(endpoint){
@@ -620,22 +802,26 @@ def get_dashboard_html() -> str:
       lastOverview = data;
       setStatus(data.status || "clear");
       document.getElementById("hero-uptime").textContent = fmtDuration(data.uptime_seconds || 0);
-      document.getElementById("m-requests").textContent = fmtNum(data.total_requests);
       const blocked = Number(data.blocked_requests || 0);
       const total = Math.max(1, Number(data.total_requests || 0));
-      document.getElementById("m-blocked").textContent = `${fmtNum(blocked)} (${((blocked/total)*100).toFixed(1)}%)`;
-      document.getElementById("m-cost").textContent = fmtMoney(data.total_cost_usd);
-      document.getElementById("m-agents").textContent = fmtNum(data.active_agents);
+      updateAnimatedMetric("m-requests", Number(data.total_requests || 0), (v)=>Math.round(v).toLocaleString());
+      updateAnimatedMetric("m-blocked", blocked, (v)=>`${Math.round(v).toLocaleString()} (${((v/total)*100).toFixed(1)}%)`);
+      updateAnimatedMetric("m-cost", Number(data.total_cost_usd || 0), (v)=>"$" + Number(v || 0).toFixed(2));
+      updateAnimatedMetric("m-agents", Number(data.active_agents || 0), (v)=>Math.round(v).toLocaleString());
+      updateSparkline("requests", Number(data.total_requests || 0));
+      updateSparkline("blocked", blocked);
+      updateSparkline("cost", Number(data.total_cost_usd || 0));
+      updateSparkline("agents", Number(data.active_agents || 0));
 
       const ti = (stats && stats.threat_intel) ? stats.threat_intel : {};
       const sc = (stats && stats.semantic_cache) ? stats.semantic_cache : {};
       const exp = (stats && stats.experiments) ? stats.experiments : {};
       const task = (stats && stats.task_tracking) ? stats.task_tracking : {};
-      document.getElementById("m-threats").textContent = fmtNum(ti.total_matches || 0);
-      document.getElementById("m-cache-rate").textContent = (sc.hit_rate_percent != null ? sc.hit_rate_percent.toFixed(1) : "0") + "%";
-      document.getElementById("m-experiments").textContent = fmtNum(exp.active || 0);
+      updateAnimatedMetric("m-threats", Number(ti.total_matches || 0), (v)=>Math.round(v).toLocaleString());
+      updateAnimatedMetric("m-cache-rate", Number(sc.hit_rate_percent || 0), (v)=>Number(v || 0).toFixed(1) + "%");
+      updateAnimatedMetric("m-experiments", Number(exp.active || 0), (v)=>Math.round(v).toLocaleString());
       const sr = Number(task.overall_success_rate || 0);
-      document.getElementById("m-task-success").textContent = (sr * 100).toFixed(1) + "%";
+      updateAnimatedMetric("m-task-success", sr * 100, (v)=>Number(v || 0).toFixed(1) + "%");
 
       const eventsEl = document.getElementById("events");
       eventsEl.innerHTML = "";
@@ -647,7 +833,7 @@ def get_dashboard_html() -> str:
           const sev = String(ev.severity || "info").toLowerCase();
           const type = String(ev.type || "event").toUpperCase();
           const row = document.createElement("div");
-          row.className = "event";
+          row.className = "event event-item";
           row.innerHTML = `<span class="subtle">${fmtTs(ev.timestamp)}</span><span class="sev ${sev}">${type}</span><span>${ev.description || ""}</span>`;
           eventsEl.appendChild(row);
         });
@@ -688,6 +874,42 @@ def get_dashboard_html() -> str:
       document.getElementById("budget-label").textContent = limit > 0 ? `${fmtMoney(spent)} / ${fmtMoney(limit)} (${ratio.toFixed(1)}%)` : "No budget configured";
 
       renderCostChart(Array.isArray(data.cost_timeline) ? data.cost_timeline : []);
+      renderSavings(stats || {});
+    }
+
+    function renderSavings(stats) {
+      const items = [
+        { label: "Semantic Cache", key: "semantic_cache", field: "total_cost_saved_usd" },
+        { label: "Cascade Routing", key: "cascade", field: "cost_saved_usd" },
+        { label: "Context Trim", key: "context_engine", field: "total_tokens_saved", isTok: true },
+        { label: "Loop Prevention", key: "loop_detection", field: "total_cost_saved_usd" },
+      ];
+      let total = 0;
+      const values = items.map((item) => {
+        const section = (stats && stats[item.key]) ? stats[item.key] : {};
+        let val = Number(section[item.field] || 0);
+        if (item.key === "cascade" && !val) {
+          val = Number(stats.cascade_savings_today_usd || 0);
+        }
+        if (item.key === "loop_detection" && !val) {
+          const loopStats = stats.loop_stats || stats.loop_detector || {};
+          val = Number(loopStats.total_cost_saved_usd || 0);
+        }
+        if (item.isTok) val = val * 0.000003;
+        total += val;
+        return { ...item, value: val };
+      });
+      const box = document.getElementById("savings-breakdown");
+      if (!box) return;
+      box.innerHTML = values.map((v) => {
+        const pct = total > 0 ? (v.value / total * 100) : 0;
+        return `<div class="savings-item">
+          <div class="label">${v.label}</div>
+          <div class="amount">$${v.value.toFixed(2)}</div>
+          <div class="savings-bar"><div class="savings-bar-fill" style="width:${pct.toFixed(1)}%"></div></div>
+        </div>`;
+      }).join("");
+      updateAnimatedMetric("total-savings", total, (v)=>"$" + Number(v || 0).toFixed(2), 800);
     }
 
     function renderAgents(data){
@@ -760,6 +982,7 @@ def get_dashboard_html() -> str:
       if(!analysis){
         document.getElementById("patterns").innerHTML = "";
         document.getElementById("patterns-empty").style.display = "block";
+        renderFlowGraph(null);
         return;
       }
       const topo = analysis.topology || {};
@@ -795,21 +1018,95 @@ def get_dashboard_html() -> str:
         });
       }
 
-      const timeline = document.getElementById("flow-timeline");
-      timeline.innerHTML = "";
-      const nodes = graph && Array.isArray(graph.nodes) ? graph.nodes.slice(0, 40) : [];
-      if(nodes.length === 0){
-        timeline.innerHTML = `<div class="empty">No graph nodes.</div>`;
-      }else{
-        nodes.forEach((n)=>{
-          const type = String(n.node_type || "node");
-          const icon = type.includes("llm") ? "◯" : (type.includes("tool_use") ? "▣" : (type.includes("error") ? "◇" : "•"));
-          const row = document.createElement("div");
-          row.className = "node-row";
-          row.textContent = `${icon} ${n.node_id}  ${type}  ${n.model || n.tool_name || ""}  ${fmtMoney(n.cost_usd || 0)}`;
-          timeline.appendChild(row);
+      renderFlowGraph(graph);
+    }
+
+    function renderFlowGraph(graph) {
+      const svg = document.getElementById("flow-graph-svg");
+      if (!svg) return;
+      const nodes = (graph && Array.isArray(graph.nodes)) ? graph.nodes.slice(0, 50) : [];
+      const edges = (graph && Array.isArray(graph.edges)) ? graph.edges : [];
+      if (nodes.length === 0) {
+        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" fill="var(--text-secondary)">No flow data</text>`;
+        return;
+      }
+      const layerMap = {};
+      const COL_W = 120, ROW_H = 70, PAD_X = 60, PAD_Y = 40;
+      const childrenOf = {};
+      edges.forEach((e) => {
+        if (!childrenOf[e.source]) childrenOf[e.source] = [];
+        childrenOf[e.source].push(e.target);
+      });
+      const visited = new Set();
+      const queue = [];
+      const hasIncoming = new Set(edges.map((e) => e.target));
+      const roots = nodes.filter((n) => !hasIncoming.has(n.node_id));
+      if (roots.length === 0 && nodes.length > 0) roots.push(nodes[0]);
+      roots.forEach((r, ri) => {
+        layerMap[r.node_id] = { x: PAD_X + ri * COL_W, y: PAD_Y, layer: 0 };
+        queue.push(r.node_id);
+        visited.add(r.node_id);
+      });
+      while (queue.length > 0) {
+        const current = queue.shift();
+        const pos = layerMap[current];
+        const children = childrenOf[current] || [];
+        children.forEach((childId, ci) => {
+          if (visited.has(childId)) return;
+          visited.add(childId);
+          const spread = children.length > 1 ? (ci - (children.length - 1) / 2) * COL_W : 0;
+          layerMap[childId] = { x: pos.x + spread, y: pos.y + ROW_H, layer: (pos.layer || 0) + 1 };
+          queue.push(childId);
         });
       }
+      let extraY = PAD_Y;
+      nodes.forEach((n) => {
+        if (!layerMap[n.node_id]) {
+          layerMap[n.node_id] = { x: PAD_X + 400, y: extraY, layer: 0 };
+          extraY += ROW_H;
+        }
+      });
+      const allX = Object.values(layerMap).map((p) => p.x);
+      const allY = Object.values(layerMap).map((p) => p.y);
+      const maxX = Math.max(...allX) + COL_W;
+      const maxY = Math.max(...allY) + ROW_H;
+      svg.setAttribute("viewBox", `0 0 ${maxX} ${maxY}`);
+      svg.setAttribute("height", String(Math.min(500, maxY)));
+      let html = "";
+      edges.forEach((e) => {
+        const src = layerMap[e.source];
+        const tgt = layerMap[e.target];
+        if (!src || !tgt) return;
+        const midY = (src.y + tgt.y) / 2;
+        html += `<path class="flow-edge" d="M${src.x},${src.y + 16} C${src.x},${midY} ${tgt.x},${midY} ${tgt.x},${tgt.y - 16}"/>`;
+      });
+      nodes.forEach((n) => {
+        const pos = layerMap[n.node_id];
+        if (!pos) return;
+        const type = String(n.node_type || "").toLowerCase();
+        const isLLM = type.includes("llm");
+        const isTool = type.includes("tool");
+        const isError = type.includes("error");
+        const cost = Number(n.cost_usd || 0);
+        let fill = "rgba(90,168,255,0.3)";
+        let stroke = "rgba(90,168,255,0.6)";
+        if (isLLM) { fill = "rgba(0,229,160,0.2)"; stroke = "var(--ok)"; }
+        if (isTool) { fill = "rgba(255,184,0,0.2)"; stroke = "var(--warn)"; }
+        if (isError) { fill = "rgba(255,59,92,0.2)"; stroke = "var(--danger)"; }
+        if (isLLM) {
+          html += `<circle class="flow-node" cx="${pos.x}" cy="${pos.y}" r="14" fill="${fill}" stroke="${stroke}" stroke-width="1.5"/>`;
+        } else if (isError) {
+          html += `<polygon class="flow-node" points="${pos.x},${pos.y-14} ${pos.x+14},${pos.y} ${pos.x},${pos.y+14} ${pos.x-14},${pos.y}" fill="${fill}" stroke="${stroke}" stroke-width="1.5"/>`;
+        } else {
+          html += `<rect class="flow-node" x="${pos.x-12}" y="${pos.y-12}" width="24" height="24" rx="4" fill="${fill}" stroke="${stroke}" stroke-width="1.5"/>`;
+        }
+        const label = String(n.tool_name || n.model || type).substring(0, 15);
+        html += `<text class="flow-label" x="${pos.x}" y="${pos.y + 26}">${label}</text>`;
+        if (cost > 0) {
+          html += `<text class="flow-cost-label" x="${pos.x}" y="${pos.y + 36}">$${cost.toFixed(3)}</text>`;
+        }
+      });
+      svg.innerHTML = html;
     }
 
     function renderExperiments(experiments, outcomes, correlations, stats){
@@ -850,7 +1147,7 @@ def get_dashboard_html() -> str:
       if(insights.length === 0){
         corrEl.innerHTML = `<div class="empty">No correlations yet.</div>`;
       }else{
-        corrEl.innerHTML = insights.slice(0, 10).map((s)=> `<div class="event"><span class="sev info">INSIGHT</span><span>${s}</span></div>`).join("");
+        corrEl.innerHTML = insights.slice(0, 10).map((s)=> `<div class="event event-item"><span class="sev info">INSIGHT</span><span>${s}</span></div>`).join("");
       }
 
       const outEl = document.getElementById("exp-outcomes");
@@ -945,7 +1242,7 @@ def get_dashboard_html() -> str:
         const maxH = Math.max(...Object.values(hits).map(Number), 1);
         ctxEl.innerHTML = `
           <div>Optimizations: ${fmtNum(ce.total_optimizations || 0)} | Tokens saved: ${fmtNum(ce.total_tokens_saved || 0)}</div>
-          <div style="margin-top:10px;">${Object.entries(hits).map(([k,v])=> `<div class="h-bar"><div class="h-bar-fill" style="width:${(Number(v)/maxH*100).toFixed(0)}%;min-width:30px;"></div><span>${k}: ${v}</span></div>`).join("") || "<div class="empty">No strategy hits</div>"}</div>
+          <div style="margin-top:10px;">${Object.entries(hits).map(([k,v])=> `<div class="h-bar"><div class="h-bar-fill" style="width:${(Number(v)/maxH*100).toFixed(0)}%;min-width:30px;"></div><span>${k}: ${v}</span></div>`).join("") || '<div class="empty">No strategy hits</div>'}</div>
         `;
       }
     }
@@ -988,7 +1285,7 @@ def get_dashboard_html() -> str:
           const sev = String(f.severity || "info").toLowerCase();
           const mapText = Array.isArray(f.framework_mappings) ? f.framework_mappings.map((m)=> `${m[0]}:${m[1]}`).join(", ") : "-";
           const row = document.createElement("div");
-          row.className = "event";
+          row.className = "event event-item";
           row.innerHTML = `<span class="subtle">${f.timestamp || ""}</span><span class="sev ${sev}">${sev.toUpperCase()}</span><span>${f.description || ""}<div class="subtle">${mapText}</div></span>`;
           findingsEl.appendChild(row);
         });
