@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -100,7 +101,7 @@ class OrchesisClient:
         """
         url = f"{self._base_url}{path}"
         if params:
-            query = "&".join(f"{k}={v}" for k, v in params.items())
+            query = "&".join(f"{quote(str(k))}={quote(str(v))}" for k, v in params.items())
             url = f"{url}?{query}"
 
         data = None
@@ -192,7 +193,7 @@ class OrchesisClient:
 
     def delete_session(self, session_id: str) -> dict[str, Any]:
         """Delete a recorded session."""
-        return self._delete(f"/sessions/{session_id}")
+        return self._delete(f"/api/sessions/{session_id}")
 
     def export_session(self, session_id: str) -> dict[str, Any]:
         """Export session as AIR document."""

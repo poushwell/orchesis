@@ -832,6 +832,15 @@ def get_dashboard_html() -> str:
           const card = document.createElement("div");
           card.className = "panel";
           card.innerHTML = `<strong>${exp.name || "Experiment"}</strong> <span class="cb-pill closed">RUNNING</span>`;
+          const expId = String(exp.experiment_id || exp.id || "");
+          if(expId){
+            fetchData(`/api/experiments/${encodeURIComponent(expId)}/live`).then((live)=>{
+              if(live){
+                const requests = Number(live.total_requests || 0);
+                card.innerHTML += `<div class="subtle">Live requests: ${fmtNum(requests)}</div>`;
+              }
+            });
+          }
           cards.appendChild(card);
         });
       }

@@ -78,6 +78,10 @@ class SemanticCache:
         self._total_cost_saved: float = 0.0
         self._evictions: int = 0
 
+    @property
+    def enabled(self) -> bool:
+        return self._config.enabled
+
     def lookup(
         self,
         messages: list[dict[str, Any]],
@@ -191,6 +195,10 @@ class SemanticCache:
         trigrams = self._compute_trigrams(content)
         with self._lock:
             self._evict_expired()
+            if exact_hash in self._entries:
+                self._simhash_index[:] = [
+                    (sh, eh) for sh, eh in self._simhash_index if eh != exact_hash
+                ]
             while len(self._entries) >= self._config.max_entries:
                 self._evict_lru()
             entry = CacheEntry(

@@ -527,6 +527,10 @@ class ThreatMatcher:
         self._warns: int = 0
         self._load_threats()
 
+    @property
+    def enabled(self) -> bool:
+        return self._config.enabled
+
     def _load_threats(self) -> None:
         disabled = set(self._config.disabled_threats)
         for sig in BUILT_IN_THREATS:
@@ -644,6 +648,18 @@ class ThreatMatcher:
         matches: list[ThreatMatch] = []
         seen: set[str] = set()
         text = self._extract_all_text(messages)
+        tool_names = [str(t) for t in tools if t]
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            name = tc.get("name", "")
+            if name:
+                tool_names.append(str(name))
+            inp = tc.get("input", tc.get("params", {}))
+            if isinstance(inp, dict):
+                text += "\n" + json.dumps(inp)
+            elif isinstance(inp, str):
+                text += "\n" + inp
 
         for threat_id, pat in self._compiled_content:
             if threat_id in seen:
@@ -669,17 +685,6 @@ class ThreatMatcher:
                         )
                     )
                     seen.add(threat_id)
-
-        tool_names = [str(t) for t in tools if t]
-        for tc in tool_calls:
-            name = tc.get("name", "") if isinstance(tc, dict) else ""
-            if name:
-                tool_names.append(str(name))
-            inp = tc.get("input", tc.get("params", {})) if isinstance(tc, dict) else {}
-            if isinstance(inp, dict):
-                text += "\n" + json.dumps(inp)
-            elif isinstance(inp, str):
-                text += "\n" + inp
 
         for threat_id, pat in self._compiled_tools:
             if threat_id in seen:

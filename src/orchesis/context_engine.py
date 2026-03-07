@@ -170,19 +170,17 @@ class ContextEngine:
     def _strategy_dedup(self, messages: list[dict]) -> list[dict]:
         window = self._config.dedup_window
         result: list[dict] = []
+        result_hashes: list[str] = []
         for msg in messages:
             if str(msg.get("role", "")).lower() == "system":
                 result.append(msg)
+                result_hashes.append(self._hash_message(msg))
                 continue
             h = self._hash_message(msg)
-            start = max(0, len(result) - window)
-            found_dup = False
-            for j in range(start, len(result)):
-                if self._hash_message(result[j]) == h:
-                    found_dup = True
-                    break
-            if not found_dup:
+            start = max(0, len(result_hashes) - window)
+            if h not in result_hashes[start:]:
                 result.append(msg)
+                result_hashes.append(h)
         return result
 
     def _strategy_trim_system_dups(self, messages: list[dict]) -> list[dict]:

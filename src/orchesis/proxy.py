@@ -2870,7 +2870,7 @@ class LLMHTTPProxy:
 
     def _phase_threat_intel(self, ctx: _RequestContext) -> bool:
         """Scan request against threat intelligence database."""
-        if self._threat_matcher is None or not self._threat_matcher._config.enabled:
+        if self._threat_matcher is None or not self._threat_matcher.enabled:
             return True
         messages = ctx.body.get("messages", [])
         if not isinstance(messages, list):
@@ -3186,7 +3186,7 @@ class LLMHTTPProxy:
         ctx.provider = self._detect_provider(ctx.parsed_req.provider, ctx.handler.headers)
         if (
             self._semantic_cache is not None
-            and self._semantic_cache._config.enabled
+            and self._semantic_cache.enabled
             and not self._is_streaming_request(ctx)
         ):
             messages = ctx.body.get("messages", [])
