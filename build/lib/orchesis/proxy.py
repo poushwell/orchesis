@@ -1,6 +1,8 @@
 """FastAPI proxy layer using Orchesis rule engine."""
 
 import asyncio
+import concurrent.futures
+from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -11,7 +13,8 @@ import threading
 import time
 import uuid
 from typing import Any
-from urllib.parse import urlsplit
+import http.client
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request as UrlRequest, urlopen
 from urllib.error import HTTPError, URLError
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -44,11 +47,12 @@ from orchesis.events import EventBus
 from orchesis.forensics import Incident
 from orchesis.integrations import SlackEmitter, SlackNotifier, TelegramEmitter, TelegramNotifier
 from orchesis.integrations.forensics_emitter import ForensicsEmitter
-from orchesis.loop_detector import LoopDetector
+from orchesis.loop_detector import ContentLoopDetector, LoopDetector
 from orchesis.metrics import MetricsCollector
 from orchesis.model_router import ModelRouter
 from orchesis.cascade import CascadeDecision, CascadeLevel, CascadeRouter
-from orchesis.otel import OTelEmitter, TraceContext
+from orchesis.otel import OTelEmitter, ProxySpanEmitter, TraceContext
+from orchesis.otel_export import OTLPExportConfig, OTLPSpanExporter
 from orchesis.policy_store import PolicyStore
 from orchesis.state import RateLimitTracker
 from orchesis.structured_log import StructuredLogger
@@ -58,6 +62,16 @@ from orchesis.request_parser import ParsedResponse, parse_request, parse_respons
 from orchesis.recorder import SessionRecord, SessionRecorder
 from orchesis.response_handler import ResponseProcessor, SECRET_PATTERNS
 from orchesis.flow_xray import FlowAnalyzer, FlowXRayConfig
+from orchesis.dashboard import get_dashboard_html
+from orchesis.air_export import export_session_to_air
+from orchesis import __version__ as ORCHESIS_VERSION
+from orchesis.compliance import ComplianceEngine, Framework, Severity
+from orchesis.connection_pool import ConnectionPool, PoolConfig, PooledConnection
+from orchesis.experiment import ExperimentConfig, ExperimentManager
+from orchesis.context_engine import ContextConfig, ContextEngine
+from orchesis.threat_intel import ThreatIntelConfig, ThreatMatcher
+from orchesis.semantic_cache import SemanticCache, SemanticCacheConfig
+from orchesis.spend_rate import SpendRateDetector, SpendWindow
 
 _HTTP_PROXY_LOGGER = logging.getLogger("orchesis.http_proxy")
 
@@ -135,6 +149,32 @@ class ProxyStats:
             self.pii_detected += max(0, int(pii_detected))
 
 
+class PooledThreadHTTPServer(HTTPServer):
+    """HTTPServer with bounded worker pool."""
+
+    def __init__(self, server_address: tuple[str, int], request_handler_class: Any, max_workers: int = 200):
+        super().__init__(server_address, request_handler_class)
+        self._pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, int(max_workers)),
+            thread_name_prefix="orchesis-worker",
+        )
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        self._pool.submit(self.process_request_thread, request, client_address)
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+
+    def server_close(self) -> None:
+        super().server_close()
+        self._pool.shutdown(wait=True, cancel_futures=False)
+
+
 _SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
 
@@ -163,6 +203,77 @@ class OrchesisProxy:
             if bool(self._recording_cfg.get("enabled", False))
             else None
         )
+        context_cfg = self._policy.get("context_engine")
+        self._context_engine: ContextEngine | None = None
+        if isinstance(context_cfg, dict) and bool(context_cfg.get("enabled", False)):
+            cfg = ContextConfig(
+                enabled=True,
+                strategies=list(context_cfg.get("strategies", ["dedup", "trim_tool_results", "trim_system_dups"])),
+                max_context_tokens=int(context_cfg.get("max_context_tokens", 0)),
+                token_budget_reserve=int(context_cfg.get("token_budget_reserve", 4096)),
+                sliding_window_size=int(context_cfg.get("sliding_window_size", 0)),
+                preserve_system=bool(context_cfg.get("preserve_system", True)),
+                max_tool_result_tokens=int(context_cfg.get("max_tool_result_tokens", 2000)),
+                dedup_window=int(context_cfg.get("dedup_window", 50)),
+                track_savings=bool(context_cfg.get("track_savings", True)),
+            )
+            self._context_engine = ContextEngine(cfg)
+        threat_cfg = self._policy.get("threat_intel")
+        self._threat_matcher: ThreatMatcher | None = None
+        if isinstance(threat_cfg, dict) and bool(threat_cfg.get("enabled", False)):
+            default_severity = {
+                "critical": "block",
+                "high": "warn",
+                "medium": "log",
+                "low": "log",
+                "info": "log",
+            }
+            policy_sev = threat_cfg.get("severity_actions")
+            if isinstance(policy_sev, dict):
+                default_severity = {**default_severity, **policy_sev}
+            ti_cfg = ThreatIntelConfig(
+                enabled=True,
+                default_action=str(threat_cfg.get("default_action", "warn")),
+                severity_actions=default_severity,
+                custom_signatures=list(threat_cfg.get("custom_signatures", [])),
+                disabled_threats=list(threat_cfg.get("disabled_threats", [])),
+                max_matches_per_request=int(threat_cfg.get("max_matches_per_request", 10)),
+            )
+            self._threat_matcher = ThreatMatcher(ti_cfg)
+        semantic_cfg = self._policy.get("semantic_cache")
+        self._semantic_cache: SemanticCache | None = None
+        if isinstance(semantic_cfg, dict) and bool(semantic_cfg.get("enabled", False)):
+            sc_cfg = SemanticCacheConfig(
+                enabled=True,
+                max_entries=int(semantic_cfg.get("max_entries", 2000)),
+                ttl_seconds=float(semantic_cfg.get("ttl_seconds", 600)),
+                simhash_threshold=int(semantic_cfg.get("simhash_threshold", 8)),
+                jaccard_threshold=float(semantic_cfg.get("jaccard_threshold", 0.6)),
+                min_content_length=int(semantic_cfg.get("min_content_length", 20)),
+                max_content_length=int(semantic_cfg.get("max_content_length", 50000)),
+                cacheable_models=list(semantic_cfg.get("cacheable_models", [])),
+                exclude_tool_calls=bool(semantic_cfg.get("exclude_tool_calls", True)),
+                track_savings=bool(semantic_cfg.get("track_savings", True)),
+            )
+            self._semantic_cache = SemanticCache(sc_cfg)
+        compliance_cfg = self._policy.get("compliance")
+        self._compliance_cfg = compliance_cfg if isinstance(compliance_cfg, dict) else {}
+        framework_tokens = self._compliance_cfg.get("frameworks", ["owasp_llm_top10", "nist_ai_rmf"])
+        resolved_frameworks: list[Framework] = []
+        if isinstance(framework_tokens, list):
+            for token in framework_tokens:
+                framework = ComplianceEngine._framework_from_alias(token if isinstance(token, str) else None)
+                if framework is not None and framework not in resolved_frameworks:
+                    resolved_frameworks.append(framework)
+        if not resolved_frameworks:
+            resolved_frameworks = [Framework.OWASP_LLM_TOP_10, Framework.NIST_AI_RMF]
+        self._compliance_engine = ComplianceEngine(
+            policy_path="policy.yaml",
+            frameworks=resolved_frameworks,
+            max_findings=int(self._compliance_cfg.get("max_findings", 10000)),
+            enabled=bool(self._compliance_cfg.get("enabled", True)),
+        )
+        self._compliance_enabled = bool(self._compliance_cfg.get("enabled", True))
         proxy_cfg = self._policy.get("proxy") if isinstance(self._policy.get("proxy"), dict) else {}
         secret_cfg = proxy_cfg.get("secret_scanning") if isinstance(proxy_cfg.get("secret_scanning"), dict) else {}
         pii_cfg = proxy_cfg.get("pii_scanning") if isinstance(proxy_cfg.get("pii_scanning"), dict) else {}
@@ -1565,6 +1676,25 @@ class _RequestContext:
     resp_body: bytes = b""
     parsed_resp_obj: Any = None  # ParsedResponse | None
     flow_node_id: str = ""
+    is_streaming: bool = False
+    streaming_events: list[str] = field(default_factory=list)
+    streaming_text: str = ""
+    streaming_chunks: int = 0
+    experiment_id: str = ""
+    variant_name: str = ""
+    was_escalated: bool = False
+    was_loop_detected: bool = False
+    context_tokens_saved: int = 0
+    context_strategies: list[str] = field(default_factory=list)
+    threat_matches: list[Any] = field(default_factory=list)
+    from_semantic_cache: bool = False
+    trace_ctx: Any = None  # TraceContext when otel enabled
+    root_span: Any = None  # SpanData when otel enabled
+    semantic_cache_type: str = ""  # "exact" or "semantic"
+    heartbeat_detected: bool = False
+    content_loop_count: int = 0
+    spend_rate_per_min: float = 0.0
+    request_saved_usd: float = 0.0
 
 
 class LLMHTTPProxy:
@@ -1584,6 +1714,34 @@ class LLMHTTPProxy:
                 self._policy = load_policy(policy_path)
             except Exception:
                 self._policy = {}
+        proxy_engine_cfg = self._policy.get("proxy")
+        self._proxy_engine_cfg = proxy_engine_cfg if isinstance(proxy_engine_cfg, dict) else {}
+        self._max_workers = int(self._proxy_engine_cfg.get("max_workers", 200))
+        if self._max_workers <= 0:
+            self._max_workers = 200
+        pool_cfg_raw = self._proxy_engine_cfg.get("connection_pool", {})
+        pool_cfg = pool_cfg_raw if isinstance(pool_cfg_raw, dict) else {}
+        self._connection_pool = ConnectionPool(
+            PoolConfig(
+                max_connections_per_host=int(pool_cfg.get("max_per_host", 10)),
+                max_total_connections=int(pool_cfg.get("max_total", 50)),
+                idle_timeout=float(pool_cfg.get("idle_timeout", 60.0)),
+                connection_timeout=float(pool_cfg.get("connection_timeout", self._config.timeout)),
+                retry_on_connection_error=bool(pool_cfg.get("retry_on_connection_error", True)),
+                max_retries=int(pool_cfg.get("max_retries", 2)),
+            )
+        )
+        streaming_cfg_raw = self._proxy_engine_cfg.get("streaming", {})
+        streaming_cfg = streaming_cfg_raw if isinstance(streaming_cfg_raw, dict) else {}
+        self._streaming_enabled = bool(streaming_cfg.get("enabled", True))
+        self._streaming_buffer_size = int(streaming_cfg.get("buffer_size", 4096))
+        if self._streaming_buffer_size <= 0:
+            self._streaming_buffer_size = 4096
+        self._streaming_max_accumulated_events = int(streaming_cfg.get("max_accumulated_events", 10000))
+        if self._streaming_max_accumulated_events <= 0:
+            self._streaming_max_accumulated_events = 10000
+        self._streaming_count = 0
+        self._streaming_chunks_total = 0
         budgets = self._policy.get("budgets")
         self._budget_cfg = budgets if isinstance(budgets, dict) else {}
         tool_costs = self._policy.get("tool_costs")
@@ -1596,6 +1754,39 @@ class LLMHTTPProxy:
         self._loop_detector = None
         if bool(self._loop_cfg.get("enabled", False)):
             self._loop_detector = LoopDetector(config=self._loop_cfg)
+        self._content_loop_detector: ContentLoopDetector | None = None
+        content_loop_cfg = self._loop_cfg.get("content_loop")
+        if isinstance(content_loop_cfg, dict) and bool(content_loop_cfg.get("enabled", False)):
+            self._content_loop_detector = ContentLoopDetector(
+                window_seconds=int(content_loop_cfg.get("window_seconds", 300)),
+                max_identical=int(content_loop_cfg.get("max_identical", 5)),
+                cooldown_seconds=int(content_loop_cfg.get("cooldown_seconds", 300)),
+                hash_prefix_len=int(content_loop_cfg.get("hash_prefix_len", 256)),
+            )
+        spend_rate_cfg_raw = self._budget_cfg.get("spend_rate")
+        self._spend_rate_cfg = spend_rate_cfg_raw if isinstance(spend_rate_cfg_raw, dict) else {}
+        self._spend_rate_detector: SpendRateDetector | None = None
+        if bool(self._spend_rate_cfg.get("enabled", False)):
+            windows_cfg = self._spend_rate_cfg.get("windows")
+            windows: list[SpendWindow] = []
+            if isinstance(windows_cfg, list):
+                for item in windows_cfg:
+                    if not isinstance(item, dict):
+                        continue
+                    seconds = item.get("seconds")
+                    max_spend = item.get("max_spend")
+                    if not isinstance(seconds, int | float) or not isinstance(max_spend, int | float):
+                        continue
+                    if int(seconds) <= 0:
+                        continue
+                    windows.append(SpendWindow(window_seconds=int(seconds), max_spend=float(max_spend)))
+            self._spend_rate_detector = SpendRateDetector(
+                windows=windows or None,
+                spike_multiplier=float(self._spend_rate_cfg.get("spike_multiplier", 5.0)),
+                heartbeat_cost_threshold=float(self._spend_rate_cfg.get("heartbeat_cost_threshold", 0.10)),
+                pause_seconds=int(self._spend_rate_cfg.get("pause_seconds", 300)),
+            )
+        self._estimated_avg_request_cost_usd = 0.05
         circuit_cfg = self._policy.get("circuit_breaker")
         self._circuit_cfg = circuit_cfg if isinstance(circuit_cfg, dict) else {}
         self._circuit_breaker = CircuitBreaker(
@@ -1650,6 +1841,23 @@ class LLMHTTPProxy:
             if bool(self._flow_cfg.get("enabled", False))
             else None
         )
+        exp_cfg_raw = self._policy.get("experiments")
+        task_cfg_raw = self._policy.get("task_tracking")
+        exp_cfg = exp_cfg_raw if isinstance(exp_cfg_raw, dict) else {}
+        task_cfg = task_cfg_raw if isinstance(task_cfg_raw, dict) else {}
+        self._experiment_manager: ExperimentManager | None = None
+        if bool(exp_cfg.get("enabled", False)) or bool(task_cfg.get("enabled", False)):
+            cfg = ExperimentConfig(
+                max_experiments=int(exp_cfg.get("max_experiments", 10)),
+                default_min_sample_size=int(exp_cfg.get("default_min_sample_size", 30)),
+                auto_stop_on_significance=bool(exp_cfg.get("auto_stop_on_significance", True)),
+                significance_threshold=float(exp_cfg.get("significance_threshold", 0.95)),
+                max_tracked_sessions=int(task_cfg.get("max_tracked_sessions", 5000)),
+                idle_timeout_seconds=float(task_cfg.get("idle_timeout_seconds", 300)),
+                min_turns_for_success=int(task_cfg.get("min_turns_for_success", 1)),
+                consecutive_errors_threshold=int(task_cfg.get("consecutive_errors_threshold", 3)),
+            )
+            self._experiment_manager = ExperimentManager(cfg)
         behavioral_cfg = self._policy.get("behavioral_fingerprint")
         self._behavioral_cfg = behavioral_cfg if isinstance(behavioral_cfg, dict) else {}
         self._behavioral_detector = BehavioralDetector(self._behavioral_cfg)
@@ -1664,6 +1872,101 @@ class LLMHTTPProxy:
             if bool(self._recording_cfg.get("enabled", False))
             else None
         )
+        context_cfg = self._policy.get("context_engine")
+        self._context_engine: ContextEngine | None = None
+        if isinstance(context_cfg, dict) and bool(context_cfg.get("enabled", False)):
+            cfg = ContextConfig(
+                enabled=True,
+                strategies=list(context_cfg.get("strategies", ["dedup", "trim_tool_results", "trim_system_dups"])),
+                max_context_tokens=int(context_cfg.get("max_context_tokens", 0)),
+                token_budget_reserve=int(context_cfg.get("token_budget_reserve", 4096)),
+                sliding_window_size=int(context_cfg.get("sliding_window_size", 0)),
+                preserve_system=bool(context_cfg.get("preserve_system", True)),
+                max_tool_result_tokens=int(context_cfg.get("max_tool_result_tokens", 2000)),
+                dedup_window=int(context_cfg.get("dedup_window", 50)),
+                track_savings=bool(context_cfg.get("track_savings", True)),
+            )
+            self._context_engine = ContextEngine(cfg)
+        threat_cfg = self._policy.get("threat_intel")
+        self._threat_matcher: ThreatMatcher | None = None
+        if isinstance(threat_cfg, dict) and bool(threat_cfg.get("enabled", False)):
+            default_severity = {
+                "critical": "block",
+                "high": "warn",
+                "medium": "log",
+                "low": "log",
+                "info": "log",
+            }
+            policy_sev = threat_cfg.get("severity_actions")
+            if isinstance(policy_sev, dict):
+                default_severity = {**default_severity, **policy_sev}
+            ti_cfg = ThreatIntelConfig(
+                enabled=True,
+                default_action=str(threat_cfg.get("default_action", "warn")),
+                severity_actions=default_severity,
+                custom_signatures=list(threat_cfg.get("custom_signatures", [])),
+                disabled_threats=list(threat_cfg.get("disabled_threats", [])),
+                max_matches_per_request=int(threat_cfg.get("max_matches_per_request", 10)),
+            )
+            self._threat_matcher = ThreatMatcher(ti_cfg)
+        semantic_cfg = self._policy.get("semantic_cache")
+        self._semantic_cache: SemanticCache | None = None
+        if isinstance(semantic_cfg, dict) and bool(semantic_cfg.get("enabled", False)):
+            sc_cfg = SemanticCacheConfig(
+                enabled=True,
+                max_entries=int(semantic_cfg.get("max_entries", 2000)),
+                ttl_seconds=float(semantic_cfg.get("ttl_seconds", 600)),
+                simhash_threshold=int(semantic_cfg.get("simhash_threshold", 8)),
+                jaccard_threshold=float(semantic_cfg.get("jaccard_threshold", 0.6)),
+                min_content_length=int(semantic_cfg.get("min_content_length", 20)),
+                max_content_length=int(semantic_cfg.get("max_content_length", 50000)),
+                cacheable_models=list(semantic_cfg.get("cacheable_models", [])),
+                exclude_tool_calls=bool(semantic_cfg.get("exclude_tool_calls", True)),
+                track_savings=bool(semantic_cfg.get("track_savings", True)),
+            )
+            self._semantic_cache = SemanticCache(sc_cfg)
+        otel_cfg = self._policy.get("otel_export")
+        self._otlp_exporter = None
+        self._span_emitter = None
+        if isinstance(otel_cfg, dict) and bool(otel_cfg.get("enabled", False)):
+            export_cfg = OTLPExportConfig(
+                enabled=True,
+                endpoint=str(otel_cfg.get("endpoint", "http://localhost:4318")),
+                traces_path=str(otel_cfg.get("traces_path", "/v1/traces")),
+                headers=dict(otel_cfg.get("headers", {})),
+                batch_size=int(otel_cfg.get("batch_size", 50)),
+                flush_interval_seconds=float(otel_cfg.get("flush_interval_seconds", 5.0)),
+                max_queue_size=int(otel_cfg.get("max_queue_size", 2000)),
+                resource_attributes={
+                    "service.name": str(otel_cfg.get("service_name", "orchesis-proxy")),
+                    "service.version": "0.8.0",
+                    **(otel_cfg.get("resource_attributes") or {}),
+                },
+            )
+            self._otlp_exporter = OTLPSpanExporter(export_cfg)
+            self._otlp_exporter.start()
+            self._span_emitter = ProxySpanEmitter(
+                jsonl_path=".orchesis/traces.jsonl",
+                otlp_exporter=self._otlp_exporter,
+            )
+        compliance_cfg = self._policy.get("compliance")
+        self._compliance_cfg = compliance_cfg if isinstance(compliance_cfg, dict) else {}
+        framework_tokens = self._compliance_cfg.get("frameworks", ["owasp_llm_top10", "nist_ai_rmf"])
+        resolved_frameworks: list[Framework] = []
+        if isinstance(framework_tokens, list):
+            for token in framework_tokens:
+                resolved = ComplianceEngine._framework_from_alias(token if isinstance(token, str) else None)
+                if resolved is not None and resolved not in resolved_frameworks:
+                    resolved_frameworks.append(resolved)
+        if not resolved_frameworks:
+            resolved_frameworks = [Framework.OWASP_LLM_TOP_10, Framework.NIST_AI_RMF]
+        self._compliance_engine = ComplianceEngine(
+            policy_path=self._policy_path or "policy.yaml",
+            frameworks=resolved_frameworks,
+            max_findings=int(self._compliance_cfg.get("max_findings", 10000)),
+            enabled=bool(self._compliance_cfg.get("enabled", True)),
+        )
+        self._compliance_enabled = bool(self._compliance_cfg.get("enabled", True))
         kill_cfg = self._policy.get("kill_switch")
         self._kill_cfg = kill_cfg if isinstance(kill_cfg, dict) else {}
         self._kill_enabled = bool(self._kill_cfg.get("enabled", False))
@@ -1676,6 +1979,7 @@ class LLMHTTPProxy:
         self._secret_trigger_hits = 0
         self._loop_trigger_hits = 0
         self._server: HTTPServer | None = None
+        self._start_time = time.time()
         self._stats_lock = threading.Lock()
         self._stats = {
             "requests": 0,
@@ -1686,6 +1990,11 @@ class LLMHTTPProxy:
             "cascade_requests_by_level": {"simple": 0, "medium": 0, "complex": 0},
             "started_at": datetime.now(timezone.utc).isoformat(),
         }
+        self._dashboard_events: deque[dict[str, Any]] = deque(maxlen=500)
+        self._dashboard_cost_timeline: deque[dict[str, float]] = deque(maxlen=1000)
+        self._dashboard_cost_timeline.append(
+            {"timestamp": time.time(), "cumulative_cost": float(self._cost_tracker.get_daily_total())}
+        )
 
     @property
     def stats(self) -> dict[str, Any]:
@@ -1702,6 +2011,8 @@ class LLMHTTPProxy:
                 "total_cost_saved_usd": payload["loop_stats"].get("total_cost_saved_usd", 0.0),
                 "active_patterns_count": payload["loop_stats"].get("active_patterns_count", 0),
             }
+        if self._content_loop_detector is not None:
+            payload["content_loop"] = self._content_loop_detector.stats
         payload["circuit_breaker"] = self._circuit_breaker.get_stats()
         if self._cascade_router is not None:
             cascade_stats = self._cascade_router.get_stats()
@@ -1725,6 +2036,50 @@ class LLMHTTPProxy:
             payload["recorder"] = self._recorder.get_stats()
         if self._flow_analyzer is not None:
             payload["flow_xray"] = self._flow_analyzer.get_stats()
+        if self._experiment_manager is not None:
+            exps = self._experiment_manager.list_experiments()
+            running = sum(1 for e in exps if e.get("status") == "running")
+            total_assignments = sum(
+                sum(v.get("requests", 0) for v in e.get("variants", []))
+                for e in exps
+            )
+            task_stats = self._experiment_manager._task_tracker.get_stats()
+            payload["experiments"] = {
+                "active": running,
+                "total": len(exps),
+                "total_assignments": total_assignments,
+            }
+            payload["task_tracking"] = task_stats
+        if self._compliance_engine is not None:
+            payload["compliance"] = self._compliance_engine.get_stats()
+        if self._context_engine is not None:
+            payload["context_engine"] = self._context_engine.get_stats()
+        if self._threat_matcher is not None:
+            payload["threat_intel"] = self._threat_matcher.get_stats()
+        if self._semantic_cache is not None:
+            payload["semantic_cache"] = self._semantic_cache.get_stats()
+        if self._spend_rate_detector is not None:
+            payload["spend_rate"] = self._spend_rate_detector.stats
+        thread_queue = 0
+        if isinstance(self._server, PooledThreadHTTPServer):
+            try:
+                thread_queue = int(self._server._pool._work_queue.qsize())  # noqa: SLF001
+            except Exception:
+                thread_queue = 0
+        if self._otlp_exporter is not None:
+            payload["otel_export"] = self._otlp_exporter.get_stats()
+        payload["proxy_engine"] = {
+            "thread_pool": {
+                "max_workers": int(self._max_workers),
+                "active_threads": thread_queue,
+            },
+            "connection_pool": self._connection_pool.get_stats(),
+            "streaming": {
+                "enabled": self._streaming_enabled,
+                "total_streamed_requests": int(self._streaming_count),
+                "total_streamed_chunks": int(self._streaming_chunks_total),
+            },
+        }
         return payload
 
     @property
@@ -1755,7 +2110,11 @@ class LLMHTTPProxy:
             def log_message(self, fmt: str, *args: Any) -> None:
                 _HTTP_PROXY_LOGGER.debug("proxy %s - " + fmt, self.address_string(), *args)
 
-        self._server = HTTPServer((self._config.host, self._config.port), _Handler)
+        self._server = PooledThreadHTTPServer(
+            (self._config.host, self._config.port),
+            _Handler,
+            max_workers=self._max_workers,
+        )
         if blocking:
             try:
                 self._server.serve_forever()
@@ -1772,15 +2131,246 @@ class LLMHTTPProxy:
             self._server.server_close()
             self._server = None
         self._state_tracker.flush()
+        self._connection_pool.close_all()
         if self._recorder is not None:
             self._recorder.close_all()
+        if self._otlp_exporter is not None:
+            self._otlp_exporter.stop()
 
     def _inc(self, field: str) -> None:
         with self._stats_lock:
             self._stats[field] = int(self._stats.get(field, 0)) + 1
+        if field == "blocked":
+            self._add_dashboard_event("blocked", "medium", "Request blocked by runtime guardrail.")
+            if self._compliance_enabled:
+                self._compliance_engine.map_finding(
+                    source_module="engine",
+                    source_detail="tool_allowlist",
+                    description="Runtime guardrail blocked a request.",
+                    severity=Severity.MEDIUM,
+                    evidence={"counter": "blocked"},
+                )
+        elif field == "errors":
+            self._add_dashboard_event("error", "high", "Runtime error while processing request.")
+            if self._compliance_enabled:
+                self._compliance_engine.map_finding(
+                    source_module="circuit_breaker",
+                    source_detail="automated_response",
+                    description="Runtime error recorded by proxy.",
+                    severity=Severity.HIGH,
+                    evidence={"counter": "errors"},
+                )
+
+    def _add_dashboard_event(
+        self,
+        event_type: str,
+        severity: str,
+        description: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._dashboard_events.append(
+            {
+                "timestamp": time.time(),
+                "type": str(event_type),
+                "severity": str(severity),
+                "description": str(description),
+                "metadata": metadata if isinstance(metadata, dict) else {},
+            }
+        )
+
+    def _build_dashboard_overview(self) -> dict[str, Any]:
+        stats = self.stats
+        now = time.time()
+        recent_events = sorted(self._dashboard_events, key=lambda e: float(e.get("timestamp", 0.0)), reverse=True)
+        critical_recent = [
+            e
+            for e in recent_events
+            if (now - float(e.get("timestamp", 0.0))) <= 60.0 and str(e.get("severity", "")).lower() == "critical"
+        ]
+        blocked_recent = [
+            e for e in recent_events if (now - float(e.get("timestamp", 0.0))) <= 300.0 and e.get("type") == "blocked"
+        ]
+        circuit_state = str(stats.get("circuit_breaker", {}).get("state", "CLOSED")).upper()
+        if circuit_state == "OPEN" or critical_recent:
+            status = "alert"
+        elif blocked_recent:
+            status = "monitoring"
+        else:
+            status = "clear"
+        flow_stats = stats.get("flow_xray", {}) if isinstance(stats.get("flow_xray"), dict) else {}
+        behavioral_stats = (
+            stats.get("behavioral_detector", {}) if isinstance(stats.get("behavioral_detector"), dict) else {}
+        )
+        active_agents = int(behavioral_stats.get("agents_monitored", 0)) + int(
+            behavioral_stats.get("agents_learning", 0)
+        )
+        circuit_breakers = {
+            "default": {
+                "state": str(stats.get("circuit_breaker", {}).get("state", "closed")).lower(),
+                "failures": int(stats.get("circuit_breaker", {}).get("error_count", 0)),
+            }
+        }
+        daily_limit = self._budget_cfg.get("daily")
+        limit_usd = float(daily_limit) if isinstance(daily_limit, int | float) else 0.0
+        spent_usd = float(stats.get("cost_today", 0.0))
+        budget = {
+            "limit_usd": limit_usd,
+            "spent_usd": spent_usd,
+            "remaining_usd": max(0.0, limit_usd - spent_usd) if limit_usd > 0 else 0.0,
+        }
+        return {
+            "status": status,
+            "uptime_seconds": max(0.0, now - self._start_time),
+            "total_requests": int(stats.get("requests", 0)),
+            "blocked_requests": int(stats.get("blocked", 0)),
+            "total_cost_usd": float(stats.get("cost_today", 0.0)),
+            "active_agents": active_agents,
+            "circuit_breakers": circuit_breakers,
+            "budget": budget,
+            "recent_events": recent_events[:20],
+            "cost_timeline": list(self._dashboard_cost_timeline),
+            "flow_xray": flow_stats,
+            "connection_pool": stats.get("proxy_engine", {}).get("connection_pool", {}),
+            "savings": self._build_savings_payload(),
+        }
+
+    def _build_savings_payload(self) -> dict[str, Any]:
+        stats = self.stats
+        semantic_stats = stats.get("semantic_cache", {}) if isinstance(stats.get("semantic_cache"), dict) else {}
+        cache_savings = float(semantic_stats.get("total_cost_saved_usd", 0.0))
+        cache_hits = int(semantic_stats.get("exact_hits", 0)) + int(semantic_stats.get("semantic_hits", 0))
+        cascade_savings = float(self._cost_tracker.get_cascade_savings_today())
+        cascade_stats = stats.get("cascade_requests_by_level", {})
+        cascaded_requests = 0
+        if isinstance(cascade_stats, dict):
+            cascaded_requests = int(
+                cascade_stats.get("trivial", 0)
+                + cascade_stats.get("simple", 0)
+                + cascade_stats.get("medium", 0)
+                + cascade_stats.get("complex", 0)
+            )
+        loop_blocked = 0
+        if self._content_loop_detector is not None:
+            loop_blocked = int(self._content_loop_detector.stats.get("blocked", 0))
+        loop_savings = float(loop_blocked * self._estimated_avg_request_cost_usd)
+        total_savings = cache_savings + cascade_savings + loop_savings
+        return {
+            "cache_savings": round(cache_savings, 6),
+            "cascade_savings": round(cascade_savings, 6),
+            "loop_savings": round(loop_savings, 6),
+            "total_savings": round(total_savings, 6),
+            "details": {
+                "cache_hits": cache_hits,
+                "cascaded_requests": cascaded_requests,
+                "loops_blocked": loop_blocked,
+            },
+        }
+
+    def _build_dashboard_agents(self) -> dict[str, Any]:
+        if not self._behavioral_detector.enabled:
+            return {"agents": []}
+        agents_payload: list[dict[str, Any]] = []
+        with self._behavioral_detector._lock:  # noqa: SLF001 - internal read for dashboard endpoint
+            agent_ids = list(self._behavioral_detector._agents.keys())  # noqa: SLF001
+        for agent_id in agent_ids:
+            profile = self._behavioral_detector.get_agent_profile(agent_id)
+            if not isinstance(profile, dict):
+                continue
+            dims = profile.get("dimensions", {}) if isinstance(profile.get("dimensions"), dict) else {}
+            prompt_mean = float(dims.get("prompt_tokens", {}).get("mean", 0.0)) if isinstance(
+                dims.get("prompt_tokens"), dict
+            ) else 0.0
+            completion_mean = float(dims.get("completion_tokens", {}).get("mean", 0.0)) if isinstance(
+                dims.get("completion_tokens"), dict
+            ) else 0.0
+            anomaly_score = min(
+                1.0,
+                max(
+                    0.0,
+                    float(dims.get("error_rate", {}).get("mean", 0.0)) if isinstance(dims.get("error_rate"), dict) else 0.0,
+                ),
+            )
+            agents_payload.append(
+                {
+                    "agent_id": agent_id,
+                    "state": str(profile.get("state", "monitoring")),
+                    "total_requests": int(profile.get("total_requests", 0)),
+                    "avg_tokens": round(prompt_mean + completion_mean, 4),
+                    "anomaly_score": round(anomaly_score, 6),
+                    "tools_used": sorted(list((profile.get("tool_distribution") or {}).keys()))
+                    if isinstance(profile.get("tool_distribution"), dict)
+                    else [],
+                    "last_seen": str(profile.get("last_seen", "")),
+                    "request_frequency": float(dims.get("request_frequency", {}).get("mean", 0.0))
+                    if isinstance(dims.get("request_frequency"), dict)
+                    else 0.0,
+                    "anomaly_scores": {"error_rate": anomaly_score},
+                }
+            )
+        agents_payload.sort(key=lambda item: float(item.get("total_requests", 0)), reverse=True)
+        return {"agents": agents_payload}
+
+    def _handle_session_export(
+        self,
+        handler: BaseHTTPRequestHandler,
+        session_id: str,
+        query_params: dict[str, list[str]],
+    ) -> None:
+        if self._recorder is None:
+            self._send_json(handler, 404, {"error": "recording_not_enabled"})
+            return
+        if not session_id:
+            self._send_json(handler, 400, {"error": "session_id_required"})
+            return
+        content_level = str((query_params.get("content_level") or ["structure"])[0]).strip().lower() or "structure"
+        format_name = str((query_params.get("format") or ["air"])[0]).strip().lower() or "air"
+        download = str((query_params.get("download") or ["false"])[0]).strip().lower() == "true"
+        if format_name != "air":
+            self._send_json(handler, 400, {"error": "unsupported_format", "format": format_name})
+            return
+        try:
+            doc = export_session_to_air(
+                session_id=session_id,
+                recorder=self._recorder,
+                flow_analyzer=self._flow_analyzer,
+                behavioral_detector=self._behavioral_detector if self._behavioral_detector.enabled else None,
+                compliance_engine=self._compliance_engine if self._compliance_enabled else None,
+                content_level=content_level,
+                version=ORCHESIS_VERSION,
+            )
+        except ValueError as exc:
+            self._send_json(handler, 400, {"error": "invalid_content_level", "message": str(exc)})
+            return
+        if "error" in doc:
+            self._send_json(handler, 404, doc)
+            return
+        if download:
+            self._send_json(
+                handler,
+                200,
+                doc,
+                extra_headers={
+                    "Content-Disposition": f'attachment; filename="session_{session_id}.air"'
+                },
+            )
+            return
+        self._send_json(handler, 200, doc)
 
     def _handle_get(self, handler: BaseHTTPRequestHandler) -> None:
-        if handler.path in {"/", "/health"}:
+        parsed = urlsplit(handler.path)
+        path = parsed.path
+        query_params = parse_qs(parsed.query, keep_blank_values=True)
+        if path in {"/dashboard", "/dashboard/"}:
+            payload = get_dashboard_html().encode("utf-8")
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/html; charset=utf-8")
+            handler.send_header("Content-Length", str(len(payload)))
+            if self._config.cors:
+                handler.send_header("Access-Control-Allow-Origin", "*")
+            handler.end_headers()
+            handler.wfile.write(payload)
+            return
+        if path in {"/", "/health"}:
             self._send_json(
                 handler,
                 200,
@@ -1797,15 +2387,76 @@ class LLMHTTPProxy:
                 },
             )
             return
-        if handler.path == "/stats":
+        if path in {"/stats", "/api/v1/stats"}:
             self._send_json(handler, 200, self.stats)
             return
-        if handler.path == "/sessions" and self._recorder is not None:
+        if path == "/api/v1/savings":
+            self._send_json(handler, 200, self._build_savings_payload())
+            return
+        if path == "/api/threats" or path == "/api/threats/":
+            if self._threat_matcher is None:
+                self._send_json(handler, 200, {"threats": []})
+                return
+            category = (query_params.get("category") or [""])[0]
+            severity = (query_params.get("severity") or [""])[0]
+            threats = self._threat_matcher.list_threats(
+                category=str(category) if category else "",
+                severity=str(severity) if severity else "",
+            )
+            self._send_json(handler, 200, {"threats": threats})
+            return
+        if path.startswith("/api/threats/") and path != "/api/threats/stats":
+            threat_id = path.split("/api/threats/", 1)[1].strip("/")
+            if self._threat_matcher is None:
+                self._send_json(handler, 404, {"error": "threat_intel_not_enabled"})
+                return
+            sig = self._threat_matcher.get_threat(threat_id)
+            if sig is None:
+                self._send_json(handler, 404, {"error": "threat_not_found", "threat_id": threat_id})
+                return
+            self._send_json(
+                handler,
+                200,
+                {
+                    "threat_id": sig.threat_id,
+                    "name": sig.name,
+                    "category": sig.category.value,
+                    "severity": sig.severity.value,
+                    "description": sig.description,
+                    "detection": sig.detection,
+                    "mitigation": sig.mitigation,
+                    "owasp_ref": sig.owasp_ref,
+                    "mitre_ref": sig.mitre_ref,
+                    "references": list(sig.references),
+                },
+            )
+            return
+        if path == "/api/threats/stats":
+            if self._threat_matcher is None:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            self._send_json(handler, 200, self._threat_matcher.get_stats())
+            return
+        if path == "/api/dashboard/overview":
+            self._send_json(handler, 200, self._build_dashboard_overview())
+            return
+        if path == "/api/dashboard/agents":
+            self._send_json(handler, 200, self._build_dashboard_agents())
+            return
+        if path in {"/api/sessions", "/sessions"} and self._recorder is not None:
             sessions = [asdict(item) for item in self._recorder.list_sessions()]
             self._send_json(handler, 200, {"sessions": sessions})
             return
-        if handler.path.startswith("/sessions/") and self._recorder is not None:
-            session_id = handler.path.split("/sessions/", 1)[1].strip()
+        if path.startswith("/api/sessions/") and path.endswith("/export"):
+            session_id = path[len("/api/sessions/") : -len("/export")].strip("/")
+            self._handle_session_export(handler, session_id, query_params)
+            return
+        if (path.startswith("/sessions/") or path.startswith("/api/sessions/")) and self._recorder is not None:
+            session_id = (
+                path.split("/api/sessions/", 1)[1].strip()
+                if path.startswith("/api/sessions/")
+                else path.split("/sessions/", 1)[1].strip()
+            )
             if not session_id:
                 self._send_json(handler, 400, {"error": "session_id_required"})
                 return
@@ -1816,41 +2467,183 @@ class LLMHTTPProxy:
                 return
             self._send_json(handler, 200, {"session": asdict(summary)})
             return
-        if handler.path == "/api/flow/sessions":
+        if path == "/api/flow/sessions":
             if self._flow_analyzer is None:
                 self._send_json(handler, 200, {"sessions": []})
                 return
             self._send_json(handler, 200, {"sessions": self._flow_analyzer.list_sessions()})
             return
-        if handler.path.startswith("/api/flow/analyze/"):
+        if path.startswith("/api/flow/analyze/"):
             if self._flow_analyzer is None:
                 self._send_json(handler, 404, {"error": "Session not found"})
                 return
-            session_id = handler.path.split("/api/flow/analyze/", 1)[1].strip()
+            session_id = path.split("/api/flow/analyze/", 1)[1].strip()
             analysis = self._flow_analyzer.analyze_session(session_id)
             if analysis is None:
                 self._send_json(handler, 404, {"error": "Session not found"})
                 return
             self._send_json(handler, 200, analysis.to_dict())
             return
-        if handler.path.startswith("/api/flow/graph/"):
+        if path.startswith("/api/flow/graph/"):
             if self._flow_analyzer is None:
                 self._send_json(handler, 404, {"error": "Session not found"})
                 return
-            session_id = handler.path.split("/api/flow/graph/", 1)[1].strip()
+            session_id = path.split("/api/flow/graph/", 1)[1].strip()
             graph_json = self._flow_analyzer.export_graph_json(session_id)
             if not graph_json:
                 self._send_json(handler, 404, {"error": "Session not found"})
                 return
             self._send_json(handler, 200, json.loads(graph_json))
             return
-        if handler.path == "/api/flow/patterns":
+        if path == "/api/flow/patterns":
             if self._flow_analyzer is None:
                 self._send_json(handler, 200, {"sessions_tracked": 0, "pattern_counts": {}})
                 return
             self._send_json(handler, 200, self._flow_analyzer.get_stats())
             return
+        if path == "/api/compliance/summary":
+            self._send_json(handler, 200, self._compliance_engine.get_summary())
+            return
+        if path == "/api/compliance/coverage":
+            reports: dict[str, Any] = {}
+            for framework in self._compliance_engine._frameworks:  # noqa: SLF001
+                reports[framework.value] = self._compliance_engine.get_coverage_report(framework)
+            self._send_json(handler, 200, {"frameworks": reports})
+            return
+        if path.startswith("/api/compliance/coverage/"):
+            framework_token = path.split("/api/compliance/coverage/", 1)[1].strip().lower()
+            framework = ComplianceEngine._framework_from_alias(framework_token)
+            if framework is None:
+                self._send_json(handler, 404, {"error": "framework_not_found"})
+                return
+            self._send_json(handler, 200, self._compliance_engine.get_coverage_report(framework))
+            return
+        if path == "/api/compliance/findings":
+            framework = ComplianceEngine._framework_from_alias((query_params.get("framework") or [None])[0])
+            severity_token = (query_params.get("severity") or [None])[0]
+            sev = None
+            if isinstance(severity_token, str) and severity_token.strip():
+                try:
+                    sev = Severity(severity_token.strip().lower())
+                except Exception:
+                    sev = None
+            limit_raw = (query_params.get("limit") or ["100"])[0]
+            try:
+                limit = int(limit_raw)
+            except Exception:
+                limit = 100
+            findings = self._compliance_engine.get_findings(framework=framework, severity=sev, limit=limit)
+            self._send_json(
+                handler,
+                200,
+                {
+                    "findings": [
+                        {
+                            **asdict(item),
+                            "severity": item.severity.value,
+                        }
+                        for item in findings
+                    ]
+                },
+            )
+            return
+        if path == "/api/experiments" and self._experiment_manager is not None:
+            self._send_json(handler, 200, {"experiments": self._experiment_manager.list_experiments()})
+            return
+        if path.startswith("/api/experiments/") and path.endswith("/results") and self._experiment_manager is not None:
+            parts = path.split("/")
+            exp_id = parts[3] if len(parts) > 3 else ""
+            if exp_id:
+                try:
+                    result = self._experiment_manager.get_results(exp_id)
+                    self._send_json(handler, 200, result.to_dict())
+                except ValueError:
+                    self._send_json(handler, 404, {"error": "experiment_not_found"})
+            else:
+                self._send_json(handler, 404, {"error": "experiment_id_required"})
+            return
+        if path.startswith("/api/experiments/") and path.endswith("/live") and self._experiment_manager is not None:
+            parts = path.split("/")
+            exp_id = parts[3] if len(parts) > 3 else ""
+            if exp_id:
+                stats = self._experiment_manager.get_live_stats(exp_id)
+                self._send_json(handler, 200, stats)
+            else:
+                self._send_json(handler, 404, {"error": "experiment_id_required"})
+            return
+        if path == "/api/tasks/outcomes" and self._experiment_manager is not None:
+            outcomes = self._experiment_manager._task_tracker.get_outcome_distribution()
+            self._send_json(handler, 200, outcomes)
+            return
+        if path == "/api/tasks/correlations" and self._experiment_manager is not None:
+            correlations = self._experiment_manager._task_tracker.get_correlations()
+            self._send_json(handler, 200, correlations)
+            return
+        if path.startswith("/api/tasks/sessions/") and self._experiment_manager is not None:
+            session_id = path.split("/api/tasks/sessions/", 1)[1].strip()
+            if session_id:
+                state = self._experiment_manager._task_tracker.get_session_state(session_id)
+                if state:
+                    sess_dict = asdict(state)
+                    if hasattr(state.outcome, "value"):
+                        sess_dict["outcome"] = state.outcome.value
+                    self._send_json(handler, 200, {"session": sess_dict})
+                else:
+                    self._send_json(handler, 404, {"error": "session_not_found"})
+            else:
+                self._send_json(handler, 400, {"error": "session_id_required"})
+            return
+        if path == "/api/compliance/report":
+            fmt = str((query_params.get("format") or ["json"])[0]).strip().lower()
+            report = self._compliance_engine.export_report(format=fmt)
+            if isinstance(report, str):
+                payload = report.encode("utf-8")
+                handler.send_response(200)
+                handler.send_header("Content-Type", "text/markdown; charset=utf-8")
+                handler.send_header("Content-Length", str(len(payload)))
+                if self._config.cors:
+                    handler.send_header("Access-Control-Allow-Origin", "*")
+                handler.end_headers()
+                handler.wfile.write(payload)
+                return
+            self._send_json(handler, 200, report)
+            return
         self._send_json(handler, 404, {"error": "Not found"})
+
+    def _run_phase_span(
+        self,
+        ctx: _RequestContext,
+        phase_name: str,
+        phase_fn: Any,
+        extra_attrs: dict[str, str | int | float | bool] | None = None,
+    ) -> bool:
+        """Run a phase and optionally emit a span. Returns phase result."""
+        if self._span_emitter is None or ctx.trace_ctx is None:
+            return phase_fn(ctx)
+        parent_id = ctx.root_span.span_id if ctx.root_span else None
+        span = self._span_emitter.create_phase_span(phase_name, ctx.trace_ctx, parent_id or "")
+        try:
+            ok = phase_fn(ctx)
+            attrs = dict(extra_attrs or {})
+            if phase_name == "cascade":
+                attrs["orchesis.cascade_level"] = getattr(ctx, "cascade_level_name", "") or ""
+                attrs["orchesis.cache_hit"] = getattr(ctx, "cascade_cache_state", "") == "hit"
+            elif phase_name == "threat_intel":
+                attrs["orchesis.threat_detected"] = bool(getattr(ctx, "threat_matches", []))
+                matches = getattr(ctx, "threat_matches", []) or []
+                attrs["orchesis.threat_ids"] = ",".join(getattr(m, "threat_id", str(m)) for m in matches[:5])[:200]
+            elif phase_name == "loop_detection":
+                attrs["orchesis.loop_detected"] = getattr(ctx, "was_loop_detected", False)
+            elif phase_name == "context":
+                attrs["orchesis.context_tokens_saved"] = getattr(ctx, "context_tokens_saved", 0)
+            elif phase_name == "post_upstream" and getattr(ctx, "from_semantic_cache", False):
+                attrs["orchesis.cache_hit"] = True
+                attrs["orchesis.cache_type"] = "semantic"
+            self._span_emitter.end_span(span, status="OK" if ok else "ERROR", attributes=attrs)
+            return ok
+        except Exception:
+            self._span_emitter.end_span(span, status="ERROR")
+            raise
 
     def _phase_parse(self, ctx: _RequestContext) -> bool:
         length = int(ctx.handler.headers.get("Content-Length", "0") or "0")
@@ -1866,6 +2659,55 @@ class LLMHTTPProxy:
         ctx.body = body
         ctx.parsed_req = parse_request(body, ctx.handler.path)
         ctx.original_model = ctx.parsed_req.model or str(body.get("model", ""))
+        parsed_session_id = (
+            ctx.handler.headers.get("x-openclaw-session")
+            or ctx.handler.headers.get("x-session-id")
+            or ctx.handler.headers.get("x-request-id")
+            or "unknown"
+        )
+        if isinstance(parsed_session_id, str):
+            ctx.proc_result["session_id"] = parsed_session_id.strip() or "unknown"
+            if not ctx.session_id:
+                ctx.session_id = parsed_session_id.strip() or "unknown"
+        return True
+
+    def _phase_experiment(self, ctx: _RequestContext) -> bool:
+        """Assign A/B variant and override model if needed."""
+        if not self._experiment_manager:
+            return True
+        session_id = ctx.session_id or "default"
+        agent_id = (
+            ctx.handler.headers.get("X-Orchesis-Agent")
+            or ctx.handler.headers.get("x-orchesis-agent")
+            or ctx.behavior_agent_id
+            or "default"
+        )
+        model = str(ctx.body.get("model", ""))
+        tools_raw = ctx.body.get("tools", [])
+        tools = []
+        if isinstance(tools_raw, list):
+            for t in tools_raw:
+                if isinstance(t, dict):
+                    name = t.get("name", "")
+                    if isinstance(name, str) and name:
+                        tools.append(name)
+                elif isinstance(t, str) and t:
+                    tools.append(t)
+        assignment = self._experiment_manager.assign_variant(
+            session_id=session_id,
+            agent_id=agent_id,
+            model=model,
+            tools=tools,
+        )
+        if assignment:
+            ctx.experiment_id = assignment.experiment_id
+            ctx.variant_name = assignment.variant_name
+            if assignment.model_override:
+                ctx.body["model"] = assignment.model_override
+                if not ctx.original_model:
+                    ctx.original_model = model
+            ctx.session_headers["X-Orchesis-Experiment"] = assignment.experiment_id
+            ctx.session_headers["X-Orchesis-Variant"] = assignment.variant_name
         return True
 
     def _phase_cascade(self, ctx: _RequestContext) -> bool:
@@ -1881,14 +2723,21 @@ class LLMHTTPProxy:
         cache_key = self._cascade_router.make_cache_key(ctx.parsed_req, pre_model or "")
         cached_payload = self._cascade_router.get_cache(cache_key, pre_level)
         if cached_payload is not None:
+            session_value = str(ctx.session_id or ctx.proc_result.get("session_id", "unknown"))
             ctx.handler.send_response(200)
             ctx.handler.send_header("Content-Type", "application/json")
             ctx.handler.send_header("Content-Length", str(len(cached_payload)))
             ctx.handler.send_header("X-Orchesis-Cost", "0.0")
             ctx.handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
+            daily_budget = self._budget_cfg.get("daily")
+            if isinstance(daily_budget, int | float):
+                ctx.handler.send_header("X-Orchesis-Daily-Budget", f"{float(daily_budget):.4f}")
+            ctx.handler.send_header("X-Orchesis-Saved", "0.0000")
+            ctx.handler.send_header("X-Orchesis-Session", session_value)
             ctx.handler.send_header("X-Orchesis-Cascade-Level", pre_level_name)
             ctx.handler.send_header("X-Orchesis-Cascade-Model", pre_model or "")
             ctx.handler.send_header("X-Orchesis-Cache", "hit")
+            ctx.handler.send_header("X-Orchesis-Spend-Rate", f"{ctx.spend_rate_per_min:.4f}")
             if self._recorder is not None:
                 ctx.handler.send_header("X-Orchesis-Session-Id", ctx.session_id)
                 ctx.handler.send_header("X-Orchesis-Request-Id", ctx.request_id)
@@ -1978,55 +2827,94 @@ class LLMHTTPProxy:
 
     def _phase_loop_detection(self, ctx: _RequestContext) -> bool:
         if self._loop_detector is None:
-            return True
-        loop_decision = self._loop_detector.check_request(
-            {
-                "model": ctx.body.get("model", ctx.parsed_req.model),
-                "messages": ctx.parsed_req.messages,
-                "tool_calls": ctx.parsed_req.tool_calls,
-                "content_text": ctx.parsed_req.content_text,
-            }
-        )
-        if loop_decision.action == "block":
-            self._loop_trigger_hits += 1
-            if self._kill_enabled and self._should_kill_for_loops():
-                self._activate_kill_switch("auto-kill: loop threshold reached")
-                self._inc("blocked")
-                self._send_json(
-                    ctx.handler,
-                    503,
-                    {
-                        "error": {
-                            "type": "kill_switch",
-                            "message": self._kill_reason,
-                            "killed_at": self._kill_time,
-                        }
-                    },
-                )
-                return False
-            self._inc("blocked")
-            payload_lb = {
-                "error": {
-                    "type": "loop_detected",
-                    "message": loop_decision.reason or "Fuzzy loop threshold exceeded",
+            loop_decision = None
+        else:
+            loop_decision = self._loop_detector.check_request(
+                {
+                    "model": ctx.body.get("model", ctx.parsed_req.model),
+                    "messages": ctx.parsed_req.messages,
+                    "tool_calls": ctx.parsed_req.tool_calls,
+                    "content_text": ctx.parsed_req.content_text,
                 }
-            }
-            body_lb = json.dumps(payload_lb, ensure_ascii=False).encode("utf-8")
-            ctx.handler.send_response(429)
-            ctx.handler.send_header("Content-Type", "application/json")
-            ctx.handler.send_header("Content-Length", str(len(body_lb)))
-            ctx.handler.send_header("X-Orchesis-Loop-Blocked", loop_decision.reason or "Fuzzy loop threshold exceeded")
-            ctx.handler.send_header("X-Orchesis-Loop-Saved", f"${loop_decision.estimated_cost_saved:.2f}")
-            ctx.handler.send_header("X-Orchesis-Circuit", ctx.circuit_state_header)
-            if self._config.cors:
-                ctx.handler.send_header("Access-Control-Allow-Origin", "*")
-            ctx.handler.end_headers()
-            ctx.handler.wfile.write(body_lb)
-            return False
-        if loop_decision.action in {"warn", "downgrade_model"}:
-            ctx.loop_warning_header = loop_decision.reason or "Loop warning"
-            if loop_decision.action == "downgrade_model":
-                ctx.body["model"] = self._downgrade_model
+            )
+        if loop_decision is not None:
+            if loop_decision.action == "block":
+                self._loop_trigger_hits += 1
+                if self._kill_enabled and self._should_kill_for_loops():
+                    self._activate_kill_switch("auto-kill: loop threshold reached")
+                    self._inc("blocked")
+                    self._send_json(
+                        ctx.handler,
+                        503,
+                        {
+                            "error": {
+                                "type": "kill_switch",
+                                "message": self._kill_reason,
+                                "killed_at": self._kill_time,
+                            }
+                        },
+                    )
+                    return False
+                self._inc("blocked")
+                payload_lb = {
+                    "error": {
+                        "type": "loop_detected",
+                        "message": loop_decision.reason or "Fuzzy loop threshold exceeded",
+                    }
+                }
+                body_lb = json.dumps(payload_lb, ensure_ascii=False).encode("utf-8")
+                ctx.handler.send_response(429)
+                ctx.handler.send_header("Content-Type", "application/json")
+                ctx.handler.send_header("Content-Length", str(len(body_lb)))
+                ctx.handler.send_header("X-Orchesis-Loop-Blocked", loop_decision.reason or "Fuzzy loop threshold exceeded")
+                ctx.handler.send_header("X-Orchesis-Loop-Saved", f"${loop_decision.estimated_cost_saved:.2f}")
+                ctx.handler.send_header("X-Orchesis-Circuit", ctx.circuit_state_header)
+                if self._config.cors:
+                    ctx.handler.send_header("Access-Control-Allow-Origin", "*")
+                ctx.handler.end_headers()
+                ctx.handler.wfile.write(body_lb)
+                return False
+            if loop_decision.action in {"warn", "downgrade_model"}:
+                ctx.loop_warning_header = loop_decision.reason or "Loop warning"
+                ctx.was_loop_detected = True
+                if loop_decision.action == "downgrade_model":
+                    ctx.body["model"] = self._downgrade_model
+        if self._content_loop_detector is not None and isinstance(ctx.parsed_req.messages, list) and ctx.parsed_req.messages:
+            last_msg = ctx.parsed_req.messages[-1]
+            if isinstance(last_msg, dict) and str(last_msg.get("role", "")).lower() == "user":
+                content = last_msg.get("content", "")
+                if isinstance(content, str) and len(content) > 10:
+                    session_id = (
+                        ctx.handler.headers.get("x-openclaw-session")
+                        or ctx.handler.headers.get("x-session-id")
+                        or ctx.proc_result.get("session_id", "default")
+                    )
+                    result = self._content_loop_detector.check(content, str(session_id))
+                    ctx.content_loop_count = int(result.get("count", 0))
+                    if result.get("action") == "block":
+                        self._loop_trigger_hits += 1
+                        self._inc("blocked")
+                        retry_after = int(result.get("retry_after", 300))
+                        self._cost_tracker.record_loop_prevented_savings(self._estimated_avg_request_cost_usd)
+                        self._send_json(
+                            ctx.handler,
+                            429,
+                            {
+                                "error": {
+                                    "type": "content_loop_detected",
+                                    "message": (
+                                        f"Loop detected: {result.get('count', 0)} identical messages in "
+                                        f"{result.get('window_seconds', 0)}s."
+                                    ),
+                                    "retry_after": retry_after,
+                                }
+                            },
+                            extra_headers={
+                                "Retry-After": str(max(1, retry_after)),
+                                "X-Orchesis-Loop-Count": str(int(result.get("count", 0))),
+                            },
+                        )
+                        return False
         return True
 
     def _phase_behavioral(self, ctx: _RequestContext) -> bool:
@@ -2080,7 +2968,6 @@ class LLMHTTPProxy:
         return True
 
     def _phase_budget(self, ctx: _RequestContext) -> bool:
-        _ = ctx
         if self._budget_cfg:
             budget_status = self._cost_tracker.check_budget(self._budget_cfg)
             if self._kill_enabled and self._should_kill_for_cost(budget_status):
@@ -2111,6 +2998,92 @@ class LLMHTTPProxy:
                     },
                 )
                 return False
+        if self._spend_rate_detector is not None:
+            # Spend-rate check: eventually consistent. We check rate BEFORE the upstream
+            # call (cost unknown yet) and record actual spend AFTER response. Between
+            # check and record, concurrent requests may alter the rate. This is by design:
+            # we prefer allowing a borderline request over blocking pre-emptively with
+            # unknown cost. The next request will see the updated rate.
+            rate_result = self._spend_rate_detector.check()
+            ctx.spend_rate_per_min = float(rate_result.current_rate)
+            if not rate_result.allowed:
+                retry_after = int(max(1.0, rate_result.cooldown_until - time.monotonic()))
+                self._send_json(
+                    ctx.handler,
+                    429,
+                    {
+                        "error": {
+                            "type": "spend_rate_exceeded",
+                            "message": (
+                                f"Spending too fast: ${rate_result.window_spend:.2f} in {rate_result.reason}. "
+                                "Paused until rate normalizes."
+                            ),
+                            "retry_after": retry_after,
+                        }
+                    },
+                    extra_headers={"Retry-After": str(retry_after)},
+                )
+                return False
+        return True
+
+    def _phase_threat_intel(self, ctx: _RequestContext) -> bool:
+        """Scan request against threat intelligence database."""
+        if self._threat_matcher is None or not self._threat_matcher.enabled:
+            return True
+        messages = ctx.body.get("messages", [])
+        if not isinstance(messages, list):
+            messages = []
+        tools = [
+            str(t.get("name", ""))
+            for t in ctx.body.get("tools", [])
+            if isinstance(t, dict) and t.get("name")
+        ]
+        parsed = ctx.parsed_req
+        tool_calls: list[dict[str, Any]] = []
+        if parsed and hasattr(parsed, "tool_calls"):
+            for tc in parsed.tool_calls:
+                name = getattr(tc, "name", None) or (tc.get("name") if isinstance(tc, dict) else "")
+                inp = getattr(tc, "params", None) or getattr(tc, "input", None)
+                if inp is None and isinstance(tc, dict):
+                    inp = tc.get("input", tc.get("params", {}))
+                tool_calls.append({"name": str(name) if name else "", "input": inp or {}})
+        model = str(ctx.body.get("model", ""))
+        headers_dict: dict[str, str] = {}
+        if hasattr(ctx.handler, "headers"):
+            h = ctx.handler.headers
+            if hasattr(h, "items"):
+                headers_dict = dict(h)
+            elif hasattr(h, "keys"):
+                headers_dict = {k: h.get(k, "") for k in h.keys()}
+        matches = self._threat_matcher.scan_request(
+            messages=messages,
+            tools=tools,
+            tool_calls=tool_calls,
+            model=model,
+            headers=headers_dict or None,
+        )
+        if not matches:
+            return True
+        ctx.threat_matches = matches
+        for match in matches:
+            if match.action == "block":
+                self._inc("blocked")
+                self._send_json(
+                    ctx.handler,
+                    403,
+                    {
+                        "error": "threat_detected",
+                        "threat_id": match.threat_id,
+                        "name": match.name,
+                        "severity": match.severity,
+                        "description": match.description,
+                        "mitigation": match.mitigation,
+                    },
+                )
+                return False
+        threat_ids = ",".join(m.threat_id for m in matches)
+        ctx.session_headers["X-Orchesis-Threat-Detected"] = threat_ids
+        ctx.session_headers["X-Orchesis-Threat-Severity"] = matches[0].severity
         return True
 
     def _phase_policy(self, ctx: _RequestContext) -> bool:
@@ -2133,6 +3106,19 @@ class LLMHTTPProxy:
         return True
 
     def _phase_model_router(self, ctx: _RequestContext) -> bool:
+        if self._spend_rate_detector is not None and self._spend_rate_detector.is_heartbeat_request(ctx.body):
+            ctx.heartbeat_detected = True
+            ctx.proc_result["cascade_tier"] = "cheapest"
+            heartbeat_models = self._routing_cfg.get("heartbeat_models", {})
+            provider = ctx.parsed_req.provider or "openai"
+            cheapest = (
+                heartbeat_models.get(provider)
+                or heartbeat_models.get("default")
+                or "gpt-4o-mini"
+            )
+            if isinstance(cheapest, str) and cheapest and cheapest != ctx.body.get("model"):
+                ctx.body["model"] = cheapest
+            ctx.session_headers["X-Orchesis-Heartbeat"] = "true"
         if self._router is not None and ctx.parsed_req.content_text:
             route = self._router.route(
                 ctx.parsed_req.content_text,
@@ -2177,35 +3163,265 @@ class LLMHTTPProxy:
                     return False
         return True
 
+    def _phase_context(self, ctx: _RequestContext) -> bool:
+        """Optimize context window before sending to LLM."""
+        if self._context_engine is None or not self._context_engine.enabled:
+            return True
+        messages = ctx.body.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return True
+        max_tokens = int(ctx.body.get("max_tokens", 0) or 0)
+        model = str(ctx.body.get("model", ""))
+        result = self._context_engine.optimize(
+            messages=messages,
+            model=model,
+            max_tokens=max_tokens,
+        )
+        ctx.body["messages"] = result.messages
+        if result.tokens_saved > 0:
+            ctx.session_headers["X-Orchesis-Context-Tokens-Saved"] = str(result.tokens_saved)
+            ctx.session_headers["X-Orchesis-Context-Strategies"] = ",".join(result.strategies_applied)
+        ctx.context_tokens_saved = result.tokens_saved
+        ctx.context_strategies = result.strategies_applied
+        return True
+
+    def _is_streaming_request(self, ctx: _RequestContext) -> bool:
+        return bool(self._streaming_enabled and isinstance(ctx.body, dict) and ctx.body.get("stream") is True)
+
+    @staticmethod
+    def _extract_text_delta(event_str: str) -> str:
+        for line in event_str.split("\n"):
+            if not line.startswith("data: "):
+                continue
+            data_str = line[6:].strip()
+            if data_str == "[DONE]":
+                return ""
+            try:
+                data = json.loads(data_str)
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                if data.get("type") == "content_block_delta":
+                    delta = data.get("delta", {})
+                    if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                        text = delta.get("text", "")
+                        return str(text) if isinstance(text, str) else ""
+                choices = data.get("choices", [])
+                if isinstance(choices, list) and choices:
+                    first = choices[0]
+                    if isinstance(first, dict):
+                        delta = first.get("delta", {})
+                        if isinstance(delta, dict):
+                            content = delta.get("content", "")
+                            return str(content) if isinstance(content, str) else ""
+        return ""
+
+    @staticmethod
+    def _send_chunk(handler: BaseHTTPRequestHandler, data: bytes) -> None:
+        chunk = data if isinstance(data, bytes) else b""
+        header = f"{len(chunk):x}\r\n".encode("utf-8")
+        handler.wfile.write(header)
+        handler.wfile.write(chunk)
+        handler.wfile.write(b"\r\n")
+        handler.wfile.flush()
+
+    @staticmethod
+    def _build_synthetic_response(events: list[str], text_parts: list[str], ctx: _RequestContext) -> str:
+        full_text = "".join(text_parts)
+        synthetic: dict[str, Any] = {
+            "id": str(ctx.body.get("id", "synthetic_stream")),
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": full_text}],
+            "model": str(ctx.body.get("model", ctx.original_model)),
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "_orchesis_streaming": True,
+            "_orchesis_chunks": len(events),
+        }
+        for event_str in reversed(events):
+            if "message_delta" not in event_str and "\"usage\"" not in event_str:
+                continue
+            for line in event_str.split("\n"):
+                if not line.startswith("data: "):
+                    continue
+                try:
+                    data = json.loads(line[6:])
+                except Exception:
+                    continue
+                if isinstance(data, dict):
+                    usage = data.get("usage", {})
+                    if isinstance(usage, dict) and usage:
+                        synthetic["usage"] = usage
+                        return json.dumps(synthetic, ensure_ascii=False)
+        return json.dumps(synthetic, ensure_ascii=False)
+
+    @staticmethod
+    def _compose_target_path(parsed_url: Any) -> str:
+        base_path = parsed_url.path if isinstance(parsed_url.path, str) and parsed_url.path else "/"
+        if isinstance(parsed_url.query, str) and parsed_url.query:
+            return f"{base_path}?{parsed_url.query}"
+        return base_path
+
+    def _request_upstream_once(
+        self,
+        *,
+        upstream_url: str,
+        payload: bytes,
+        headers: dict[str, str],
+        stream_response: bool,
+        ctx: _RequestContext,
+    ) -> tuple[int, dict[str, str], bytes]:
+        parsed = urlsplit(upstream_url)
+        host = parsed.hostname or ""
+        if not host:
+            raise URLError("invalid upstream host")
+        use_ssl = parsed.scheme.lower() == "https"
+        port = parsed.port or (443 if use_ssl else 80)
+        target_path = self._compose_target_path(parsed)
+        pooled_conn = self._connection_pool.acquire(host=host, port=port, use_ssl=use_ssl)
+        error = False
+        try:
+            pooled_conn.conn.request("POST", target_path, body=payload, headers=headers)
+            response = pooled_conn.conn.getresponse()
+            status = int(getattr(response, "status", 200))
+            resp_headers = {str(k): str(v) for k, v in response.getheaders()}
+            if stream_response and status == 200:
+                self._handle_streaming_response(ctx, response, pooled_conn, resp_headers)
+                return status, resp_headers, ctx.resp_body
+            body = response.read()
+            return status, resp_headers, body
+        except Exception:
+            error = True
+            raise
+        finally:
+            if not stream_response:
+                self._connection_pool.release(pooled_conn, error=error)
+
+    def _handle_streaming_response(
+        self,
+        ctx: _RequestContext,
+        upstream_response: http.client.HTTPResponse,
+        pooled_conn: PooledConnection,
+        response_headers: dict[str, str],
+    ) -> None:
+        ctx.handler.send_response(int(getattr(upstream_response, "status", 200)))
+        skip = {"transfer-encoding", "connection", "content-length"}
+        for key, value in response_headers.items():
+            if key.lower() in skip:
+                continue
+            ctx.handler.send_header(key, value)
+        ctx.handler.send_header("Transfer-Encoding", "chunked")
+        ctx.handler.send_header("X-Orchesis-Cost", str(round(float(ctx.proc_result.get("cost", 0.0)), 6)))
+        ctx.handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
+        daily_budget = self._budget_cfg.get("daily")
+        if isinstance(daily_budget, int | float):
+            ctx.handler.send_header("X-Orchesis-Daily-Budget", f"{float(daily_budget):.4f}")
+        ctx.handler.send_header("X-Orchesis-Saved", f"{float(ctx.request_saved_usd):.4f}")
+        ctx.handler.send_header("X-Orchesis-Session", str(ctx.session_id or ctx.proc_result.get("session_id", "unknown")))
+        if ctx.heartbeat_detected:
+            ctx.handler.send_header("X-Orchesis-Heartbeat", "true")
+        if ctx.content_loop_count > 1:
+            ctx.handler.send_header("X-Orchesis-Loop-Count", str(ctx.content_loop_count))
+        ctx.handler.send_header("X-Orchesis-Spend-Rate", f"{ctx.spend_rate_per_min:.4f}")
+        ctx.handler.send_header("X-Orchesis-Circuit", self._circuit_breaker.get_state().lower().replace("_", "-"))
+        if self._recorder is not None:
+            ctx.handler.send_header("X-Orchesis-Session-Id", ctx.session_id)
+            ctx.handler.send_header("X-Orchesis-Request-Id", ctx.request_id)
+        if self._config.cors:
+            ctx.handler.send_header("Access-Control-Allow-Origin", "*")
+        ctx.handler.end_headers()
+        events: list[str] = []
+        texts: list[str] = []
+        chunks = 0
+        buffer = b""
+        had_error = False
+        try:
+            while True:
+                chunk = upstream_response.read(self._streaming_buffer_size)
+                if not chunk:
+                    break
+                self._send_chunk(ctx.handler, chunk)
+                chunks += 1
+                buffer += chunk
+                while b"\n\n" in buffer and len(events) < self._streaming_max_accumulated_events:
+                    event_data, buffer = buffer.split(b"\n\n", 1)
+                    event_str = event_data.decode("utf-8", errors="replace")
+                    events.append(event_str)
+                    delta = self._extract_text_delta(event_str)
+                    if delta:
+                        texts.append(delta)
+            self._send_chunk(ctx.handler, b"")
+        except (ConnectionAbortedError, BrokenPipeError, OSError):
+            had_error = True
+        finally:
+            self._connection_pool.release(pooled_conn, error=had_error)
+        ctx.is_streaming = True
+        ctx.streaming_events = events
+        ctx.streaming_text = "".join(texts)
+        ctx.streaming_chunks = chunks
+        self._streaming_count += 1
+        self._streaming_chunks_total += chunks
+        synthetic = self._build_synthetic_response(events, texts, ctx)
+        ctx.resp_body = synthetic.encode("utf-8")
+
     def _phase_upstream(self, ctx: _RequestContext) -> bool:
         ctx.provider = self._detect_provider(ctx.parsed_req.provider, ctx.handler.headers)
+        if (
+            self._semantic_cache is not None
+            and self._semantic_cache.enabled
+            and not self._is_streaming_request(ctx)
+        ):
+            messages = ctx.body.get("messages", [])
+            if isinstance(messages, list) and messages:
+                model = str(ctx.body.get("model", ""))
+                tools = [
+                    str(t.get("name", ""))
+                    for t in ctx.body.get("tools", [])
+                    if isinstance(t, dict) and t.get("name")
+                ]
+                cache_result = self._semantic_cache.lookup(messages, model, tools or None)
+                if cache_result.hit:
+                    ctx.resp_body = cache_result.response_body
+                    ctx.resp_status = 200
+                    ctx.resp_headers = {}
+                    ctx.from_semantic_cache = True
+                    ctx.session_headers["X-Orchesis-Cache"] = cache_result.match_type
+                    ctx.session_headers["X-Orchesis-Cache-Similarity"] = f"{cache_result.similarity:.2f}"
+                    return True
         upstream_base = self._get_upstream(ctx.provider, ctx.handler.headers)
         upstream_url = f"{upstream_base.rstrip('/')}{ctx.handler.path}"
         payload = json.dumps(ctx.body, ensure_ascii=False).encode("utf-8")
         upstream_headers = self._build_forward_headers(ctx.handler.headers, payload)
-        req = UrlRequest(upstream_url, data=payload, headers=upstream_headers, method="POST")
         ctx.resp_status = 200
         ctx.resp_headers = {}
         ctx.resp_body = b""
-        try:
-            with urlopen(req, timeout=self._config.timeout) as upstream_resp:
-                ctx.resp_status = int(getattr(upstream_resp, "status", 200))
-                ctx.resp_headers = dict(upstream_resp.headers.items())
-                ctx.resp_body = upstream_resp.read()
-        except HTTPError as error:
-            ctx.resp_status = int(error.code)
-            ctx.resp_headers = dict(error.headers.items()) if error.headers is not None else {}
-            ctx.resp_body = error.read()
-        except (URLError, OSError) as error:
-            self._circuit_breaker.record_failure()
-            self._inc("errors")
-            self._send_json(
-                ctx.handler,
-                502,
-                {"error": {"type": "upstream_error", "message": f"Failed to connect to upstream: {error}"}},
-            )
-            return False
-        return True
+        stream_response = self._is_streaming_request(ctx)
+        retries = self._connection_pool._config.max_retries if self._connection_pool._config.retry_on_connection_error else 0  # noqa: SLF001
+        for attempt in range(max(0, retries) + 1):
+            try:
+                status, resp_headers, resp_body = self._request_upstream_once(
+                    upstream_url=upstream_url,
+                    payload=payload,
+                    headers=upstream_headers,
+                    stream_response=stream_response,
+                    ctx=ctx,
+                )
+                ctx.resp_status = status
+                ctx.resp_headers = resp_headers
+                ctx.resp_body = resp_body
+                return True
+            except Exception as error:
+                if attempt >= retries:
+                    self._circuit_breaker.record_failure()
+                    self._inc("errors")
+                    self._send_json(
+                        ctx.handler,
+                        502,
+                        {"error": {"type": "upstream_error", "message": f"Failed to connect to upstream: {error}"}},
+                    )
+                    return False
+        return False
 
     def _phase_post_upstream(self, ctx: _RequestContext) -> bool:
         ctx.parsed_resp_obj = None
@@ -2240,6 +3456,7 @@ class LLMHTTPProxy:
             and self._cascade_router.should_escalate(ctx.resp_status, ctx.parsed_resp_obj)
             and ctx.cascade_decision.cascade_level < CascadeLevel.COMPLEX
         ):
+            ctx.was_escalated = True
             escalated_decision = self._cascade_router.escalate(ctx.cascade_decision)
             if escalated_decision.model:
                 ctx.body["model"] = escalated_decision.model
@@ -2248,21 +3465,25 @@ class LLMHTTPProxy:
             upstream_base = self._get_upstream(ctx.provider, ctx.handler.headers)
             upstream_url = f"{upstream_base.rstrip('/')}{ctx.handler.path}"
             payload_retry = json.dumps(ctx.body, ensure_ascii=False).encode("utf-8")
-            req_retry = UrlRequest(
-                upstream_url,
-                data=payload_retry,
-                headers=self._build_forward_headers(ctx.handler.headers, payload_retry),
-                method="POST",
-            )
+            retry_headers = self._build_forward_headers(ctx.handler.headers, payload_retry)
             try:
-                with urlopen(req_retry, timeout=self._config.timeout) as upstream_retry:
-                    ctx.resp_status = int(getattr(upstream_retry, "status", 200))
-                    ctx.resp_headers = dict(upstream_retry.headers.items())
-                    ctx.resp_body = upstream_retry.read()
-            except HTTPError as error:
-                ctx.resp_status = int(error.code)
-                ctx.resp_headers = dict(error.headers.items()) if error.headers is not None else {}
-                ctx.resp_body = error.read()
+                status, resp_headers, resp_body = self._request_upstream_once(
+                    upstream_url=upstream_url,
+                    payload=payload_retry,
+                    headers=retry_headers,
+                    stream_response=False,
+                    ctx=ctx,
+                )
+                ctx.resp_status = status
+                ctx.resp_headers = resp_headers
+                ctx.resp_body = resp_body
+            except Exception as error:
+                ctx.resp_status = 502
+                ctx.resp_headers = {}
+                ctx.resp_body = json.dumps(
+                    {"error": {"type": "upstream_error", "message": f"Failed to connect to upstream: {error}"}},
+                    ensure_ascii=False,
+                ).encode("utf-8")
             ctx.cascade_decision = escalated_decision
             ctx.cascade_level_name = self._cascade_router.level_name(ctx.cascade_decision.cascade_level)
             try:
@@ -2277,11 +3498,12 @@ class LLMHTTPProxy:
             token_sum = int(getattr(ctx.parsed_resp_obj, "input_tokens", 0)) + int(
                 getattr(ctx.parsed_resp_obj, "output_tokens", 0)
             )
-            self._cost_tracker.record_cascade_savings(
+            cascade_saved = self._cost_tracker.record_cascade_savings(
                 original_model=ctx.original_model or ctx.cascade_decision.model,
                 actual_model=ctx.cascade_decision.model,
                 tokens=token_sum,
             )
+            ctx.request_saved_usd += float(cascade_saved)
             if 200 <= ctx.resp_status < 300:
                 self._cascade_router.record_result(ctx.cascade_decision, ctx.parsed_resp_obj)
                 self._cascade_router.cache_response(ctx.cascade_decision, ctx.resp_body)
@@ -2317,33 +3539,101 @@ class LLMHTTPProxy:
                 status="ok" if ctx.resp_status < 400 else "error",
                 tool_calls=tool_calls_for_flow,
             )
+        if self._experiment_manager:
+            if ctx.experiment_id and ctx.variant_name:
+                tokens_in = int(getattr(ctx.parsed_resp_obj, "input_tokens", 0)) if ctx.parsed_resp_obj else 0
+                tokens_out = int(getattr(ctx.parsed_resp_obj, "output_tokens", 0)) if ctx.parsed_resp_obj else 0
+                tool_count = len(getattr(ctx.parsed_resp_obj, "tool_calls", [])) if ctx.parsed_resp_obj else 0
+                self._experiment_manager.record_request(
+                    experiment_id=ctx.experiment_id,
+                    variant_name=ctx.variant_name,
+                    cost_usd=float(ctx.proc_result.get("cost", 0.0)),
+                    latency_ms=(time.perf_counter() - ctx.request_started) * 1000.0,
+                    tokens=tokens_in + tokens_out,
+                    tool_calls=tool_count,
+                    is_error=ctx.resp_status >= 400,
+                    turns=1,
+                )
+            session_id = ctx.session_id or "default"
+            stop_reason = ""
+            if ctx.parsed_resp_obj is not None:
+                stop_reason = str(getattr(ctx.parsed_resp_obj, "stop_reason", "") or "")
+            self._experiment_manager._task_tracker.record_turn(
+                session_id=session_id,
+                model=str(ctx.body.get("model", ctx.original_model)),
+                tokens_in=int(getattr(ctx.parsed_resp_obj, "input_tokens", 0)) if ctx.parsed_resp_obj else 0,
+                tokens_out=int(getattr(ctx.parsed_resp_obj, "output_tokens", 0)) if ctx.parsed_resp_obj else 0,
+                cost_usd=float(ctx.proc_result.get("cost", 0.0)),
+                latency_ms=(time.perf_counter() - ctx.request_started) * 1000.0,
+                tool_calls=len(getattr(ctx.parsed_resp_obj, "tool_calls", [])) if ctx.parsed_resp_obj else 0,
+                stop_reason=stop_reason,
+                is_error=ctx.resp_status >= 400,
+                was_escalated=ctx.was_escalated,
+                was_loop_detected=ctx.was_loop_detected,
+                experiment_id=ctx.experiment_id,
+                variant_name=ctx.variant_name,
+            )
+            should_finalize = False
+            if stop_reason == "end_turn":
+                should_finalize = True
+            elif ctx.was_loop_detected:
+                should_finalize = True
+            elif ctx.resp_status >= 400:
+                state = self._experiment_manager._task_tracker.get_session_state(session_id)
+                if state and state.consecutive_errors >= self._experiment_manager._task_tracker._config.consecutive_errors_threshold:
+                    should_finalize = True
+
+            if should_finalize:
+                outcome = self._experiment_manager._task_tracker.finalize_session(session_id)
+                if ctx.experiment_id and ctx.variant_name:
+                    self._experiment_manager.record_task_outcome(ctx.experiment_id, ctx.variant_name, outcome)
+        cost_value = float(ctx.proc_result.get("cost", 0.0)) if isinstance(ctx.proc_result, dict) else 0.0
+        if self._spend_rate_detector is not None and cost_value > 0.0:
+            # Record actual cost from upstream response. This updates the spend-rate
+            # detector for future checks. See budget phase comment on eventual consistency.
+            self._spend_rate_detector.record_spend(cost_value)
+            spend_state = self._spend_rate_detector.check()
+            ctx.spend_rate_per_min = float(spend_state.current_rate)
+        if self._spend_rate_detector is not None and self._spend_rate_detector.is_heartbeat_cost_high(ctx.body, cost_value):
+            ctx.session_headers["X-Orchesis-Heartbeat-Costly"] = "true"
+        if (
+            self._semantic_cache is not None
+            and ctx.resp_status == 200
+            and not ctx.from_semantic_cache
+            and not ctx.is_streaming
+        ):
+            messages = ctx.body.get("messages", [])
+            if isinstance(messages, list) and messages:
+                model = str(ctx.body.get("model", ""))
+                tools = [
+                    str(t.get("name", ""))
+                    for t in ctx.body.get("tools", [])
+                    if isinstance(t, dict) and t.get("name")
+                ]
+                tokens = 0
+                if ctx.parsed_resp_obj is not None:
+                    tokens = int(getattr(ctx.parsed_resp_obj, "input_tokens", 0) or 0) + int(
+                        getattr(ctx.parsed_resp_obj, "output_tokens", 0) or 0
+                    )
+                cost = float(ctx.proc_result.get("cost", 0.0))
+                self._semantic_cache.store(messages, model, tools or None, ctx.resp_body, tokens, cost)
         return True
 
-    def _phase_send_response(self, ctx: _RequestContext) -> None:
-        ctx.handler.send_response(ctx.resp_status)
-        self._copy_upstream_headers(ctx.handler, ctx.resp_headers, len(ctx.resp_body))
-        ctx.handler.send_header("X-Orchesis-Cost", str(round(float(ctx.proc_result.get("cost", 0.0)), 6)))
-        ctx.handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
-        ctx.handler.send_header("X-Orchesis-Cascade-Level", ctx.cascade_level_name)
-        ctx.handler.send_header("X-Orchesis-Cascade-Model", str(ctx.body.get("model", ctx.original_model)))
-        ctx.handler.send_header("X-Orchesis-Cache", ctx.cascade_cache_state)
-        ctx.handler.send_header("X-Orchesis-Circuit", self._circuit_breaker.get_state().lower().replace("_", "-"))
-        if self._recorder is not None:
-            ctx.handler.send_header("X-Orchesis-Session-Id", ctx.session_id)
-            ctx.handler.send_header("X-Orchesis-Request-Id", ctx.request_id)
-        if ctx.loop_warning_header:
-            ctx.handler.send_header("X-Orchesis-Loop-Warning", ctx.loop_warning_header)
-        if self._behavioral_detector.enabled:
-            ctx.handler.send_header("X-Orchesis-Behavior", ctx.behavior_header)
-            if ctx.behavior_score_header:
-                ctx.handler.send_header("X-Orchesis-Anomaly-Score", ctx.behavior_score_header)
-            if ctx.behavior_dims_header:
-                ctx.handler.send_header("X-Orchesis-Anomaly-Dimensions", ctx.behavior_dims_header)
-        if self._config.cors:
-            ctx.handler.send_header("Access-Control-Allow-Origin", "*")
-        ctx.handler.end_headers()
-        ctx.handler.wfile.write(ctx.resp_body)
+    def _finalize_response_recording(self, ctx: _RequestContext) -> None:
         self._inc("allowed")
+        self._dashboard_cost_timeline.append(
+            {
+                "timestamp": time.time(),
+                "cumulative_cost": float(self._cost_tracker.get_daily_total()),
+            }
+        )
+        if ctx.resp_status >= 400:
+            sev = "critical" if ctx.resp_status >= 500 else "high"
+            self._add_dashboard_event(
+                "upstream_response",
+                sev,
+                f"Upstream returned HTTP {ctx.resp_status}.",
+            )
         response_obj: dict[str, Any] | None = None
         try:
             parsed_obj = json.loads(ctx.resp_body.decode("utf-8"))
@@ -2370,13 +3660,66 @@ class LLMHTTPProxy:
             },
         )
 
+    def _phase_send_response(self, ctx: _RequestContext) -> None:
+        if not ctx.is_streaming:
+            ctx.handler.send_response(ctx.resp_status)
+            self._copy_upstream_headers(ctx.handler, ctx.resp_headers, len(ctx.resp_body))
+            ctx.handler.send_header("X-Orchesis-Cost", str(round(float(ctx.proc_result.get("cost", 0.0)), 6)))
+            ctx.handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
+            daily_budget = self._budget_cfg.get("daily")
+            if isinstance(daily_budget, int | float):
+                ctx.handler.send_header("X-Orchesis-Daily-Budget", f"{float(daily_budget):.4f}")
+            ctx.handler.send_header("X-Orchesis-Saved", f"{float(ctx.request_saved_usd):.4f}")
+            ctx.handler.send_header("X-Orchesis-Session", str(ctx.session_id or ctx.proc_result.get("session_id", "unknown")))
+            ctx.handler.send_header("X-Orchesis-Cascade-Level", ctx.cascade_level_name)
+            ctx.handler.send_header("X-Orchesis-Cascade-Model", str(ctx.body.get("model", ctx.original_model)))
+            if ctx.from_semantic_cache:
+                ctx.handler.send_header("X-Orchesis-Cache", ctx.session_headers.get("X-Orchesis-Cache", "semantic"))
+                ctx.handler.send_header("X-Orchesis-Cache-Similarity", ctx.session_headers.get("X-Orchesis-Cache-Similarity", "1.00"))
+            else:
+                ctx.handler.send_header("X-Orchesis-Cache", ctx.cascade_cache_state)
+            ctx.handler.send_header("X-Orchesis-Circuit", self._circuit_breaker.get_state().lower().replace("_", "-"))
+            if self._recorder is not None:
+                ctx.handler.send_header("X-Orchesis-Session-Id", ctx.session_id)
+                ctx.handler.send_header("X-Orchesis-Request-Id", ctx.request_id)
+            if ctx.experiment_id:
+                ctx.handler.send_header("X-Orchesis-Experiment", ctx.experiment_id)
+            if ctx.variant_name:
+                ctx.handler.send_header("X-Orchesis-Variant", ctx.variant_name)
+            if ctx.loop_warning_header:
+                ctx.handler.send_header("X-Orchesis-Loop-Warning", ctx.loop_warning_header)
+            if ctx.content_loop_count > 1:
+                ctx.handler.send_header("X-Orchesis-Loop-Count", str(ctx.content_loop_count))
+            if ctx.heartbeat_detected:
+                ctx.handler.send_header("X-Orchesis-Heartbeat", "true")
+            ctx.handler.send_header("X-Orchesis-Spend-Rate", f"{ctx.spend_rate_per_min:.4f}")
+            if ctx.context_tokens_saved > 0:
+                ctx.handler.send_header("X-Orchesis-Context-Tokens-Saved", str(ctx.context_tokens_saved))
+                ctx.handler.send_header("X-Orchesis-Context-Strategies", ",".join(ctx.context_strategies))
+            if ctx.threat_matches:
+                ctx.handler.send_header("X-Orchesis-Threat-Detected", ",".join(m.threat_id for m in ctx.threat_matches))
+                ctx.handler.send_header("X-Orchesis-Threat-Severity", ctx.threat_matches[0].severity)
+            if self._behavioral_detector.enabled:
+                ctx.handler.send_header("X-Orchesis-Behavior", ctx.behavior_header)
+                if ctx.behavior_score_header:
+                    ctx.handler.send_header("X-Orchesis-Anomaly-Score", ctx.behavior_score_header)
+                if ctx.behavior_dims_header:
+                    ctx.handler.send_header("X-Orchesis-Anomaly-Dimensions", ctx.behavior_dims_header)
+            if self._config.cors:
+                ctx.handler.send_header("Access-Control-Allow-Origin", "*")
+            ctx.handler.end_headers()
+            self._finalize_response_recording(ctx)
+            ctx.handler.wfile.write(ctx.resp_body)
+            return
+        self._finalize_response_recording(ctx)
+
     def _handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         self._inc("requests")
         ctx = _RequestContext(
             handler=handler,
             request_started=time.perf_counter(),
             circuit_state_header=self._circuit_breaker.get_state().lower().replace("_", "-"),
-            session_id=self._resolve_session_id(handler.headers) if self._recorder is not None else "",
+            session_id=self._resolve_session_id(handler.headers),
             request_id=uuid.uuid4().hex if self._recorder is not None else "",
         )
         ctx.session_headers = (
@@ -2384,6 +3727,9 @@ class LLMHTTPProxy:
             if self._recorder is not None
             else {}
         )
+        if self._span_emitter:
+            headers_dict = {k: v for k, v in handler.headers.items()}
+            ctx.trace_ctx = TraceContext.from_headers(headers_dict)
         try:
             if handler.path == "/kill":
                 self._handle_kill(handler)
@@ -2391,6 +3737,40 @@ class LLMHTTPProxy:
             if handler.path == "/resume":
                 self._handle_resume(handler)
                 return
+            if self._experiment_manager is not None and handler.path == "/api/experiments":
+                body = self._read_json_body(handler)
+                if isinstance(body, dict) and body.get("name") and body.get("variants"):
+                    try:
+                        exp = self._experiment_manager.create_experiment(**body)
+                        self._send_json(handler, 201, exp.to_dict())
+                    except ValueError as e:
+                        self._send_json(handler, 400, {"error": str(e)})
+                else:
+                    self._send_json(handler, 400, {"error": "name and variants required"})
+                return
+            if self._experiment_manager is not None and "/api/experiments/" in handler.path:
+                parts = handler.path.split("/")
+                if len(parts) >= 4:
+                    exp_id = parts[3]
+                    if handler.path.endswith("/start"):
+                        ok = self._experiment_manager.start_experiment(exp_id)
+                        self._send_json(handler, 200 if ok else 409, {"started": ok})
+                        return
+                    if handler.path.endswith("/stop"):
+                        try:
+                            result = self._experiment_manager.stop_experiment(exp_id)
+                            self._send_json(handler, 200, result.to_dict())
+                        except ValueError:
+                            self._send_json(handler, 404, {"error": "experiment_not_found"})
+                        return
+                    if handler.path.endswith("/pause"):
+                        ok = self._experiment_manager.pause_experiment(exp_id)
+                        self._send_json(handler, 200 if ok else 409, {"paused": ok})
+                        return
+                    if handler.path.endswith("/resume"):
+                        ok = self._experiment_manager.resume_experiment(exp_id)
+                        self._send_json(handler, 200 if ok else 409, {"resumed": ok})
+                        return
             if self._killed:
                 self._inc("blocked")
                 self._send_json(
@@ -2407,28 +3787,91 @@ class LLMHTTPProxy:
                 return
             if not self._phase_parse(ctx):
                 return
-            if not self._phase_flow_xray_record(ctx):
+            if self._span_emitter and ctx.trace_ctx:
+                agent_id = (
+                    ctx.handler.headers.get("X-Orchesis-Agent")
+                    or ctx.handler.headers.get("x-orchesis-agent")
+                    or ctx.behavior_agent_id
+                    or ""
+                )
+                ctx.root_span = self._span_emitter.create_request_span(
+                    ctx.trace_ctx,
+                    model=str(ctx.body.get("model", ctx.parsed_req.model or "")),
+                    provider=ctx.parsed_req.provider or "",
+                    session_id=ctx.session_id or "",
+                    agent_id=agent_id,
+                )
+            if not self._run_phase_span(ctx, "experiment", self._phase_experiment):
                 return
-            if not self._phase_cascade(ctx):
+            if not self._run_phase_span(ctx, "flow_xray_record", self._phase_flow_xray_record):
                 return
-            if not self._phase_circuit_breaker(ctx):
+            if not self._run_phase_span(ctx, "cascade", self._phase_cascade):
+                if ctx.root_span:
+                    self._span_emitter.end_span(
+                        ctx.root_span,
+                        attributes={
+                            "orchesis.cascade_level": str(getattr(ctx, "cascade_level_name", "")),
+                            "orchesis.cache_hit": bool(getattr(ctx, "cascade_cache_state", "") == "hit"),
+                        },
+                    )
                 return
-            if not self._phase_loop_detection(ctx):
+            def _end_root_early() -> None:
+                if ctx.root_span and self._span_emitter:
+                    self._span_emitter.end_span(
+                        ctx.root_span,
+                        status="OK",
+                        attributes={"orchesis.decision": "block"},
+                    )
+
+            if not self._run_phase_span(ctx, "circuit_breaker", self._phase_circuit_breaker):
+                _end_root_early()
                 return
-            if not self._phase_behavioral(ctx):
+            if not self._run_phase_span(ctx, "loop_detection", self._phase_loop_detection):
+                _end_root_early()
                 return
-            if not self._phase_budget(ctx):
+            if not self._run_phase_span(ctx, "behavioral", self._phase_behavioral):
+                _end_root_early()
                 return
-            if not self._phase_policy(ctx):
+            if not self._run_phase_span(ctx, "budget", self._phase_budget):
+                _end_root_early()
                 return
-            if not self._phase_model_router(ctx):
+            if not self._run_phase_span(ctx, "policy", self._phase_policy):
+                _end_root_early()
                 return
-            if not self._phase_secrets(ctx):
+            if not self._run_phase_span(ctx, "threat_intel", self._phase_threat_intel):
+                _end_root_early()
                 return
-            if not self._phase_upstream(ctx):
+            if not self._run_phase_span(ctx, "model_router", self._phase_model_router):
+                _end_root_early()
                 return
-            if not self._phase_post_upstream(ctx):
+            if not self._run_phase_span(ctx, "secrets", self._phase_secrets):
+                _end_root_early()
                 return
+            if not self._run_phase_span(ctx, "context", self._phase_context):
+                _end_root_early()
+                return
+            if not self._run_phase_span(ctx, "upstream", self._phase_upstream):
+                _end_root_early()
+                return
+            if not self._run_phase_span(ctx, "post_upstream", self._phase_post_upstream):
+                _end_root_early()
+                return
+            if ctx.root_span:
+                cost = (ctx.proc_result or {}).get("cost", 0.0) if isinstance(ctx.proc_result, dict) else 0.0
+                parsed = ctx.parsed_resp_obj
+                self._span_emitter.end_span(
+                    ctx.root_span,
+                    attributes={
+                        "gen_ai.response.model": str(ctx.body.get("model", "")),
+                        "gen_ai.usage.input_tokens": getattr(parsed, "input_tokens", 0) if parsed else 0,
+                        "gen_ai.usage.output_tokens": getattr(parsed, "output_tokens", 0) if parsed else 0,
+                        "gen_ai.response.finish_reasons": getattr(parsed, "stop_reason", "") if parsed else "",
+                        "orchesis.cost_usd": float(cost) if isinstance(ctx.proc_result, dict) else 0.0,
+                        "orchesis.decision": "allow",
+                        "orchesis.experiment_id": getattr(ctx, "experiment_id", "") or "",
+                        "orchesis.variant_name": getattr(ctx, "variant_name", "") or "",
+                    },
+                )
             self._phase_send_response(ctx)
         except Exception as error:  # noqa: BLE001
             _HTTP_PROXY_LOGGER.exception("proxy runtime error")
@@ -2455,6 +3898,13 @@ class LLMHTTPProxy:
         )
 
     def _handle_delete(self, handler: BaseHTTPRequestHandler) -> None:
+        if self._experiment_manager is not None and handler.path.startswith("/api/experiments/"):
+            parts = handler.path.split("/")
+            if len(parts) >= 4 and parts[3]:
+                exp_id = parts[3]
+                ok = self._experiment_manager.delete_experiment(exp_id)
+                self._send_json(handler, 200 if ok else 404, {"deleted": ok})
+                return
         if handler.path.startswith("/sessions/") and self._recorder is not None:
             session_id = handler.path.split("/sessions/", 1)[1].strip()
             if not session_id:
@@ -2533,12 +3983,21 @@ class LLMHTTPProxy:
 
     @staticmethod
     def _resolve_session_id(headers: Any) -> str:
-        sid = headers.get("X-Session") or headers.get("x-session")
+        sid = (
+            headers.get("X-OpenClaw-Session")
+            or headers.get("x-openclaw-session")
+            or headers.get("X-Session-Id")
+            or headers.get("x-session-id")
+            or headers.get("X-Request-Id")
+            or headers.get("x-request-id")
+            or headers.get("X-Session")
+            or headers.get("x-session")
+        )
         if not isinstance(sid, str) or not sid.strip():
             sid = headers.get("X-Orchesis-Session-Id") or headers.get("x-orchesis-session-id")
         if isinstance(sid, str) and sid.strip():
             return sid.strip()
-        return uuid.uuid4().hex
+        return "unknown"
 
     def _record_session(
         self,
@@ -2628,13 +4087,16 @@ class LLMHTTPProxy:
         extra_headers: dict[str, str] | None = None,
     ) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        handler.send_response(status)
-        handler.send_header("Content-Type", "application/json")
-        handler.send_header("Content-Length", str(len(body)))
-        if isinstance(extra_headers, dict):
-            for key, value in extra_headers.items():
-                handler.send_header(str(key), str(value))
-        if self._config.cors:
-            handler.send_header("Access-Control-Allow-Origin", "*")
-        handler.end_headers()
-        handler.wfile.write(body)
+        try:
+            handler.send_response(status)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(body)))
+            if isinstance(extra_headers, dict):
+                for key, value in extra_headers.items():
+                    handler.send_header(str(key), str(value))
+            if self._config.cors:
+                handler.send_header("Access-Control-Allow-Origin", "*")
+            handler.end_headers()
+            handler.wfile.write(body)
+        except (ConnectionAbortedError, BrokenPipeError, OSError):
+            return

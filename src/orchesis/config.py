@@ -164,6 +164,37 @@ def _normalize_cost_controls(policy: dict[str, Any]) -> None:
     if on_hard_limit not in {"block", "notify"}:
         on_hard_limit = "block"
     budgets["on_hard_limit"] = on_hard_limit
+    spend_rate_raw = budgets.get("spend_rate")
+    spend_rate = spend_rate_raw if isinstance(spend_rate_raw, dict) else {}
+    spend_rate["enabled"] = bool(spend_rate.get("enabled", False))
+    windows_raw = spend_rate.get("windows")
+    normalized_windows: list[dict[str, float]] = []
+    if isinstance(windows_raw, list):
+        for item in windows_raw:
+            if not isinstance(item, dict):
+                continue
+            seconds = item.get("seconds")
+            max_spend = item.get("max_spend")
+            if not _is_number(seconds) or float(seconds) <= 0:
+                continue
+            if not _is_number(max_spend) or float(max_spend) < 0:
+                continue
+            normalized_windows.append({"seconds": int(seconds), "max_spend": float(max_spend)})
+    if not normalized_windows:
+        normalized_windows = [
+            {"seconds": 300, "max_spend": 2.0},
+            {"seconds": 3600, "max_spend": 5.0},
+        ]
+    spend_rate["windows"] = normalized_windows
+    spike_multiplier = spend_rate.get("spike_multiplier", 5.0)
+    spend_rate["spike_multiplier"] = float(spike_multiplier) if _is_number(spike_multiplier) and float(spike_multiplier) > 0 else 5.0
+    pause_seconds = spend_rate.get("pause_seconds", 300)
+    spend_rate["pause_seconds"] = int(pause_seconds) if _is_number(pause_seconds) and int(pause_seconds) > 0 else 300
+    hb_threshold = spend_rate.get("heartbeat_cost_threshold", 0.10)
+    spend_rate["heartbeat_cost_threshold"] = (
+        float(hb_threshold) if _is_number(hb_threshold) and float(hb_threshold) >= 0 else 0.10
+    )
+    budgets["spend_rate"] = spend_rate
 
     tool_costs = policy.get("tool_costs")
     if isinstance(tool_costs, dict):
@@ -194,6 +225,13 @@ def _normalize_cost_controls(policy: dict[str, Any]) -> None:
         policy["model_routing"] = model_routing
     model_routing["enabled"] = bool(model_routing.get("enabled", False))
     model_routing["default"] = str(model_routing.get("default", "gpt-4o"))
+    heartbeat_models = model_routing.get("heartbeat_models", {})
+    if not isinstance(heartbeat_models, dict):
+        heartbeat_models = {}
+    heartbeat_models.setdefault("openai", "gpt-4o-mini")
+    heartbeat_models.setdefault("anthropic", "claude-haiku-4-5-20251001")
+    heartbeat_models.setdefault("default", "gpt-4o-mini")
+    model_routing["heartbeat_models"] = heartbeat_models
     rules = model_routing.get("rules")
     if isinstance(rules, list):
         normalized_rules: list[dict[str, str]] = []
@@ -468,6 +506,13 @@ def _normalize_loop_detection(policy: dict[str, Any]) -> None:
             "enabled": False,
             "exact": {"threshold": 5, "window_seconds": 120, "action": "warn"},
             "fuzzy": {"threshold": 8, "window_seconds": 300, "action": "block"},
+            "content_loop": {
+                "enabled": False,
+                "window_seconds": 300,
+                "max_identical": 5,
+                "cooldown_seconds": 300,
+                "hash_prefix_len": 256,
+            },
             "on_detect": {"notify": True, "log": True, "max_cost_saved": True},
             "warn_threshold": 5,
             "block_threshold": 8,
@@ -530,6 +575,26 @@ def _normalize_loop_detection(policy: dict[str, Any]) -> None:
     raw["block_threshold"] = int(raw["fuzzy"]["threshold"])
     raw["window_seconds"] = float(max(raw["exact"]["window_seconds"], raw["fuzzy"]["window_seconds"]))
     raw["similarity_check"] = bool(raw.get("similarity_check", True))
+    content_loop_raw = raw.get("content_loop")
+    content_loop = content_loop_raw if isinstance(content_loop_raw, dict) else {}
+    content_loop["enabled"] = bool(content_loop.get("enabled", False))
+    window = content_loop.get("window_seconds", 300)
+    max_identical = content_loop.get("max_identical", 5)
+    cooldown = content_loop.get("cooldown_seconds", 300)
+    prefix_len = content_loop.get("hash_prefix_len", 256)
+    if not _is_number(window) or int(window) <= 0:
+        window = 300
+    if not _is_number(max_identical) or int(max_identical) <= 0:
+        max_identical = 5
+    if not _is_number(cooldown) or int(cooldown) <= 0:
+        cooldown = 300
+    if not _is_number(prefix_len) or int(prefix_len) <= 0:
+        prefix_len = 256
+    content_loop["window_seconds"] = int(window)
+    content_loop["max_identical"] = int(max_identical)
+    content_loop["cooldown_seconds"] = int(cooldown)
+    content_loop["hash_prefix_len"] = int(prefix_len)
+    raw["content_loop"] = content_loop
 
     policy["loop_detection"] = raw
 

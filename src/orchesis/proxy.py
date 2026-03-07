@@ -47,7 +47,7 @@ from orchesis.events import EventBus
 from orchesis.forensics import Incident
 from orchesis.integrations import SlackEmitter, SlackNotifier, TelegramEmitter, TelegramNotifier
 from orchesis.integrations.forensics_emitter import ForensicsEmitter
-from orchesis.loop_detector import LoopDetector
+from orchesis.loop_detector import ContentLoopDetector, LoopDetector
 from orchesis.metrics import MetricsCollector
 from orchesis.model_router import ModelRouter
 from orchesis.cascade import CascadeDecision, CascadeLevel, CascadeRouter
@@ -71,6 +71,7 @@ from orchesis.experiment import ExperimentConfig, ExperimentManager
 from orchesis.context_engine import ContextConfig, ContextEngine
 from orchesis.threat_intel import ThreatIntelConfig, ThreatMatcher
 from orchesis.semantic_cache import SemanticCache, SemanticCacheConfig
+from orchesis.spend_rate import SpendRateDetector, SpendWindow
 
 _HTTP_PROXY_LOGGER = logging.getLogger("orchesis.http_proxy")
 
@@ -1690,6 +1691,10 @@ class _RequestContext:
     trace_ctx: Any = None  # TraceContext when otel enabled
     root_span: Any = None  # SpanData when otel enabled
     semantic_cache_type: str = ""  # "exact" or "semantic"
+    heartbeat_detected: bool = False
+    content_loop_count: int = 0
+    spend_rate_per_min: float = 0.0
+    request_saved_usd: float = 0.0
 
 
 class LLMHTTPProxy:
@@ -1749,6 +1754,39 @@ class LLMHTTPProxy:
         self._loop_detector = None
         if bool(self._loop_cfg.get("enabled", False)):
             self._loop_detector = LoopDetector(config=self._loop_cfg)
+        self._content_loop_detector: ContentLoopDetector | None = None
+        content_loop_cfg = self._loop_cfg.get("content_loop")
+        if isinstance(content_loop_cfg, dict) and bool(content_loop_cfg.get("enabled", False)):
+            self._content_loop_detector = ContentLoopDetector(
+                window_seconds=int(content_loop_cfg.get("window_seconds", 300)),
+                max_identical=int(content_loop_cfg.get("max_identical", 5)),
+                cooldown_seconds=int(content_loop_cfg.get("cooldown_seconds", 300)),
+                hash_prefix_len=int(content_loop_cfg.get("hash_prefix_len", 256)),
+            )
+        spend_rate_cfg_raw = self._budget_cfg.get("spend_rate")
+        self._spend_rate_cfg = spend_rate_cfg_raw if isinstance(spend_rate_cfg_raw, dict) else {}
+        self._spend_rate_detector: SpendRateDetector | None = None
+        if bool(self._spend_rate_cfg.get("enabled", False)):
+            windows_cfg = self._spend_rate_cfg.get("windows")
+            windows: list[SpendWindow] = []
+            if isinstance(windows_cfg, list):
+                for item in windows_cfg:
+                    if not isinstance(item, dict):
+                        continue
+                    seconds = item.get("seconds")
+                    max_spend = item.get("max_spend")
+                    if not isinstance(seconds, int | float) or not isinstance(max_spend, int | float):
+                        continue
+                    if int(seconds) <= 0:
+                        continue
+                    windows.append(SpendWindow(window_seconds=int(seconds), max_spend=float(max_spend)))
+            self._spend_rate_detector = SpendRateDetector(
+                windows=windows or None,
+                spike_multiplier=float(self._spend_rate_cfg.get("spike_multiplier", 5.0)),
+                heartbeat_cost_threshold=float(self._spend_rate_cfg.get("heartbeat_cost_threshold", 0.10)),
+                pause_seconds=int(self._spend_rate_cfg.get("pause_seconds", 300)),
+            )
+        self._estimated_avg_request_cost_usd = 0.05
         circuit_cfg = self._policy.get("circuit_breaker")
         self._circuit_cfg = circuit_cfg if isinstance(circuit_cfg, dict) else {}
         self._circuit_breaker = CircuitBreaker(
@@ -1973,6 +2011,8 @@ class LLMHTTPProxy:
                 "total_cost_saved_usd": payload["loop_stats"].get("total_cost_saved_usd", 0.0),
                 "active_patterns_count": payload["loop_stats"].get("active_patterns_count", 0),
             }
+        if self._content_loop_detector is not None:
+            payload["content_loop"] = self._content_loop_detector.stats
         payload["circuit_breaker"] = self._circuit_breaker.get_stats()
         if self._cascade_router is not None:
             cascade_stats = self._cascade_router.get_stats()
@@ -2018,6 +2058,8 @@ class LLMHTTPProxy:
             payload["threat_intel"] = self._threat_matcher.get_stats()
         if self._semantic_cache is not None:
             payload["semantic_cache"] = self._semantic_cache.get_stats()
+        if self._spend_rate_detector is not None:
+            payload["spend_rate"] = self._spend_rate_detector.stats
         thread_queue = 0
         if isinstance(self._server, PooledThreadHTTPServer):
             try:
@@ -2189,6 +2231,39 @@ class LLMHTTPProxy:
             "cost_timeline": list(self._dashboard_cost_timeline),
             "flow_xray": flow_stats,
             "connection_pool": stats.get("proxy_engine", {}).get("connection_pool", {}),
+            "savings": self._build_savings_payload(),
+        }
+
+    def _build_savings_payload(self) -> dict[str, Any]:
+        stats = self.stats
+        semantic_stats = stats.get("semantic_cache", {}) if isinstance(stats.get("semantic_cache"), dict) else {}
+        cache_savings = float(semantic_stats.get("total_cost_saved_usd", 0.0))
+        cache_hits = int(semantic_stats.get("exact_hits", 0)) + int(semantic_stats.get("semantic_hits", 0))
+        cascade_savings = float(self._cost_tracker.get_cascade_savings_today())
+        cascade_stats = stats.get("cascade_requests_by_level", {})
+        cascaded_requests = 0
+        if isinstance(cascade_stats, dict):
+            cascaded_requests = int(
+                cascade_stats.get("trivial", 0)
+                + cascade_stats.get("simple", 0)
+                + cascade_stats.get("medium", 0)
+                + cascade_stats.get("complex", 0)
+            )
+        loop_blocked = 0
+        if self._content_loop_detector is not None:
+            loop_blocked = int(self._content_loop_detector.stats.get("blocked", 0))
+        loop_savings = float(loop_blocked * self._estimated_avg_request_cost_usd)
+        total_savings = cache_savings + cascade_savings + loop_savings
+        return {
+            "cache_savings": round(cache_savings, 6),
+            "cascade_savings": round(cascade_savings, 6),
+            "loop_savings": round(loop_savings, 6),
+            "total_savings": round(total_savings, 6),
+            "details": {
+                "cache_hits": cache_hits,
+                "cascaded_requests": cascaded_requests,
+                "loops_blocked": loop_blocked,
+            },
         }
 
     def _build_dashboard_agents(self) -> dict[str, Any]:
@@ -2312,8 +2387,11 @@ class LLMHTTPProxy:
                 },
             )
             return
-        if path == "/stats":
+        if path in {"/stats", "/api/v1/stats"}:
             self._send_json(handler, 200, self.stats)
+            return
+        if path == "/api/v1/savings":
+            self._send_json(handler, 200, self._build_savings_payload())
             return
         if path == "/api/threats" or path == "/api/threats/":
             if self._threat_matcher is None:
@@ -2581,6 +2659,16 @@ class LLMHTTPProxy:
         ctx.body = body
         ctx.parsed_req = parse_request(body, ctx.handler.path)
         ctx.original_model = ctx.parsed_req.model or str(body.get("model", ""))
+        parsed_session_id = (
+            ctx.handler.headers.get("x-openclaw-session")
+            or ctx.handler.headers.get("x-session-id")
+            or ctx.handler.headers.get("x-request-id")
+            or "unknown"
+        )
+        if isinstance(parsed_session_id, str):
+            ctx.proc_result["session_id"] = parsed_session_id.strip() or "unknown"
+            if not ctx.session_id:
+                ctx.session_id = parsed_session_id.strip() or "unknown"
         return True
 
     def _phase_experiment(self, ctx: _RequestContext) -> bool:
@@ -2635,14 +2723,21 @@ class LLMHTTPProxy:
         cache_key = self._cascade_router.make_cache_key(ctx.parsed_req, pre_model or "")
         cached_payload = self._cascade_router.get_cache(cache_key, pre_level)
         if cached_payload is not None:
+            session_value = str(ctx.session_id or ctx.proc_result.get("session_id", "unknown"))
             ctx.handler.send_response(200)
             ctx.handler.send_header("Content-Type", "application/json")
             ctx.handler.send_header("Content-Length", str(len(cached_payload)))
             ctx.handler.send_header("X-Orchesis-Cost", "0.0")
             ctx.handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
+            daily_budget = self._budget_cfg.get("daily")
+            if isinstance(daily_budget, int | float):
+                ctx.handler.send_header("X-Orchesis-Daily-Budget", f"{float(daily_budget):.4f}")
+            ctx.handler.send_header("X-Orchesis-Saved", "0.0000")
+            ctx.handler.send_header("X-Orchesis-Session", session_value)
             ctx.handler.send_header("X-Orchesis-Cascade-Level", pre_level_name)
             ctx.handler.send_header("X-Orchesis-Cascade-Model", pre_model or "")
             ctx.handler.send_header("X-Orchesis-Cache", "hit")
+            ctx.handler.send_header("X-Orchesis-Spend-Rate", f"{ctx.spend_rate_per_min:.4f}")
             if self._recorder is not None:
                 ctx.handler.send_header("X-Orchesis-Session-Id", ctx.session_id)
                 ctx.handler.send_header("X-Orchesis-Request-Id", ctx.request_id)
@@ -2732,56 +2827,94 @@ class LLMHTTPProxy:
 
     def _phase_loop_detection(self, ctx: _RequestContext) -> bool:
         if self._loop_detector is None:
-            return True
-        loop_decision = self._loop_detector.check_request(
-            {
-                "model": ctx.body.get("model", ctx.parsed_req.model),
-                "messages": ctx.parsed_req.messages,
-                "tool_calls": ctx.parsed_req.tool_calls,
-                "content_text": ctx.parsed_req.content_text,
-            }
-        )
-        if loop_decision.action == "block":
-            self._loop_trigger_hits += 1
-            if self._kill_enabled and self._should_kill_for_loops():
-                self._activate_kill_switch("auto-kill: loop threshold reached")
-                self._inc("blocked")
-                self._send_json(
-                    ctx.handler,
-                    503,
-                    {
-                        "error": {
-                            "type": "kill_switch",
-                            "message": self._kill_reason,
-                            "killed_at": self._kill_time,
-                        }
-                    },
-                )
-                return False
-            self._inc("blocked")
-            payload_lb = {
-                "error": {
-                    "type": "loop_detected",
-                    "message": loop_decision.reason or "Fuzzy loop threshold exceeded",
+            loop_decision = None
+        else:
+            loop_decision = self._loop_detector.check_request(
+                {
+                    "model": ctx.body.get("model", ctx.parsed_req.model),
+                    "messages": ctx.parsed_req.messages,
+                    "tool_calls": ctx.parsed_req.tool_calls,
+                    "content_text": ctx.parsed_req.content_text,
                 }
-            }
-            body_lb = json.dumps(payload_lb, ensure_ascii=False).encode("utf-8")
-            ctx.handler.send_response(429)
-            ctx.handler.send_header("Content-Type", "application/json")
-            ctx.handler.send_header("Content-Length", str(len(body_lb)))
-            ctx.handler.send_header("X-Orchesis-Loop-Blocked", loop_decision.reason or "Fuzzy loop threshold exceeded")
-            ctx.handler.send_header("X-Orchesis-Loop-Saved", f"${loop_decision.estimated_cost_saved:.2f}")
-            ctx.handler.send_header("X-Orchesis-Circuit", ctx.circuit_state_header)
-            if self._config.cors:
-                ctx.handler.send_header("Access-Control-Allow-Origin", "*")
-            ctx.handler.end_headers()
-            ctx.handler.wfile.write(body_lb)
-            return False
-        if loop_decision.action in {"warn", "downgrade_model"}:
-            ctx.loop_warning_header = loop_decision.reason or "Loop warning"
-            ctx.was_loop_detected = True
-            if loop_decision.action == "downgrade_model":
-                ctx.body["model"] = self._downgrade_model
+            )
+        if loop_decision is not None:
+            if loop_decision.action == "block":
+                self._loop_trigger_hits += 1
+                if self._kill_enabled and self._should_kill_for_loops():
+                    self._activate_kill_switch("auto-kill: loop threshold reached")
+                    self._inc("blocked")
+                    self._send_json(
+                        ctx.handler,
+                        503,
+                        {
+                            "error": {
+                                "type": "kill_switch",
+                                "message": self._kill_reason,
+                                "killed_at": self._kill_time,
+                            }
+                        },
+                    )
+                    return False
+                self._inc("blocked")
+                payload_lb = {
+                    "error": {
+                        "type": "loop_detected",
+                        "message": loop_decision.reason or "Fuzzy loop threshold exceeded",
+                    }
+                }
+                body_lb = json.dumps(payload_lb, ensure_ascii=False).encode("utf-8")
+                ctx.handler.send_response(429)
+                ctx.handler.send_header("Content-Type", "application/json")
+                ctx.handler.send_header("Content-Length", str(len(body_lb)))
+                ctx.handler.send_header("X-Orchesis-Loop-Blocked", loop_decision.reason or "Fuzzy loop threshold exceeded")
+                ctx.handler.send_header("X-Orchesis-Loop-Saved", f"${loop_decision.estimated_cost_saved:.2f}")
+                ctx.handler.send_header("X-Orchesis-Circuit", ctx.circuit_state_header)
+                if self._config.cors:
+                    ctx.handler.send_header("Access-Control-Allow-Origin", "*")
+                ctx.handler.end_headers()
+                ctx.handler.wfile.write(body_lb)
+                return False
+            if loop_decision.action in {"warn", "downgrade_model"}:
+                ctx.loop_warning_header = loop_decision.reason or "Loop warning"
+                ctx.was_loop_detected = True
+                if loop_decision.action == "downgrade_model":
+                    ctx.body["model"] = self._downgrade_model
+        if self._content_loop_detector is not None and isinstance(ctx.parsed_req.messages, list) and ctx.parsed_req.messages:
+            last_msg = ctx.parsed_req.messages[-1]
+            if isinstance(last_msg, dict) and str(last_msg.get("role", "")).lower() == "user":
+                content = last_msg.get("content", "")
+                if isinstance(content, str) and len(content) > 10:
+                    session_id = (
+                        ctx.handler.headers.get("x-openclaw-session")
+                        or ctx.handler.headers.get("x-session-id")
+                        or ctx.proc_result.get("session_id", "default")
+                    )
+                    result = self._content_loop_detector.check(content, str(session_id))
+                    ctx.content_loop_count = int(result.get("count", 0))
+                    if result.get("action") == "block":
+                        self._loop_trigger_hits += 1
+                        self._inc("blocked")
+                        retry_after = int(result.get("retry_after", 300))
+                        self._cost_tracker.record_loop_prevented_savings(self._estimated_avg_request_cost_usd)
+                        self._send_json(
+                            ctx.handler,
+                            429,
+                            {
+                                "error": {
+                                    "type": "content_loop_detected",
+                                    "message": (
+                                        f"Loop detected: {result.get('count', 0)} identical messages in "
+                                        f"{result.get('window_seconds', 0)}s."
+                                    ),
+                                    "retry_after": retry_after,
+                                }
+                            },
+                            extra_headers={
+                                "Retry-After": str(max(1, retry_after)),
+                                "X-Orchesis-Loop-Count": str(int(result.get("count", 0))),
+                            },
+                        )
+                        return False
         return True
 
     def _phase_behavioral(self, ctx: _RequestContext) -> bool:
@@ -2835,7 +2968,6 @@ class LLMHTTPProxy:
         return True
 
     def _phase_budget(self, ctx: _RequestContext) -> bool:
-        _ = ctx
         if self._budget_cfg:
             budget_status = self._cost_tracker.check_budget(self._budget_cfg)
             if self._kill_enabled and self._should_kill_for_cost(budget_status):
@@ -2864,6 +2996,32 @@ class LLMHTTPProxy:
                             "message": f"Daily budget exceeded. Spent ${budget_status.get('daily_spent', 0):.4f}",
                         }
                     },
+                )
+                return False
+        if self._spend_rate_detector is not None:
+            # Spend-rate check: eventually consistent. We check rate BEFORE the upstream
+            # call (cost unknown yet) and record actual spend AFTER response. Between
+            # check and record, concurrent requests may alter the rate. This is by design:
+            # we prefer allowing a borderline request over blocking pre-emptively with
+            # unknown cost. The next request will see the updated rate.
+            rate_result = self._spend_rate_detector.check()
+            ctx.spend_rate_per_min = float(rate_result.current_rate)
+            if not rate_result.allowed:
+                retry_after = int(max(1.0, rate_result.cooldown_until - time.monotonic()))
+                self._send_json(
+                    ctx.handler,
+                    429,
+                    {
+                        "error": {
+                            "type": "spend_rate_exceeded",
+                            "message": (
+                                f"Spending too fast: ${rate_result.window_spend:.2f} in {rate_result.reason}. "
+                                "Paused until rate normalizes."
+                            ),
+                            "retry_after": retry_after,
+                        }
+                    },
+                    extra_headers={"Retry-After": str(retry_after)},
                 )
                 return False
         return True
@@ -2948,6 +3106,19 @@ class LLMHTTPProxy:
         return True
 
     def _phase_model_router(self, ctx: _RequestContext) -> bool:
+        if self._spend_rate_detector is not None and self._spend_rate_detector.is_heartbeat_request(ctx.body):
+            ctx.heartbeat_detected = True
+            ctx.proc_result["cascade_tier"] = "cheapest"
+            heartbeat_models = self._routing_cfg.get("heartbeat_models", {})
+            provider = ctx.parsed_req.provider or "openai"
+            cheapest = (
+                heartbeat_models.get(provider)
+                or heartbeat_models.get("default")
+                or "gpt-4o-mini"
+            )
+            if isinstance(cheapest, str) and cheapest and cheapest != ctx.body.get("model"):
+                ctx.body["model"] = cheapest
+            ctx.session_headers["X-Orchesis-Heartbeat"] = "true"
         if self._router is not None and ctx.parsed_req.content_text:
             route = self._router.route(
                 ctx.parsed_req.content_text,
@@ -3141,6 +3312,18 @@ class LLMHTTPProxy:
                 continue
             ctx.handler.send_header(key, value)
         ctx.handler.send_header("Transfer-Encoding", "chunked")
+        ctx.handler.send_header("X-Orchesis-Cost", str(round(float(ctx.proc_result.get("cost", 0.0)), 6)))
+        ctx.handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
+        daily_budget = self._budget_cfg.get("daily")
+        if isinstance(daily_budget, int | float):
+            ctx.handler.send_header("X-Orchesis-Daily-Budget", f"{float(daily_budget):.4f}")
+        ctx.handler.send_header("X-Orchesis-Saved", f"{float(ctx.request_saved_usd):.4f}")
+        ctx.handler.send_header("X-Orchesis-Session", str(ctx.session_id or ctx.proc_result.get("session_id", "unknown")))
+        if ctx.heartbeat_detected:
+            ctx.handler.send_header("X-Orchesis-Heartbeat", "true")
+        if ctx.content_loop_count > 1:
+            ctx.handler.send_header("X-Orchesis-Loop-Count", str(ctx.content_loop_count))
+        ctx.handler.send_header("X-Orchesis-Spend-Rate", f"{ctx.spend_rate_per_min:.4f}")
         ctx.handler.send_header("X-Orchesis-Circuit", self._circuit_breaker.get_state().lower().replace("_", "-"))
         if self._recorder is not None:
             ctx.handler.send_header("X-Orchesis-Session-Id", ctx.session_id)
@@ -3315,11 +3498,12 @@ class LLMHTTPProxy:
             token_sum = int(getattr(ctx.parsed_resp_obj, "input_tokens", 0)) + int(
                 getattr(ctx.parsed_resp_obj, "output_tokens", 0)
             )
-            self._cost_tracker.record_cascade_savings(
+            cascade_saved = self._cost_tracker.record_cascade_savings(
                 original_model=ctx.original_model or ctx.cascade_decision.model,
                 actual_model=ctx.cascade_decision.model,
                 tokens=token_sum,
             )
+            ctx.request_saved_usd += float(cascade_saved)
             if 200 <= ctx.resp_status < 300:
                 self._cascade_router.record_result(ctx.cascade_decision, ctx.parsed_resp_obj)
                 self._cascade_router.cache_response(ctx.cascade_decision, ctx.resp_body)
@@ -3403,6 +3587,15 @@ class LLMHTTPProxy:
                 outcome = self._experiment_manager._task_tracker.finalize_session(session_id)
                 if ctx.experiment_id and ctx.variant_name:
                     self._experiment_manager.record_task_outcome(ctx.experiment_id, ctx.variant_name, outcome)
+        cost_value = float(ctx.proc_result.get("cost", 0.0)) if isinstance(ctx.proc_result, dict) else 0.0
+        if self._spend_rate_detector is not None and cost_value > 0.0:
+            # Record actual cost from upstream response. This updates the spend-rate
+            # detector for future checks. See budget phase comment on eventual consistency.
+            self._spend_rate_detector.record_spend(cost_value)
+            spend_state = self._spend_rate_detector.check()
+            ctx.spend_rate_per_min = float(spend_state.current_rate)
+        if self._spend_rate_detector is not None and self._spend_rate_detector.is_heartbeat_cost_high(ctx.body, cost_value):
+            ctx.session_headers["X-Orchesis-Heartbeat-Costly"] = "true"
         if (
             self._semantic_cache is not None
             and ctx.resp_status == 200
@@ -3473,6 +3666,11 @@ class LLMHTTPProxy:
             self._copy_upstream_headers(ctx.handler, ctx.resp_headers, len(ctx.resp_body))
             ctx.handler.send_header("X-Orchesis-Cost", str(round(float(ctx.proc_result.get("cost", 0.0)), 6)))
             ctx.handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
+            daily_budget = self._budget_cfg.get("daily")
+            if isinstance(daily_budget, int | float):
+                ctx.handler.send_header("X-Orchesis-Daily-Budget", f"{float(daily_budget):.4f}")
+            ctx.handler.send_header("X-Orchesis-Saved", f"{float(ctx.request_saved_usd):.4f}")
+            ctx.handler.send_header("X-Orchesis-Session", str(ctx.session_id or ctx.proc_result.get("session_id", "unknown")))
             ctx.handler.send_header("X-Orchesis-Cascade-Level", ctx.cascade_level_name)
             ctx.handler.send_header("X-Orchesis-Cascade-Model", str(ctx.body.get("model", ctx.original_model)))
             if ctx.from_semantic_cache:
@@ -3490,6 +3688,11 @@ class LLMHTTPProxy:
                 ctx.handler.send_header("X-Orchesis-Variant", ctx.variant_name)
             if ctx.loop_warning_header:
                 ctx.handler.send_header("X-Orchesis-Loop-Warning", ctx.loop_warning_header)
+            if ctx.content_loop_count > 1:
+                ctx.handler.send_header("X-Orchesis-Loop-Count", str(ctx.content_loop_count))
+            if ctx.heartbeat_detected:
+                ctx.handler.send_header("X-Orchesis-Heartbeat", "true")
+            ctx.handler.send_header("X-Orchesis-Spend-Rate", f"{ctx.spend_rate_per_min:.4f}")
             if ctx.context_tokens_saved > 0:
                 ctx.handler.send_header("X-Orchesis-Context-Tokens-Saved", str(ctx.context_tokens_saved))
                 ctx.handler.send_header("X-Orchesis-Context-Strategies", ",".join(ctx.context_strategies))
@@ -3516,7 +3719,7 @@ class LLMHTTPProxy:
             handler=handler,
             request_started=time.perf_counter(),
             circuit_state_header=self._circuit_breaker.get_state().lower().replace("_", "-"),
-            session_id=self._resolve_session_id(handler.headers) if self._recorder is not None else "",
+            session_id=self._resolve_session_id(handler.headers),
             request_id=uuid.uuid4().hex if self._recorder is not None else "",
         )
         ctx.session_headers = (
@@ -3780,12 +3983,21 @@ class LLMHTTPProxy:
 
     @staticmethod
     def _resolve_session_id(headers: Any) -> str:
-        sid = headers.get("X-Session") or headers.get("x-session")
+        sid = (
+            headers.get("X-OpenClaw-Session")
+            or headers.get("x-openclaw-session")
+            or headers.get("X-Session-Id")
+            or headers.get("x-session-id")
+            or headers.get("X-Request-Id")
+            or headers.get("x-request-id")
+            or headers.get("X-Session")
+            or headers.get("x-session")
+        )
         if not isinstance(sid, str) or not sid.strip():
             sid = headers.get("X-Orchesis-Session-Id") or headers.get("x-orchesis-session-id")
         if isinstance(sid, str) and sid.strip():
             return sid.strip()
-        return uuid.uuid4().hex
+        return "unknown"
 
     def _record_session(
         self,

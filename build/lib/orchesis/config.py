@@ -164,6 +164,37 @@ def _normalize_cost_controls(policy: dict[str, Any]) -> None:
     if on_hard_limit not in {"block", "notify"}:
         on_hard_limit = "block"
     budgets["on_hard_limit"] = on_hard_limit
+    spend_rate_raw = budgets.get("spend_rate")
+    spend_rate = spend_rate_raw if isinstance(spend_rate_raw, dict) else {}
+    spend_rate["enabled"] = bool(spend_rate.get("enabled", False))
+    windows_raw = spend_rate.get("windows")
+    normalized_windows: list[dict[str, float]] = []
+    if isinstance(windows_raw, list):
+        for item in windows_raw:
+            if not isinstance(item, dict):
+                continue
+            seconds = item.get("seconds")
+            max_spend = item.get("max_spend")
+            if not _is_number(seconds) or float(seconds) <= 0:
+                continue
+            if not _is_number(max_spend) or float(max_spend) < 0:
+                continue
+            normalized_windows.append({"seconds": int(seconds), "max_spend": float(max_spend)})
+    if not normalized_windows:
+        normalized_windows = [
+            {"seconds": 300, "max_spend": 2.0},
+            {"seconds": 3600, "max_spend": 5.0},
+        ]
+    spend_rate["windows"] = normalized_windows
+    spike_multiplier = spend_rate.get("spike_multiplier", 5.0)
+    spend_rate["spike_multiplier"] = float(spike_multiplier) if _is_number(spike_multiplier) and float(spike_multiplier) > 0 else 5.0
+    pause_seconds = spend_rate.get("pause_seconds", 300)
+    spend_rate["pause_seconds"] = int(pause_seconds) if _is_number(pause_seconds) and int(pause_seconds) > 0 else 300
+    hb_threshold = spend_rate.get("heartbeat_cost_threshold", 0.10)
+    spend_rate["heartbeat_cost_threshold"] = (
+        float(hb_threshold) if _is_number(hb_threshold) and float(hb_threshold) >= 0 else 0.10
+    )
+    budgets["spend_rate"] = spend_rate
 
     tool_costs = policy.get("tool_costs")
     if isinstance(tool_costs, dict):
@@ -194,6 +225,13 @@ def _normalize_cost_controls(policy: dict[str, Any]) -> None:
         policy["model_routing"] = model_routing
     model_routing["enabled"] = bool(model_routing.get("enabled", False))
     model_routing["default"] = str(model_routing.get("default", "gpt-4o"))
+    heartbeat_models = model_routing.get("heartbeat_models", {})
+    if not isinstance(heartbeat_models, dict):
+        heartbeat_models = {}
+    heartbeat_models.setdefault("openai", "gpt-4o-mini")
+    heartbeat_models.setdefault("anthropic", "claude-haiku-4-5-20251001")
+    heartbeat_models.setdefault("default", "gpt-4o-mini")
+    model_routing["heartbeat_models"] = heartbeat_models
     rules = model_routing.get("rules")
     if isinstance(rules, list):
         normalized_rules: list[dict[str, str]] = []
@@ -214,6 +252,22 @@ def _normalize_cost_controls(policy: dict[str, Any]) -> None:
 def _normalize_proxy_config(policy: dict[str, Any]) -> None:
     proxy_cfg = policy.get("proxy")
     if not isinstance(proxy_cfg, dict):
+        policy["proxy"] = {
+            "max_workers": 200,
+            "connection_pool": {
+                "max_per_host": 10,
+                "max_total": 50,
+                "idle_timeout": 60,
+                "connection_timeout": 30,
+                "retry_on_connection_error": True,
+                "max_retries": 2,
+            },
+            "streaming": {
+                "enabled": True,
+                "buffer_size": 4096,
+                "max_accumulated_events": 10000,
+            },
+        }
         return
 
     port = proxy_cfg.get("port")
@@ -250,6 +304,49 @@ def _normalize_proxy_config(policy: dict[str, Any]) -> None:
         proxy_cfg["upstream"] = normalized_upstream
     elif upstream is not None:
         proxy_cfg["upstream"] = {}
+
+    max_workers = proxy_cfg.get("max_workers", 200)
+    if not _is_number(max_workers) or int(max_workers) <= 0:
+        raise PolicyError("proxy.max_workers must be > 0")
+    proxy_cfg["max_workers"] = int(max_workers)
+
+    pool_cfg_raw = proxy_cfg.get("connection_pool")
+    pool_cfg = pool_cfg_raw if isinstance(pool_cfg_raw, dict) else {}
+    max_per_host = pool_cfg.get("max_per_host", 10)
+    max_total = pool_cfg.get("max_total", 50)
+    idle_timeout = pool_cfg.get("idle_timeout", 60)
+    connection_timeout = pool_cfg.get("connection_timeout", 30)
+    max_retries = pool_cfg.get("max_retries", 2)
+    if not _is_number(max_per_host) or int(max_per_host) <= 0:
+        raise PolicyError("proxy.connection_pool.max_per_host must be > 0")
+    if not _is_number(max_total) or int(max_total) <= 0:
+        raise PolicyError("proxy.connection_pool.max_total must be > 0")
+    if not _is_number(idle_timeout) or float(idle_timeout) <= 0:
+        raise PolicyError("proxy.connection_pool.idle_timeout must be > 0")
+    if not _is_number(connection_timeout) or float(connection_timeout) <= 0:
+        raise PolicyError("proxy.connection_pool.connection_timeout must be > 0")
+    if not _is_number(max_retries) or int(max_retries) < 0:
+        raise PolicyError("proxy.connection_pool.max_retries must be >= 0")
+    pool_cfg["max_per_host"] = int(max_per_host)
+    pool_cfg["max_total"] = int(max_total)
+    pool_cfg["idle_timeout"] = float(idle_timeout)
+    pool_cfg["connection_timeout"] = float(connection_timeout)
+    pool_cfg["retry_on_connection_error"] = bool(pool_cfg.get("retry_on_connection_error", True))
+    pool_cfg["max_retries"] = int(max_retries)
+    proxy_cfg["connection_pool"] = pool_cfg
+
+    streaming_cfg_raw = proxy_cfg.get("streaming")
+    streaming_cfg = streaming_cfg_raw if isinstance(streaming_cfg_raw, dict) else {}
+    buffer_size = streaming_cfg.get("buffer_size", 4096)
+    max_accumulated = streaming_cfg.get("max_accumulated_events", 10000)
+    if not _is_number(buffer_size) or int(buffer_size) <= 0:
+        raise PolicyError("proxy.streaming.buffer_size must be > 0")
+    if not _is_number(max_accumulated) or int(max_accumulated) <= 0:
+        raise PolicyError("proxy.streaming.max_accumulated_events must be > 0")
+    streaming_cfg["enabled"] = bool(streaming_cfg.get("enabled", True))
+    streaming_cfg["buffer_size"] = int(buffer_size)
+    streaming_cfg["max_accumulated_events"] = int(max_accumulated)
+    proxy_cfg["streaming"] = streaming_cfg
 
 
 def _normalize_kill_switch(policy: dict[str, Any]) -> None:
@@ -409,6 +506,13 @@ def _normalize_loop_detection(policy: dict[str, Any]) -> None:
             "enabled": False,
             "exact": {"threshold": 5, "window_seconds": 120, "action": "warn"},
             "fuzzy": {"threshold": 8, "window_seconds": 300, "action": "block"},
+            "content_loop": {
+                "enabled": False,
+                "window_seconds": 300,
+                "max_identical": 5,
+                "cooldown_seconds": 300,
+                "hash_prefix_len": 256,
+            },
             "on_detect": {"notify": True, "log": True, "max_cost_saved": True},
             "warn_threshold": 5,
             "block_threshold": 8,
@@ -471,6 +575,26 @@ def _normalize_loop_detection(policy: dict[str, Any]) -> None:
     raw["block_threshold"] = int(raw["fuzzy"]["threshold"])
     raw["window_seconds"] = float(max(raw["exact"]["window_seconds"], raw["fuzzy"]["window_seconds"]))
     raw["similarity_check"] = bool(raw.get("similarity_check", True))
+    content_loop_raw = raw.get("content_loop")
+    content_loop = content_loop_raw if isinstance(content_loop_raw, dict) else {}
+    content_loop["enabled"] = bool(content_loop.get("enabled", False))
+    window = content_loop.get("window_seconds", 300)
+    max_identical = content_loop.get("max_identical", 5)
+    cooldown = content_loop.get("cooldown_seconds", 300)
+    prefix_len = content_loop.get("hash_prefix_len", 256)
+    if not _is_number(window) or int(window) <= 0:
+        window = 300
+    if not _is_number(max_identical) or int(max_identical) <= 0:
+        max_identical = 5
+    if not _is_number(cooldown) or int(cooldown) <= 0:
+        cooldown = 300
+    if not _is_number(prefix_len) or int(prefix_len) <= 0:
+        prefix_len = 256
+    content_loop["window_seconds"] = int(window)
+    content_loop["max_identical"] = int(max_identical)
+    content_loop["cooldown_seconds"] = int(cooldown)
+    content_loop["hash_prefix_len"] = int(prefix_len)
+    raw["content_loop"] = content_loop
 
     policy["loop_detection"] = raw
 
@@ -646,6 +770,185 @@ def _normalize_flow_xray(policy: dict[str, Any]) -> None:
     policy["flow_xray"] = raw
 
 
+def _normalize_experiments(policy: dict[str, Any]) -> None:
+    raw = policy.get("experiments")
+    if raw is None:
+        policy["experiments"] = {
+            "enabled": False,
+            "max_experiments": 10,
+            "default_min_sample_size": 30,
+            "auto_stop_on_significance": True,
+            "significance_threshold": 0.95,
+        }
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("experiments must be a mapping")
+    raw["enabled"] = bool(raw.get("enabled", False))
+    max_exp = raw.get("max_experiments", 10)
+    if not _is_number(max_exp) or int(max_exp) <= 0:
+        raise PolicyError("experiments.max_experiments must be > 0")
+    raw["max_experiments"] = int(max_exp)
+    raw["default_min_sample_size"] = int(raw.get("default_min_sample_size", 30)) if _is_number(raw.get("default_min_sample_size", 30)) else 30
+    raw["auto_stop_on_significance"] = bool(raw.get("auto_stop_on_significance", True))
+    raw["significance_threshold"] = float(raw.get("significance_threshold", 0.95)) if _is_number(raw.get("significance_threshold", 0.95)) else 0.95
+    policy["experiments"] = raw
+
+
+def _normalize_task_tracking(policy: dict[str, Any]) -> None:
+    raw = policy.get("task_tracking")
+    if raw is None:
+        policy["task_tracking"] = {
+            "enabled": False,
+            "max_tracked_sessions": 5000,
+            "idle_timeout_seconds": 300.0,
+            "min_turns_for_success": 1,
+            "consecutive_errors_threshold": 3,
+        }
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("task_tracking must be a mapping")
+    raw["enabled"] = bool(raw.get("enabled", False))
+    max_sess = raw.get("max_tracked_sessions", 5000)
+    if not _is_number(max_sess) or int(max_sess) <= 0:
+        raise PolicyError("task_tracking.max_tracked_sessions must be > 0")
+    raw["max_tracked_sessions"] = int(max_sess)
+    raw["idle_timeout_seconds"] = float(raw.get("idle_timeout_seconds", 300)) if _is_number(raw.get("idle_timeout_seconds", 300)) else 300.0
+    raw["min_turns_for_success"] = int(raw.get("min_turns_for_success", 1)) if _is_number(raw.get("min_turns_for_success", 1)) else 1
+    raw["consecutive_errors_threshold"] = int(raw.get("consecutive_errors_threshold", 3)) if _is_number(raw.get("consecutive_errors_threshold", 3)) else 3
+    policy["task_tracking"] = raw
+
+
+def _normalize_compliance(policy: dict[str, Any]) -> None:
+    raw = policy.get("compliance")
+    if raw is None:
+        policy["compliance"] = {
+            "enabled": True,
+            "frameworks": ["owasp_llm_top10", "nist_ai_rmf"],
+            "max_findings": 10000,
+        }
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("compliance must be a mapping")
+    raw["enabled"] = bool(raw.get("enabled", True))
+    frameworks_raw = raw.get("frameworks", ["owasp_llm_top10", "nist_ai_rmf"])
+    if not isinstance(frameworks_raw, list):
+        raise PolicyError("compliance.frameworks must be a list")
+    normalized_frameworks: list[str] = []
+    allowed = {"owasp_llm_top10", "nist_ai_rmf", "nist_ai_agent"}
+    for item in frameworks_raw:
+        if not isinstance(item, str):
+            continue
+        token = item.strip().lower()
+        if not token:
+            continue
+        if token not in allowed:
+            raise PolicyError(f"unsupported compliance framework: {token}")
+        if token not in normalized_frameworks:
+            normalized_frameworks.append(token)
+    if not normalized_frameworks:
+        normalized_frameworks = ["owasp_llm_top10", "nist_ai_rmf"]
+    raw["frameworks"] = normalized_frameworks
+    max_findings = raw.get("max_findings", 10000)
+    if not _is_number(max_findings) or int(max_findings) <= 0:
+        raise PolicyError("compliance.max_findings must be > 0")
+    raw["max_findings"] = int(max_findings)
+    policy["compliance"] = raw
+
+
+def _normalize_threat_intel(policy: dict[str, Any]) -> None:
+    raw = policy.get("threat_intel")
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("threat_intel must be a mapping")
+    raw["enabled"] = bool(raw.get("enabled", False))
+    raw["default_action"] = str(raw.get("default_action", "warn")).lower()
+    if raw["default_action"] not in ("block", "warn", "log", "quarantine"):
+        raw["default_action"] = "warn"
+    sev = raw.get("severity_actions")
+    if isinstance(sev, dict):
+        raw["severity_actions"] = {str(k).lower(): str(v).lower() for k, v in sev.items()}
+    else:
+        raw["severity_actions"] = {}
+    custom = raw.get("custom_signatures")
+    raw["custom_signatures"] = [c for c in custom if isinstance(c, dict)] if isinstance(custom, list) else []
+    disabled = raw.get("disabled_threats")
+    raw["disabled_threats"] = [str(d) for d in disabled if d] if isinstance(disabled, list) else []
+    raw["max_matches_per_request"] = max(1, int(raw.get("max_matches_per_request", 10)))
+    policy["threat_intel"] = raw
+
+
+def _normalize_semantic_cache(policy: dict[str, Any]) -> None:
+    raw = policy.get("semantic_cache")
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("semantic_cache must be a mapping")
+    raw["enabled"] = bool(raw.get("enabled", False))
+    raw["max_entries"] = max(1, int(raw.get("max_entries", 2000)))
+    raw["ttl_seconds"] = max(1.0, float(raw.get("ttl_seconds", 600)))
+    raw["simhash_threshold"] = max(0, min(64, int(raw.get("simhash_threshold", 8))))
+    raw["jaccard_threshold"] = max(0.0, min(1.0, float(raw.get("jaccard_threshold", 0.6))))
+    raw["min_content_length"] = max(0, int(raw.get("min_content_length", 20)))
+    raw["max_content_length"] = max(100, int(raw.get("max_content_length", 50000)))
+    cacheable = raw.get("cacheable_models")
+    raw["cacheable_models"] = [str(m) for m in cacheable if m] if isinstance(cacheable, list) else []
+    raw["exclude_tool_calls"] = bool(raw.get("exclude_tool_calls", True))
+    raw["track_savings"] = bool(raw.get("track_savings", True))
+    policy["semantic_cache"] = raw
+
+
+def _normalize_context_engine(policy: dict[str, Any]) -> None:
+    raw = policy.get("context_engine")
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("context_engine must be a mapping")
+    raw["enabled"] = bool(raw.get("enabled", False))
+    strategies = raw.get("strategies")
+    if isinstance(strategies, list):
+        raw["strategies"] = [str(s) for s in strategies if isinstance(s, str)]
+    else:
+        raw["strategies"] = ["dedup", "trim_tool_results", "trim_system_dups"]
+    raw["max_context_tokens"] = max(0, int(raw.get("max_context_tokens", 0)))
+    raw["token_budget_reserve"] = max(0, int(raw.get("token_budget_reserve", 4096)))
+    raw["sliding_window_size"] = max(0, int(raw.get("sliding_window_size", 0)))
+    raw["preserve_system"] = bool(raw.get("preserve_system", True))
+    raw["max_tool_result_tokens"] = max(1, int(raw.get("max_tool_result_tokens", 2000)))
+    raw["dedup_window"] = max(1, int(raw.get("dedup_window", 50)))
+    raw["track_savings"] = bool(raw.get("track_savings", True))
+    policy["context_engine"] = raw
+
+
+def _normalize_otel_export(policy: dict[str, Any]) -> None:
+    raw = policy.get("otel_export")
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("otel_export must be a mapping")
+    raw["enabled"] = bool(raw.get("enabled", False))
+    raw["endpoint"] = str(raw.get("endpoint", "http://localhost:4318")).rstrip("/")
+    raw["traces_path"] = str(raw.get("traces_path", "/v1/traces"))
+    raw["metrics_path"] = str(raw.get("metrics_path", "/v1/metrics"))
+    headers = raw.get("headers")
+    raw["headers"] = dict(headers) if isinstance(headers, dict) else {}
+    raw["timeout_seconds"] = max(1.0, float(raw.get("timeout_seconds", 10.0)))
+    raw["batch_size"] = max(1, int(raw.get("batch_size", 50)))
+    raw["flush_interval_seconds"] = max(0.5, float(raw.get("flush_interval_seconds", 5.0)))
+    raw["max_queue_size"] = max(10, int(raw.get("max_queue_size", 2000)))
+    raw["retry_count"] = max(1, int(raw.get("retry_count", 2)))
+    raw["service_name"] = str(raw.get("service_name", "orchesis-proxy"))
+    res_attrs = raw.get("resource_attributes")
+    base_attrs = {
+        "service.name": raw["service_name"],
+        "service.version": "0.8.0",
+    }
+    if isinstance(res_attrs, dict):
+        base_attrs.update({str(k): str(v) for k, v in res_attrs.items()})
+    raw["resource_attributes"] = base_attrs
+    policy["otel_export"] = raw
+
+
 def _normalize_capability_constraints(raw: Any, *, key: str, index: int, section: str) -> list[str]:
     if raw is None:
         return []
@@ -742,6 +1045,13 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     _normalize_behavioral_fingerprint(loaded)
     _normalize_recording(loaded)
     _normalize_flow_xray(loaded)
+    _normalize_experiments(loaded)
+    _normalize_task_tracking(loaded)
+    _normalize_compliance(loaded)
+    _normalize_threat_intel(loaded)
+    _normalize_semantic_cache(loaded)
+    _normalize_context_engine(loaded)
+    _normalize_otel_export(loaded)
     _normalize_capabilities(loaded)
     return loaded
 

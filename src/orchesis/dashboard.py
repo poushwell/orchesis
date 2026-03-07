@@ -325,6 +325,18 @@ def get_dashboard_html() -> str:
       border-radius: 2px;
       transition: width 0.8s ease;
     }
+    .savings-card {
+      border: 1px solid rgba(0,229,160,0.20);
+      background: linear-gradient(135deg, rgba(0,229,160,0.06) 0%, var(--panel) 60%);
+    }
+    .savings-breakdown {
+      display: grid;
+      gap: 6px;
+      margin-top: 8px;
+      color: var(--text-secondary);
+      font-size: 13px;
+    }
+    .savings-breakdown span { color: var(--ok); font-weight: 700; }
     .flow-graph {
       background: rgba(0,0,0,0.2);
       border-radius: var(--radius-sm);
@@ -421,6 +433,15 @@ def get_dashboard_html() -> str:
             <div id="total-savings" class="metric-value savings-total" data-raw="0">$0.00</div>
           </div>
           <div id="savings-breakdown" class="savings-grid"></div>
+        </div>
+      </div>
+      <div class="panel savings-card">
+        <h3 style="margin:0 0 8px 0;">💰 Savings Today</h3>
+        <div id="savings-total" class="metric-value savings-total" data-raw="0">$0.00</div>
+        <div class="savings-breakdown">
+          <div>Cached responses: <span id="savings-cache">$0.00</span></div>
+          <div>Model downgrades: <span id="savings-cascade">$0.00</span></div>
+          <div>Loops prevented: <span id="savings-loops">$0.00</span></div>
         </div>
       </div>
       <div class="panel">
@@ -797,7 +818,7 @@ def get_dashboard_html() -> str:
       document.getElementById("health-score").textContent = val.toFixed(2);
     }
 
-    function renderOverview(data, stats){
+    function renderOverview(data, stats, savings){
       if(!data){ return; }
       lastOverview = data;
       setStatus(data.status || "clear");
@@ -875,6 +896,7 @@ def get_dashboard_html() -> str:
 
       renderCostChart(Array.isArray(data.cost_timeline) ? data.cost_timeline : []);
       renderSavings(stats || {});
+      renderOpenClawSavings(savings || {});
     }
 
     function renderSavings(stats) {
@@ -910,6 +932,21 @@ def get_dashboard_html() -> str:
         </div>`;
       }).join("");
       updateAnimatedMetric("total-savings", total, (v)=>"$" + Number(v || 0).toFixed(2), 800);
+    }
+
+    function renderOpenClawSavings(savings) {
+      const data = (savings && typeof savings === "object") ? savings : {};
+      const cache = Number(data.cache_savings || 0);
+      const cascade = Number(data.cascade_savings || 0);
+      const loops = Number(data.loop_savings || 0);
+      const total = Number(data.total_savings || (cache + cascade + loops));
+      updateAnimatedMetric("savings-total", total, (v)=>"$" + Number(v || 0).toFixed(2), 700);
+      const cacheEl = document.getElementById("savings-cache");
+      const cascadeEl = document.getElementById("savings-cascade");
+      const loopsEl = document.getElementById("savings-loops");
+      if (cacheEl) cacheEl.textContent = "$" + cache.toFixed(2);
+      if (cascadeEl) cascadeEl.textContent = "$" + cascade.toFixed(2);
+      if (loopsEl) loopsEl.textContent = "$" + loops.toFixed(2);
     }
 
     function renderAgents(data){
@@ -1293,11 +1330,12 @@ def get_dashboard_html() -> str:
     }
 
     async function pollShield(){
-      const [data, stats] = await Promise.all([
+      const [data, stats, savings] = await Promise.all([
         fetchData("/api/dashboard/overview"),
         fetchData("/stats"),
+        fetchData("/api/v1/savings"),
       ]);
-      renderOverview(data, stats);
+      renderOverview(data, stats, savings);
     }
     async function pollAgents(){
       const data = await fetchData("/api/dashboard/agents");

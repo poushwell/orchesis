@@ -55,6 +55,7 @@ class CostTracker:
         self._tool_daily: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
         self._task_total: dict[str, float] = defaultdict(float)
         self._cascade_savings_daily: dict[str, float] = defaultdict(float)
+        self._loop_savings_daily: dict[str, float] = defaultdict(float)
 
     def record_call(
         self,
@@ -158,6 +159,7 @@ class CostTracker:
             self._daily_total.pop(today, None)
             self._tool_daily.pop(today, None)
             self._cascade_savings_daily.pop(today, None)
+            self._loop_savings_daily.pop(today, None)
 
     def record_cascade_savings(self, original_model: str, actual_model: str, tokens: int) -> float:
         safe_tokens = max(0, int(tokens))
@@ -179,6 +181,26 @@ class CostTracker:
         with self._lock:
             return float(self._cascade_savings_daily.get(safe_day, 0.0))
 
+    def record_loop_prevented_savings(self, amount_usd: float) -> float:
+        safe = max(0.0, float(amount_usd))
+        if safe <= 0.0:
+            return 0.0
+        today = date.today().isoformat()
+        with self._lock:
+            self._loop_savings_daily[today] += safe
+        return round(safe, 8)
+
+    def get_loop_prevented_savings_today(self, day: str | None = None) -> float:
+        safe_day = day or date.today().isoformat()
+        with self._lock:
+            return float(self._loop_savings_daily.get(safe_day, 0.0))
+
+    def estimate_llm_cost(self, model: str, tokens_input: int = 0, tokens_output: int = 0) -> float:
+        rates = self._model_costs.get(model, self._model_costs["default"])
+        in_tokens = max(0, int(tokens_input))
+        out_tokens = max(0, int(tokens_output))
+        return float((in_tokens / 1000.0 * rates["input"]) + (out_tokens / 1000.0 * rates["output"]))
+
     def to_dict(self) -> dict[str, Any]:
         with self._lock:
             return {
@@ -187,5 +209,6 @@ class CostTracker:
                 "tool_daily": {day: dict(values) for day, values in self._tool_daily.items()},
                 "task_totals": dict(self._task_total),
                 "cascade_savings_daily": dict(self._cascade_savings_daily),
+                "loop_savings_daily": dict(self._loop_savings_daily),
             }
 

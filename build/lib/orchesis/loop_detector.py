@@ -204,3 +204,121 @@ class LoopDetector:
                 "notify": self._notify,
             }
 
+
+class ContentLoopDetector:
+    """Detect repeated chat loops by hashing message content prefixes.
+
+    This detector is focused on OpenClaw heartbeat storms where the same
+    user message is sent repeatedly without tool-call wrapping.
+    """
+
+    def __init__(
+        self,
+        window_seconds: int = 300,
+        max_identical: int = 5,
+        cooldown_seconds: int = 300,
+        hash_prefix_len: int = 256,
+    ) -> None:
+        self._window_seconds = max(1, int(window_seconds))
+        self._max_identical = max(1, int(max_identical))
+        self._cooldown_seconds = max(1, int(cooldown_seconds))
+        self._hash_prefix_len = max(1, int(hash_prefix_len))
+        self._history: dict[str, list[float]] = {}
+        self._cooldowns: dict[str, float] = {}
+        self._cooldown_level: dict[str, int] = {}
+        self._lock = threading.Lock()
+        self._stats = {"detected": 0, "blocked": 0, "total_checked": 0}
+
+    def _history_key(self, content_hash: str, session_id: str) -> str:
+        safe_session = str(session_id or "default")
+        return f"{safe_session}:{content_hash}"
+
+    def _hash_content(self, content: str) -> str:
+        prefix = str(content or "")[: self._hash_prefix_len]
+        return hashlib.sha256(prefix.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+    def _cooldown_multiplier(self, level: int) -> int:
+        if level <= 1:
+            return 1
+        if level == 2:
+            return 2
+        return 6
+
+    def _prune_locked(self, now: float) -> None:
+        stale_keys: list[str] = []
+        for key, times in self._history.items():
+            active = [ts for ts in times if (now - ts) <= float(self._window_seconds)]
+            if active:
+                self._history[key] = active
+            else:
+                stale_keys.append(key)
+        for key in stale_keys:
+            self._history.pop(key, None)
+        expired_cd = [key for key, until in self._cooldowns.items() if now >= float(until)]
+        for key in expired_cd:
+            self._cooldowns.pop(key, None)
+
+    def check(self, content: str, session_id: str = "") -> dict[str, Any]:
+        now = time.monotonic()
+        text = str(content or "")
+        content_hash = self._hash_content(text)
+        key = self._history_key(content_hash, session_id)
+        with self._lock:
+            self._stats["total_checked"] += 1
+            self._prune_locked(now)
+            cooldown_until = float(self._cooldowns.get(key, 0.0))
+            current_count = len(self._history.get(key, []))
+            if cooldown_until > now:
+                self._stats["blocked"] += 1
+                remaining = int(max(1.0, cooldown_until - now))
+                return {
+                    "action": "block",
+                    "reason": "content loop cooldown active",
+                    "count": current_count,
+                    "window_seconds": self._window_seconds,
+                    "cooldown_remaining": remaining,
+                    "retry_after": remaining,
+                    "content_hash": content_hash,
+                }
+
+            active = [ts for ts in self._history.get(key, []) if (now - ts) <= float(self._window_seconds)]
+            active.append(now)
+            self._history[key] = active
+            count = len(active)
+
+            if count >= self._max_identical:
+                self._stats["detected"] += 1
+                self._stats["blocked"] += 1
+                level = int(self._cooldown_level.get(key, 0)) + 1
+                self._cooldown_level[key] = level
+                multiplier = self._cooldown_multiplier(level)
+                applied = int(self._cooldown_seconds * multiplier)
+                cooldown_until = now + float(applied)
+                self._cooldowns[key] = cooldown_until
+                return {
+                    "action": "block",
+                    "reason": "identical content loop detected",
+                    "count": count,
+                    "window_seconds": self._window_seconds,
+                    "retry_after": applied,
+                    "content_hash": content_hash,
+                }
+            return {
+                "action": "allow",
+                "reason": "",
+                "count": count,
+                "window_seconds": self._window_seconds,
+                "content_hash": content_hash,
+            }
+
+    @property
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "detected": int(self._stats["detected"]),
+                "blocked": int(self._stats["blocked"]),
+                "total_checked": int(self._stats["total_checked"]),
+                "active_hashes": int(len(self._history)),
+                "active_cooldowns": int(len(self._cooldowns)),
+            }
+

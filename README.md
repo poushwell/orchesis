@@ -8,12 +8,17 @@
 - One line of config, zero code changes
 - Security + Cost + Effectiveness in one proxy
 
+## Quickstart
+
+See the quick start commands below.
+
 ## Quick Start (3 commands)
 
 ```bash
 pip install orchesis
 orchesis init
 orchesis proxy --port 8080
+orchesis serve --policy policy.yaml
 ```
 
 ## Features
@@ -69,6 +74,17 @@ secrets → context → semantic_cache → upstream → post_upstream → send
 - [Architecture](docs/ARCHITECTURE.md)
 - [API Reference](docs/API_REFERENCE.md)
 - [Policy Reference](docs/POLICY_REFERENCE.md)
+
+## Project Stats
+
+- 800+ tests passing
+- CI on Python 3.11 and 3.12
+
+## Integrations
+
+- OpenAI-compatible clients
+- Anthropic-compatible clients
+- OTLP-compatible observability backends
 
 ## Comparison
 
