@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter, deque
 import hashlib
 import json
 import threading
@@ -168,19 +169,24 @@ class ContextEngine:
         )
 
     def _strategy_dedup(self, messages: list[dict]) -> list[dict]:
-        window = self._config.dedup_window
+        window = max(1, int(self._config.dedup_window))
         result: list[dict] = []
-        result_hashes: list[str] = []
+        recent: deque[str] = deque(maxlen=window)
+        recent_counts: Counter[str] = Counter()
         for msg in messages:
-            if str(msg.get("role", "")).lower() == "system":
-                result.append(msg)
-                result_hashes.append(self._hash_message(msg))
-                continue
+            role = str(msg.get("role", "")).lower()
             h = self._hash_message(msg)
-            start = max(0, len(result_hashes) - window)
-            if h not in result_hashes[start:]:
+            if role == "system":
                 result.append(msg)
-                result_hashes.append(h)
+            elif recent_counts.get(h, 0) == 0:
+                result.append(msg)
+            if len(recent) == recent.maxlen:
+                evicted = recent[0]
+                recent_counts[evicted] -= 1
+                if recent_counts[evicted] <= 0:
+                    del recent_counts[evicted]
+            recent.append(h)
+            recent_counts[h] += 1
         return result
 
     def _strategy_trim_system_dups(self, messages: list[dict]) -> list[dict]:

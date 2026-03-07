@@ -121,6 +121,47 @@ def test_dedup_single_message() -> None:
     assert result.messages[0]["content"] == "hello"
 
 
+def test_dedup_large_window_performance() -> None:
+    """Dedup should handle large batches without quadratic slowdowns."""
+    import time
+
+    engine = ContextEngine(ContextConfig(enabled=True, strategies=["dedup"], dedup_window=50))
+    messages = [{"role": "user", "content": f"msg {i}"} for i in range(1000)]
+    for i in range(0, 1000, 7):
+        messages[i] = {"role": "user", "content": f"msg {i % 50}"}
+    start = time.monotonic()
+    result = engine.optimize(messages)
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.0
+    assert len(result.messages) < len(messages)
+
+
+def test_dedup_window_boundary() -> None:
+    """Message outside window should not be considered duplicate."""
+    engine = ContextEngine(ContextConfig(enabled=True, strategies=["dedup"], dedup_window=3))
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "user", "content": "world"},
+        {"role": "user", "content": "foo"},
+        {"role": "user", "content": "bar"},
+        {"role": "user", "content": "hello"},
+    ]
+    result = engine.optimize(messages)
+    assert len(result.messages) == 5
+
+
+def test_dedup_within_window() -> None:
+    """Message within window should be deduped."""
+    engine = ContextEngine(ContextConfig(enabled=True, strategies=["dedup"], dedup_window=5))
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "user", "content": "world"},
+        {"role": "user", "content": "hello"},
+    ]
+    result = engine.optimize(messages)
+    assert len(result.messages) == 2
+
+
 # --- System Dups Strategy (5 tests) ---
 
 
