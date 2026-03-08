@@ -1,0 +1,38 @@
+name: PR Security Gate
+on:
+  pull_request:
+    paths:
+      - "**mcp.json"
+      - "**mcp.json5"
+      - "**policy.yaml"
+      - "**policy.yml"
+      - "**SKILL.md"
+
+jobs:
+  security-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Orchesis Scan
+        id: scan
+        uses: poushwell/orchesis/github-action@main
+        with:
+          fail-on: high
+          format: text
+
+      - name: Post results to PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const score = '${{ steps.scan.outputs.score }}';
+            const findings = '${{ steps.scan.outputs.findings-count }}';
+            const status = '${{ steps.scan.outputs.exit-code }}' === '0' ? 'PASSED' : 'FAILED';
+            const body = `## Orchesis Security Scan\n\n${status} - Score: ${score}/100 - ${findings} findings\n\n*Powered by [Orchesis](https://github.com/poushwell/orchesis)*`;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });

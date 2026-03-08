@@ -1,0 +1,58 @@
+name: "Orchesis Security Scan"
+description: "Scan MCP server configs, AI agent skills, and policy files for security vulnerabilities"
+author: "Orchesis"
+
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  scan-path:
+    description: "Path to scan (file or directory)"
+    required: false
+    default: "."
+  scan-type:
+    description: "Type of scan: mcp, skill, policy, or auto (auto-detect)"
+    required: false
+    default: "auto"
+  fail-on:
+    description: "Minimum severity to fail the check: critical, high, medium, low, or none"
+    required: false
+    default: "high"
+  config-path:
+    description: "Path to specific MCP config file (overrides auto-discovery)"
+    required: false
+    default: ""
+  format:
+    description: "Output format: text, json, or sarif"
+    required: false
+    default: "text"
+  orchesis-version:
+    description: "Orchesis version to install"
+    required: false
+    default: "latest"
+
+outputs:
+  score:
+    description: "Security score 0-100"
+  findings-count:
+    description: "Total number of findings"
+  critical-count:
+    description: "Number of CRITICAL findings"
+  high-count:
+    description: "Number of HIGH findings"
+  exit-code:
+    description: "0=pass, 1=fail, 2=error"
+  report-path:
+    description: "Path to the generated report file"
+
+runs:
+  using: "docker"
+  image: "Dockerfile"
+  args:
+    - ${{ inputs.scan-path }}
+    - ${{ inputs.scan-type }}
+    - ${{ inputs.fail-on }}
+    - ${{ inputs.config-path }}
+    - ${{ inputs.format }}
+    - ${{ inputs.orchesis-version }}

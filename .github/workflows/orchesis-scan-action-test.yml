@@ -1,0 +1,76 @@
+name: Test Orchesis Scan Action
+
+on:
+  pull_request:
+    paths:
+      - "github-action/**"
+      - ".github/workflows/orchesis-scan-action-test.yml"
+  push:
+    branches: [main]
+    paths:
+      - "github-action/**"
+      - ".github/workflows/orchesis-scan-action-test.yml"
+  workflow_dispatch:
+
+jobs:
+  validate-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate action YAML files
+        run: |
+          python - <<'PY'
+          import pathlib
+          import yaml
+
+          files = [
+              pathlib.Path("github-action/action.yml"),
+              pathlib.Path("github-action/examples/basic.yml"),
+              pathlib.Path("github-action/examples/pr-check.yml"),
+              pathlib.Path("github-action/examples/scheduled-audit.yml"),
+          ]
+          for file_path in files:
+              with file_path.open("r", encoding="utf-8") as f:
+                  yaml.safe_load(f)
+              print(f"OK: {file_path}")
+          PY
+
+      - name: Ensure entrypoint uses LF endings
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path("github-action/entrypoint.sh")
+          data = p.read_bytes()
+          if b"\r\n" in data:
+              raise SystemExit("entrypoint.sh contains CRLF; expected LF.")
+          print("OK: entrypoint.sh line endings are LF")
+          PY
+
+      - name: Build action Docker image
+        run: docker build -t orchesis-scan github-action/
+
+  run-action-locally:
+    runs-on: ubuntu-latest
+    needs: validate-and-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run action from local path
+        id: scan
+        uses: ./github-action
+        with:
+          scan-path: "."
+          scan-type: auto
+          fail-on: none
+          format: text
+
+      - name: Print outputs
+        run: |
+          echo "score=${{ steps.scan.outputs.score }}"
+          echo "findings=${{ steps.scan.outputs.findings-count }}"
+          echo "critical=${{ steps.scan.outputs.critical-count }}"
+          echo "high=${{ steps.scan.outputs.high-count }}"
+          echo "exit=${{ steps.scan.outputs.exit-code }}"
+          echo "report=${{ steps.scan.outputs.report-path }}"

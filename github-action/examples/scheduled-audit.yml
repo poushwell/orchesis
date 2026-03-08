@@ -1,0 +1,17 @@
+name: Weekly Security Audit
+on:
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Full Security Audit
+        uses: poushwell/orchesis/github-action@main
+        with:
+          fail-on: none
+          format: text
