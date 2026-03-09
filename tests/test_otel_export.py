@@ -408,7 +408,6 @@ def test_start_end_span() -> None:
     assert span.end_time_ns == 0
     emitter.end_span(span)
     assert span.end_time_ns == 0
-    exported = []
     exp = OTLPSpanExporter(OTLPExportConfig(enabled=False))
     emitter2 = ProxySpanEmitter(otlp_exporter=exp)
     span2 = emitter2.start_span("test.op", ctx)
