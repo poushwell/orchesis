@@ -1025,11 +1025,14 @@ def _is_number(value: Any) -> bool:
 def load_policy(path: str | Path) -> dict[str, Any]:
     """Load policy from YAML file path."""
     policy_path = Path(path)
-    try:
-        with policy_path.open("r", encoding="utf-8") as file:
+    with policy_path.open("r", encoding="utf-8") as file:
+        try:
             loaded = yaml.safe_load(file)
-    except (yaml.YAMLError, RecursionError, MemoryError) as error:
-        raise ValueError(f"Invalid YAML policy: {error}") from error
+        except (yaml.YAMLError, RecursionError, MemoryError) as error:
+            raise ValueError(f"Invalid YAML policy: {error}") from error
+        except Exception as error:
+            # Fuzz-hardening: convert unexpected parser internals into user-facing parse error.
+            raise ValueError(f"Invalid YAML policy: unexpected parser error: {error}") from error
 
     if not isinstance(loaded, dict):
         raise PolicyError("Policy top-level YAML object must be a mapping.")

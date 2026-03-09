@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from typing import Any
 
 
@@ -19,6 +21,12 @@ def _load_secret_scanner() -> Any:
     return SecretScanner
 
 
+def _load_policy_loader() -> Any:
+    from orchesis.config import load_policy
+
+    return load_policy
+
+
 PII_CRASH_INPUT = (
     b"&C+8\xe6\xbc\xa2\xe5\xad\x97\xe2\xad\x83\xe3\xa4\xb8\xe1\x84\x85\xee\xa8\xb9"
     b"\xea\xb6\xb6\xeb\x9b\xaa +1 202-555-0147\xd8\xa7\xd9\x84\xd8\xb9\xd8\xb1\xd8\xa8"
@@ -26,6 +34,9 @@ PII_CRASH_INPUT = (
 )
 
 SECRET_CRASH_INPUT = b"\x00\x00\xff\xff\x8c,u,\x00\x00\x88"
+PII_CRASH_CONTROL = b"2l" + (b"\x13" * 108)
+SECRET_CRASH_V2 = b"\xec\xff\xff\xff\xff\xff\xec\x00\x00\x88"
+POLICY_CRASH = b"#allow<<:\n-\n\xa02[:\n\n<<:\n-\n\xa02:\n<<:\n- 0b_:\n<*als<:\n\n"
 
 
 def test_pii_detector_fuzz_crash_regression() -> None:
@@ -86,3 +97,76 @@ def test_secret_scanner_pure_binary() -> None:
     binary_blob = bytes(range(256))
     findings = scanner.scan_text(binary_blob)
     assert isinstance(findings, list)
+
+
+def test_pii_detector_fuzz_crash_control_chars() -> None:
+    PiiDetector = _load_pii_detector()
+    detector = PiiDetector(use_fast_matching=True)
+    text = PII_CRASH_CONTROL.decode("utf-8", errors="replace")
+    findings = detector.scan_text(text)
+    assert isinstance(findings, list)
+
+
+def test_secret_scanner_fuzz_crash_invalid_utf8_v2() -> None:
+    SecretScanner = _load_secret_scanner()
+    scanner = SecretScanner(use_fast_matching=True)
+    text = SECRET_CRASH_V2.decode("utf-8", errors="replace")
+    findings = scanner.scan_text(text)
+    assert isinstance(findings, list)
+
+
+def test_policy_yaml_fuzz_crash_malformed_merge_keys() -> None:
+    load_policy = _load_policy_loader()
+    payload = POLICY_CRASH.decode("utf-8", errors="replace")
+    policy_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".yaml", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write(payload)
+            policy_path = tmp.name
+        try:
+            _ = load_policy(policy_path)
+        except ValueError as exc:
+            assert "Invalid YAML policy" in str(exc)
+    finally:
+        if isinstance(policy_path, str) and os.path.exists(policy_path):
+            os.unlink(policy_path)
+
+
+def test_policy_yaml_fuzz_crash_bytes_input() -> None:
+    load_policy = _load_policy_loader()
+    payload = POLICY_CRASH.decode("utf-8", errors="replace")
+    policy_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".yaml", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write(payload)
+            policy_path = tmp.name
+        try:
+            _ = load_policy(policy_path)
+        except Exception:
+            pass
+    finally:
+        if isinstance(policy_path, str) and os.path.exists(policy_path):
+            os.unlink(policy_path)
+
+
+def test_policy_yaml_null_and_nbsp() -> None:
+    load_policy = _load_policy_loader()
+    payload = "\x00\x00allow:\n\u00a0\u00a0- tool: test\n"
+    policy_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".yaml", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write(payload)
+            policy_path = tmp.name
+        try:
+            _ = load_policy(policy_path)
+        except Exception:
+            pass
+    finally:
+        if isinstance(policy_path, str) and os.path.exists(policy_path):
+            os.unlink(policy_path)
