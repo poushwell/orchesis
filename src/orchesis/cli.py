@@ -738,19 +738,19 @@ def serve(port: int, policy_path: str, plugin_modules: tuple[str, ...]) -> None:
 
 @main.command("proxy")
 @click.option("--policy", "policy_path", type=click.Path(), default=None)
-@click.option("--port", type=int, default=8100)
-@click.option("--host", "listen_host", type=str, default="127.0.0.1")
-@click.option("--upstream-anthropic", "upstream_anthropic", type=str, default="https://api.anthropic.com")
-@click.option("--upstream-openai", "upstream_openai", type=str, default="https://api.openai.com")
-@click.option("--timeout", "timeout_seconds", type=float, default=300.0)
+@click.option("--port", type=int, default=None)
+@click.option("--host", "listen_host", type=str, default=None)
+@click.option("--upstream-anthropic", "upstream_anthropic", type=str, default=None)
+@click.option("--upstream-openai", "upstream_openai", type=str, default=None)
+@click.option("--timeout", "timeout_seconds", type=float, default=None)
 @click.option("--verbose", is_flag=True, default=False)
 def proxy_command(
     policy_path: str | None,
-    port: int,
-    listen_host: str,
-    upstream_anthropic: str,
-    upstream_openai: str,
-    timeout_seconds: float,
+    port: int | None,
+    listen_host: str | None,
+    upstream_anthropic: str | None,
+    upstream_openai: str | None,
+    timeout_seconds: float | None,
     verbose: bool,
 ) -> None:
     """Run stdlib HTTP proxy for Anthropic/OpenAI-compatible APIs."""
@@ -762,25 +762,88 @@ def proxy_command(
         logging.basicConfig(level=logging.DEBUG)
 
     safe_policy_path = None
+    policy: dict[str, Any] | None = None
     if isinstance(policy_path, str) and policy_path.strip():
         candidate = Path(policy_path).expanduser()
         if not candidate.exists():
             raise click.ClickException(f"Policy file not found: {candidate}")
         safe_policy_path = str(candidate)
+    else:
+        for default_candidate in (Path("orchesis.yaml"), Path("policy.yaml")):
+            if default_candidate.exists():
+                safe_policy_path = str(default_candidate)
+                break
+
+    if safe_policy_path is not None:
+        try:
+            policy = load_policy(safe_policy_path)
+        except (ValueError, YAMLError, OSError) as error:
+            raise click.ClickException(f"Failed to load policy: {error}") from error
+
+    proxy_policy_cfg = policy.get("proxy", {}) if isinstance(policy, dict) else {}
+    proxy_policy_cfg = proxy_policy_cfg if isinstance(proxy_policy_cfg, dict) else {}
+    policy_upstream = proxy_policy_cfg.get("upstream", {})
+    policy_upstream = policy_upstream if isinstance(policy_upstream, dict) else {}
+
+    resolved_host = (
+        listen_host.strip()
+        if isinstance(listen_host, str) and listen_host.strip()
+        else (
+            proxy_policy_cfg.get("host", "127.0.0.1")
+            if isinstance(proxy_policy_cfg.get("host"), str)
+            else "127.0.0.1"
+        )
+    )
+    resolved_port = (
+        max(1, int(port))
+        if isinstance(port, int | float)
+        else (
+            max(1, int(proxy_policy_cfg.get("port")))
+            if isinstance(proxy_policy_cfg.get("port"), int | float)
+            else 8100
+        )
+    )
+    resolved_timeout = (
+        max(1.0, float(timeout_seconds))
+        if isinstance(timeout_seconds, int | float)
+        else (
+            max(1.0, float(proxy_policy_cfg.get("timeout")))
+            if isinstance(proxy_policy_cfg.get("timeout"), int | float)
+            else 300.0
+        )
+    )
+    resolved_upstream_anthropic = (
+        upstream_anthropic.strip()
+        if isinstance(upstream_anthropic, str) and upstream_anthropic.strip()
+        else (
+            policy_upstream.get("anthropic", "https://api.anthropic.com")
+            if isinstance(policy_upstream.get("anthropic"), str)
+            else "https://api.anthropic.com"
+        )
+    )
+    resolved_upstream_openai = (
+        upstream_openai.strip()
+        if isinstance(upstream_openai, str) and upstream_openai.strip()
+        else (
+            policy_upstream.get("openai", "https://api.openai.com")
+            if isinstance(policy_upstream.get("openai"), str)
+            else "https://api.openai.com"
+        )
+    )
 
     proxy_config = HTTPProxyConfig(
-        host=listen_host.strip() if isinstance(listen_host, str) and listen_host.strip() else "127.0.0.1",
-        port=max(1, int(port)),
-        timeout=max(1.0, float(timeout_seconds)),
+        host=resolved_host,
+        port=resolved_port,
+        timeout=resolved_timeout,
         upstream={
-            "anthropic": upstream_anthropic.strip(),
-            "openai": upstream_openai.strip(),
+            "anthropic": resolved_upstream_anthropic,
+            "openai": resolved_upstream_openai,
         },
     )
     proxy = LLMHTTPProxy(policy_path=safe_policy_path, config=proxy_config)
     click.echo("Orchesis Proxy starting...")
     click.echo(f"Policy: {safe_policy_path or 'none (passthrough policy mode)'}")
-    click.echo(f"Listening: http://{listen_host}:{port}")
+    click.echo(f"Listening: http://{proxy_config.host}:{proxy_config.port}")
     click.echo(f"Anthropic upstream: {proxy_config.upstream['anthropic']}")
     click.echo(f"OpenAI upstream: {proxy_config.upstream['openai']}")
     click.echo(f"Timeout: {proxy_config.timeout:.1f}s")

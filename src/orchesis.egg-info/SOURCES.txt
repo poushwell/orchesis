@@ -30,6 +30,7 @@ examples/integration/mcp_middleware.py
 src/orchesis/__init__.py
 src/orchesis/ahocorasick.py
 src/orchesis/air_export.py
+src/orchesis/alerting.py
 src/orchesis/api.py
 src/orchesis/audit.py
 src/orchesis/auth.py
@@ -146,6 +147,7 @@ tests/test_agent_harness.py
 tests/test_agent_isolation.py
 tests/test_ahocorasick.py
 tests/test_air_export.py
+tests/test_alerting.py
 tests/test_api.py
 tests/test_api_enhanced.py
 tests/test_audit.py
@@ -183,6 +185,7 @@ tests/test_experiment.py
 tests/test_fast_scanner.py
 tests/test_flow_xray.py
 tests/test_forensics.py
+tests/test_fuzz_regression.py
 tests/test_fuzzer.py
 tests/test_github_action.py
 tests/test_hot_reload.py

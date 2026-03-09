@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.request import Request as UrlRequest, urlopen
 
@@ -718,5 +720,86 @@ def test_llm_proxy_scans_request_content_for_secrets_and_blocks() -> None:
         with pytest.raises(HTTPError) as error:
             urlopen(req, timeout=2)
         assert error.value.code == 403
+    finally:
+        proxy.stop()
+
+
+def test_loop_warn_adds_dashboard_event() -> None:
+    proxy = LLMHTTPProxy(config=HTTPProxyConfig(port=0))
+    try:
+        proxy._loop_detector = SimpleNamespace(  # noqa: SLF001
+            check_request=lambda _req: SimpleNamespace(action="warn", reason="Exact loop threshold exceeded")
+        )
+        proxy._content_loop_detector = None  # noqa: SLF001
+        ctx = SimpleNamespace(
+            body={"model": "gpt-4o-mini"},
+            parsed_req=SimpleNamespace(
+                messages=[{"role": "user", "content": "What is 2+2?"}],
+                tool_calls=[],
+                content_text="What is 2+2?",
+                model="gpt-4o-mini",
+            ),
+            session_id="loop-test-session",
+            loop_warning_header="",
+            was_loop_detected=False,
+        )
+
+        ok = proxy._phase_loop_detection(ctx)  # noqa: SLF001
+
+        assert ok is True
+        assert ctx.was_loop_detected is True
+        assert "Exact loop threshold exceeded" in ctx.loop_warning_header
+        events = list(proxy._dashboard_events)  # noqa: SLF001
+        assert any(str(item.get("type")) == "loop_warning" for item in events)
+    finally:
+        proxy.stop()
+
+
+def test_cascade_cache_hit_still_runs_loop_detection() -> None:
+    class _DummyHandler:
+        def __init__(self) -> None:
+            self.headers_sent: dict[str, str] = {}
+            self.wfile = io.BytesIO()
+            self.status = 0
+
+        def send_response(self, status: int) -> None:
+            self.status = int(status)
+
+        def send_header(self, key: str, value: str) -> None:
+            self.headers_sent[str(key)] = str(value)
+
+        def end_headers(self) -> None:
+            return None
+
+    proxy = LLMHTTPProxy(config=HTTPProxyConfig(port=0))
+    try:
+        proxy._cascade_router = SimpleNamespace(  # noqa: SLF001
+            classify=lambda _req, context=None: SimpleNamespace(name="SIMPLE"),
+            level_name=lambda _level: "simple",
+            make_cache_key=lambda _req, _model: "k",
+            get_cache=lambda _key, _level: b'{"ok":true}',
+        )
+        proxy._phase_loop_detection = lambda ctx: setattr(ctx, "loop_warning_header", "loop warn") or True  # type: ignore[method-assign]  # noqa: E501, SLF001
+        handler = _DummyHandler()
+        ctx = SimpleNamespace(
+            body={},
+            parsed_req=SimpleNamespace(model="gpt-4o-mini", provider="openai"),
+            proc_result={},
+            session_id="s",
+            spend_rate_per_min=0.0,
+            request_started=0.0,
+            loop_warning_header="",
+            behavior_agent_id="a",
+            behavior_header="normal",
+            request_id="r",
+        )
+        ctx.handler = handler
+
+        ok = proxy._phase_cascade(ctx)  # noqa: SLF001
+
+        assert ok is False
+        assert handler.status == 200
+        assert handler.headers_sent.get("X-Orchesis-Cache") == "hit"
+        assert handler.headers_sent.get("X-Orchesis-Loop-Warning") == "loop warn"
     finally:
         proxy.stop()

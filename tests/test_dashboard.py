@@ -124,6 +124,8 @@ def test_dashboard_html_contains_javascript() -> None:
     assert "<script>" in html
     assert "POLL_INTERVAL" in html
     assert "fetchData(" in html
+    assert html.count("const ratio =") == 1
+    assert "const poolHitRatio =" in html
 
 
 def test_dashboard_html_size_reasonable() -> None:
@@ -426,6 +428,19 @@ def test_dashboard_accessible_without_sessions(tmp_path: Path) -> None:
     try:
         code, _, _ = _get_text(proxy._config.port, "/dashboard")
         assert code == 200
+    finally:
+        proxy.stop()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_favicon_path_returns_no_content(tmp_path: Path) -> None:
+    proxy, upstream = _make_proxy(tmp_path, "rules: []\n")
+    try:
+        req = UrlRequest(f"http://127.0.0.1:{proxy._config.port}/favicon.ico")
+        with urlopen(req, timeout=5) as resp:
+            assert int(resp.status) == 204
+            assert resp.read() == b""
     finally:
         proxy.stop()
         upstream.shutdown()

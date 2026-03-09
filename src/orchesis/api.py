@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from orchesis.auth import AgentAuthenticator, CredentialStore
 from orchesis.audit import AuditEngine, AuditQuery
@@ -466,6 +466,10 @@ def create_api_app(
             "subscriber_count": event_bus.subscriber_count,
             "corpus_size": corpus_stats["total"],
         }
+
+    @app.get("/favicon.ico")
+    def favicon() -> Response:
+        return Response(status_code=204)
 
     @app.get("/api/v1/audit/stats")
     def audit_stats(

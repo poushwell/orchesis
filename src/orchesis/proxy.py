@@ -2360,10 +2360,20 @@ class LLMHTTPProxy:
             handler.send_response(200)
             handler.send_header("Content-Type", "text/html; charset=utf-8")
             handler.send_header("Content-Length", str(len(payload)))
+            handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            handler.send_header("Pragma", "no-cache")
+            handler.send_header("Expires", "0")
             if self._config.cors:
                 handler.send_header("Access-Control-Allow-Origin", "*")
             handler.end_headers()
             handler.wfile.write(payload)
+            return
+        if path == "/favicon.ico":
+            handler.send_response(204)
+            handler.send_header("Content-Length", "0")
+            if self._config.cors:
+                handler.send_header("Access-Control-Allow-Origin", "*")
+            handler.end_headers()
             return
         if path in {"/", "/health"}:
             self._send_json(
@@ -2726,6 +2736,10 @@ class LLMHTTPProxy:
         cache_key = self._cascade_router.make_cache_key(ctx.parsed_req, pre_model or "")
         cached_payload = self._cascade_router.get_cache(cache_key, pre_level)
         if cached_payload is not None:
+            # Run loop checks before serving cascade cache hits; otherwise repeated
+            # cached prompts bypass loop warnings/blocks and never appear in dashboard events.
+            if not self._phase_loop_detection(ctx):
+                return False
             session_value = str(ctx.session_id or ctx.proc_result.get("session_id", "unknown"))
             ctx.handler.send_response(200)
             ctx.handler.send_header("Content-Type", "application/json")
@@ -2740,6 +2754,8 @@ class LLMHTTPProxy:
             ctx.handler.send_header("X-Orchesis-Cascade-Level", pre_level_name)
             ctx.handler.send_header("X-Orchesis-Cascade-Model", pre_model or "")
             ctx.handler.send_header("X-Orchesis-Cache", "hit")
+            if ctx.loop_warning_header:
+                ctx.handler.send_header("X-Orchesis-Loop-Warning", ctx.loop_warning_header)
             ctx.handler.send_header("X-Orchesis-Spend-Rate", f"{ctx.spend_rate_per_min:.4f}")
             if self._recorder is not None:
                 ctx.handler.send_header("X-Orchesis-Session-Id", ctx.session_id)
@@ -2845,6 +2861,13 @@ class LLMHTTPProxy:
         if loop_decision is not None:
             if loop_decision.action == "block":
                 self._loop_trigger_hits += 1
+                reason_text = loop_decision.reason or "Loop threshold exceeded"
+                self._add_dashboard_event(
+                    "loop_detected",
+                    "high",
+                    f"Loop blocked: {reason_text}",
+                    metadata={"action": "block", "session_id": ctx.session_id},
+                )
                 if self._kill_enabled and self._should_kill_for_loops():
                     self._activate_kill_switch("auto-kill: loop threshold reached")
                     self._inc("blocked")
@@ -2882,6 +2905,12 @@ class LLMHTTPProxy:
             if loop_decision.action in {"warn", "downgrade_model"}:
                 ctx.loop_warning_header = loop_decision.reason or "Loop warning"
                 ctx.was_loop_detected = True
+                self._add_dashboard_event(
+                    "loop_warning",
+                    "medium",
+                    f"Loop warning: {ctx.loop_warning_header}",
+                    metadata={"action": loop_decision.action, "session_id": ctx.session_id},
+                )
                 if loop_decision.action == "downgrade_model":
                     ctx.body["model"] = self._downgrade_model
         if self._content_loop_detector is not None and isinstance(ctx.parsed_req.messages, list) and ctx.parsed_req.messages:

@@ -270,3 +270,108 @@ rules:
         assert result.exit_code == 0
         assert "Invariant Checks:" in result.output
         assert "10/10 passed" in result.output
+
+
+def test_proxy_uses_orchesis_yaml_proxy_defaults(monkeypatch) -> None:
+    class _FakeProxy:
+        last_policy_path = None
+        last_config = None
+
+        def __init__(self, policy_path=None, config=None):
+            self.__class__.last_policy_path = policy_path
+            self.__class__.last_config = config
+
+        def start(self, blocking=True):
+            return None
+
+        def stop(self):
+            return None
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        _write_file(
+            Path("orchesis.yaml"),
+            """
+rules: []
+proxy:
+  host: "0.0.0.0"
+  port: 8080
+  timeout: 42
+  upstream:
+    anthropic: "https://anthropic.example"
+    openai: "https://openai.example"
+""".strip(),
+        )
+        monkeypatch.setattr("orchesis.proxy.LLMHTTPProxy", _FakeProxy)
+        result = runner.invoke(main, ["proxy"])
+
+    assert result.exit_code == 0
+    assert _FakeProxy.last_policy_path == "orchesis.yaml"
+    assert _FakeProxy.last_config is not None
+    assert _FakeProxy.last_config.host == "0.0.0.0"
+    assert _FakeProxy.last_config.port == 8080
+    assert _FakeProxy.last_config.timeout == 42.0
+    assert _FakeProxy.last_config.upstream["anthropic"] == "https://anthropic.example"
+    assert _FakeProxy.last_config.upstream["openai"] == "https://openai.example"
+    assert "Listening: http://0.0.0.0:8080" in result.output
+
+
+def test_proxy_cli_flags_override_policy_proxy_settings(monkeypatch) -> None:
+    class _FakeProxy:
+        last_policy_path = None
+        last_config = None
+
+        def __init__(self, policy_path=None, config=None):
+            self.__class__.last_policy_path = policy_path
+            self.__class__.last_config = config
+
+        def start(self, blocking=True):
+            return None
+
+        def stop(self):
+            return None
+
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        _write_file(
+            Path("orchesis.yaml"),
+            """
+rules: []
+proxy:
+  host: "0.0.0.0"
+  port: 8080
+  timeout: 42
+  upstream:
+    anthropic: "https://anthropic.example"
+    openai: "https://openai.example"
+""".strip(),
+        )
+        monkeypatch.setattr("orchesis.proxy.LLMHTTPProxy", _FakeProxy)
+        result = runner.invoke(
+            main,
+            [
+                "proxy",
+                "--policy",
+                "orchesis.yaml",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8101",
+                "--timeout",
+                "15",
+                "--upstream-anthropic",
+                "https://anthropic.override",
+                "--upstream-openai",
+                "https://openai.override",
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert _FakeProxy.last_policy_path == "orchesis.yaml"
+    assert _FakeProxy.last_config is not None
+    assert _FakeProxy.last_config.host == "127.0.0.1"
+    assert _FakeProxy.last_config.port == 8101
+    assert _FakeProxy.last_config.timeout == 15.0
+    assert _FakeProxy.last_config.upstream["anthropic"] == "https://anthropic.override"
+    assert _FakeProxy.last_config.upstream["openai"] == "https://openai.override"
+    assert "Listening: http://127.0.0.1:8101" in result.output
