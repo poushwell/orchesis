@@ -205,29 +205,32 @@ jobs:
                 continue;
               }
 
+              const body = [
+                "## Fuzzing Crash Report",
+                `**Target:** \`${{ matrix.fuzzer }}\``,
+                `**Crash-Hash:** \`${crashHash}\``,
+                `**Run:** ${runUrl}`,
+                `**Commit:** ${context.sha}`,
+                "",
+                "Download crash artifacts from the workflow run.",
+                "",
+                "Reproduce:",
+                "```",
+                `python fuzzing/${{ matrix.fuzzer }}.py crash-${shortHash}`,
+                "```",
+                "",
+                "- [ ] Reproduce locally",
+                "- [ ] Classify severity",
+                "- [ ] Fix and add to regression seeds",
+                "",
+                `Crash-Hash: ${crashHash}`,
+              ].join("\\n");
+
               await github.rest.issues.create({
                 owner,
                 repo,
                 title: `🐛 Fuzzing crash [deduplicate][${shortHash}]: ${{ matrix.fuzzer }}`,
                 labels: ["bug", "fuzzing", "automated"],
-                body: `## Fuzzing Crash Report
-
-**Target:** \`${{ matrix.fuzzer }}\`
-**Crash-Hash:** \`${crashHash}\`
-**Run:** ${runUrl}
-**Commit:** ${context.sha}
-
-Download crash artifacts from the workflow run.
-
-Reproduce:
-\`\`\`
-python fuzzing/${{ matrix.fuzzer }}.py crash-${shortHash}
-\`\`\`
-
-- [ ] Reproduce locally
-- [ ] Classify severity
-- [ ] Fix and add to regression seeds
-
-Crash-Hash: ${crashHash}`,
+                body,
               });
             }
