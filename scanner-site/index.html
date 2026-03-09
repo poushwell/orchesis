@@ -3,8 +3,24 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Free MCP Security Scanner. Paste MCP config JSON and get a security score with findings.">
-  <title>Is Your MCP Server Safe? | MCP Security Scanner</title>
+  <title>Is Your MCP Server Safe? — Free Security Scanner | Orchesis</title>
+  <meta name="description" content="Scan your MCP server configuration for security vulnerabilities. Free, instant, 100% private — runs entirely in your browser. Score 0-100 with specific findings and fixes.">
+  <meta name="keywords" content="MCP, security, scanner, AI agent, Claude, Cursor, OpenClaw, vulnerability, config, audit">
+  <link rel="canonical" href="https://poushwell.github.io/orchesis/">
+
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Is Your MCP Server Safe? — Free Security Scanner">
+  <meta property="og:description" content="Paste your MCP config, get an instant security score 0-100 with findings. 100% private, runs in your browser.">
+  <meta property="og:url" content="https://poushwell.github.io/orchesis/">
+  <meta property="og:image" content="https://poushwell.github.io/orchesis/og-image.svg">
+  <meta property="og:site_name" content="Orchesis">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Is Your MCP Server Safe? — Free Security Scanner">
+  <meta name="twitter:description" content="Paste your MCP config, get an instant security score. 100% private, runs in your browser.">
+  <meta name="twitter:image" content="https://poushwell.github.io/orchesis/og-image.svg">
+
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
   <style>
     :root {
       --bg: #0f172a;
@@ -155,6 +171,26 @@
     .btn-inline {
       padding: 8px 10px;
       font-size: 13px;
+    }
+    .share-section {
+      display: none;
+      margin-top: 24px;
+      text-align: center;
+    }
+    .share-section p {
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+    .share-btn {
+      border: 1px solid #334155;
+      background: #1e293b;
+      margin: 0 4px 8px;
+    }
+    .share-feedback {
+      color: #86efac;
+      font-size: 13px;
+      min-height: 18px;
+      margin-top: 6px;
     }
 
     .error {
@@ -360,13 +396,17 @@
         <div class="summary-card">
           <h3 class="summary-title">Security findings summary</h3>
           <div id="summaryBar" class="summary-bar"></div>
-          <div class="buttons" style="margin-top: 12px;">
-            <button id="shareBtn" class="btn-share">Copy share text</button>
-          </div>
         </div>
       </div>
 
       <div id="findingsList" class="findings"></div>
+      <div id="shareSection" class="share-section">
+        <p>Share your score:</p>
+        <button id="btn-copy-text" class="share-btn">📋 Copy text</button>
+        <button id="btn-download-card" class="share-btn">📥 Download card</button>
+        <button id="btn-tweet" class="share-btn">🐦 Tweet</button>
+        <div id="shareFeedback" class="share-feedback"></div>
+      </div>
 
       <div class="cta">
         Powered by <strong>Orchesis</strong> - open-source AI agent security runtime.
@@ -465,7 +505,11 @@
     const scoreLabel = document.getElementById("scoreLabel");
     const summaryBar = document.getElementById("summaryBar");
     const findingsList = document.getElementById("findingsList");
-    const shareBtn = document.getElementById("shareBtn");
+    const shareSection = document.getElementById("shareSection");
+    const copyBtn = document.getElementById("btn-copy-text");
+    const downloadBtn = document.getElementById("btn-download-card");
+    const tweetBtn = document.getElementById("btn-tweet");
+    const shareFeedback = document.getElementById("shareFeedback");
 
     function setError(message) {
       errorBox.textContent = message || "";
@@ -495,6 +539,55 @@
       }
       scoreRing.style.borderColor = color;
       requestAnimationFrame(tick);
+    }
+
+    function shareGrade(score) {
+      if (score >= 80) return "STRONG";
+      if (score >= 50) return "FAIR";
+      return "RISKY";
+    }
+
+    function generateShareCard(score, grade, findingsCount) {
+      const canvas = document.createElement("canvas");
+      canvas.width = 1200;
+      canvas.height = 630;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return "";
+
+      ctx.fillStyle = "#0f172a";
+      ctx.fillRect(0, 0, 1200, 630);
+
+      const centerX = 600;
+      const centerY = 250;
+      const radius = 120;
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+      ctx.strokeStyle = score >= 80 ? "#22c55e" : score >= 50 ? "#eab308" : "#ef4444";
+      ctx.lineWidth = 12;
+      ctx.stroke();
+
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 72px system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText(score + "/100", centerX, centerY + 25);
+
+      ctx.font = "bold 36px system-ui";
+      ctx.fillStyle = score >= 80 ? "#22c55e" : score >= 50 ? "#eab308" : "#ef4444";
+      ctx.fillText(grade, centerX, centerY + 75);
+
+      ctx.fillStyle = "#94a3b8";
+      ctx.font = "28px system-ui";
+      ctx.fillText("MCP Security Score", centerX, 100);
+
+      ctx.fillStyle = "#64748b";
+      ctx.font = "24px system-ui";
+      ctx.fillText(findingsCount + " findings detected", centerX, 450);
+
+      ctx.fillStyle = "#475569";
+      ctx.font = "20px system-ui";
+      ctx.fillText("Scanned with Orchesis — poushwell.github.io/orchesis", centerX, 580);
+
+      return canvas.toDataURL("image/png");
     }
 
     function renderSummary(summary) {
@@ -578,16 +671,39 @@
       renderSummary(result.summary);
       renderFindings(result.findings);
       results.scrollIntoView({ behavior: "smooth", block: "start" });
+      shareSection.style.display = "block";
+      shareFeedback.textContent = "";
 
-      shareBtn.onclick = async () => {
-        const shareText = `My MCP security score: ${result.score}/100 — scanned with Orchesis (orchesis.dev)`;
+      const score = result.score;
+      const grade = shareGrade(score);
+      const count = result.findings.length;
+
+      copyBtn.onclick = async () => {
+        const text = `My MCP Security Score: ${score}/100 (${grade}) — ${count} findings. Scan yours free: https://poushwell.github.io/orchesis/`;
         try {
-          await navigator.clipboard.writeText(shareText);
-          shareBtn.textContent = "Copied";
-          setTimeout(() => { shareBtn.textContent = "Copy share text"; }, 1300);
+          await navigator.clipboard.writeText(text);
+          shareFeedback.textContent = "Copied!";
         } catch (err) {
-          setError("Clipboard unavailable. You can copy manually: " + shareText);
+          shareFeedback.textContent = "Clipboard unavailable in this browser.";
         }
+      };
+
+      downloadBtn.onclick = () => {
+        const dataUrl = generateShareCard(score, grade, count);
+        if (!dataUrl) {
+          shareFeedback.textContent = "Could not generate share card.";
+          return;
+        }
+        const link = document.createElement("a");
+        link.download = "mcp-security-score.png";
+        link.href = dataUrl;
+        link.click();
+      };
+
+      tweetBtn.onclick = () => {
+        const text = encodeURIComponent(`My MCP Security Score: ${score}/100 🛡️\n\nScan yours free:`);
+        const url = encodeURIComponent("https://poushwell.github.io/orchesis/");
+        window.open(`https://twitter.com/intent/tweet?text=${text}&url=${url}`, "_blank", "noopener");
       };
     }
 
