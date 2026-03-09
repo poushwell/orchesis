@@ -84,6 +84,21 @@ jobs:
           if grep -q "✗" invariants_report.txt; then ISSUE=true; fi
           echo "issue_detected=$ISSUE" >> "$GITHUB_OUTPUT"
 
+      - name: Build incident hash
+        if: steps.detect_issues.outputs.issue_detected == 'true'
+        id: incident_hash
+        run: |
+          HASH=$(
+            {
+              tail -n 80 fuzz_report.txt 2>/dev/null || true
+              tail -n 80 mutation_report.txt 2>/dev/null || true
+              cat invariants_report.txt 2>/dev/null || true
+            } | sha256sum | awk '{print $1}'
+          )
+          SHORT_HASH=$(printf '%s' "$HASH" | cut -c1-12)
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "short_hash=$SHORT_HASH" >> "$GITHUB_OUTPUT"
+
       - name: Build issue body
         if: steps.detect_issues.outputs.issue_detected == 'true'
         run: |
@@ -99,11 +114,55 @@ jobs:
           echo "" >> nightly_issue.md
           echo "## Invariants report" >> nightly_issue.md
           cat invariants_report.txt >> nightly_issue.md
+          echo "" >> nightly_issue.md
+          echo "Incident-Hash: ${{ steps.incident_hash.outputs.hash }}" >> nightly_issue.md
 
-      - name: Create issue on incident
+      - name: Create deduplicated issue on incident
         if: steps.detect_issues.outputs.issue_detected == 'true'
-        uses: peter-evans/create-issue-from-file@v5
+        uses: actions/github-script@v7
+        env:
+          INCIDENT_HASH: ${{ steps.incident_hash.outputs.hash }}
+          INCIDENT_SHORT_HASH: ${{ steps.incident_hash.outputs.short_hash }}
         with:
-          title: "[Nightly] Bypass or invariant failure detected (#${{ github.run_number }})"
-          content-filepath: nightly_issue.md
-          labels: security,nightly-fuzz
+          script: |
+            const fs = require("fs");
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const incidentHash = process.env.INCIDENT_HASH || "";
+            const shortHash = process.env.INCIDENT_SHORT_HASH || "";
+
+            if (!incidentHash) {
+              core.info("No incident hash generated, skipping issue creation.");
+              return;
+            }
+
+            const openIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "open",
+              labels: "nightly-fuzz",
+              per_page: 100,
+            });
+
+            const existing = openIssues.find((issue) => {
+              if (issue.pull_request) {
+                return false;
+              }
+              const title = issue.title || "";
+              const body = issue.body || "";
+              return title.includes(shortHash) || body.includes(`Incident-Hash: ${incidentHash}`);
+            });
+
+            if (existing) {
+              core.info(`Skipping issue creation; duplicate nightly incident hash ${shortHash}.`);
+              return;
+            }
+
+            const body = fs.readFileSync("nightly_issue.md", "utf8");
+            await github.rest.issues.create({
+              owner,
+              repo,
+              title: `[Nightly][deduplicate][${shortHash}] Bypass or invariant failure detected`,
+              body,
+              labels: ["security", "nightly-fuzz"],
+            });
