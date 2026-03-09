@@ -103,20 +103,131 @@ jobs:
         run: |
           if ls fuzzing/crashes/crash-* 1>/dev/null 2>&1; then
             echo "has_crashes=true" >> $GITHUB_OUTPUT
+            COUNT=$(ls -1 fuzzing/crashes/crash-* 2>/dev/null | wc -l | tr -d ' ')
+            echo "crash_count=$COUNT" >> $GITHUB_OUTPUT
             echo "::error::Fuzzer ${{ matrix.fuzzer }} found crashes!"
           else
             echo "has_crashes=false" >> $GITHUB_OUTPUT
+            echo "crash_count=0" >> $GITHUB_OUTPUT
           fi
 
-      - name: File issue on crash
+      - name: Build crash metadata
+        if: steps.check_crashes.outputs.has_crashes == 'true'
+        id: crash_meta
+        run: |
+          python - <<'PY'
+          import hashlib
+          import importlib.util
+          import json
+          import os
+          from pathlib import Path
+
+          crash_paths = sorted(Path("fuzzing/crashes").glob("crash-*"))
+          seen = set()
+          crash_hashes = []
+          for crash_path in crash_paths:
+              digest = hashlib.sha256(crash_path.read_bytes()).hexdigest()
+              if digest not in seen:
+                  seen.add(digest)
+                  crash_hashes.append(digest)
+
+          known_regression_hashes = set()
+          regression_path = Path("tests/test_fuzz_regression.py")
+          if regression_path.exists():
+              spec = importlib.util.spec_from_file_location("fuzz_regression_mod", regression_path)
+              if spec and spec.loader:
+                  module = importlib.util.module_from_spec(spec)
+                  spec.loader.exec_module(module)
+                  for value in vars(module).values():
+                      if isinstance(value, (bytes, bytearray)):
+                          known_regression_hashes.add(
+                              hashlib.sha256(bytes(value)).hexdigest()
+                          )
+
+          regression_matches = [h for h in crash_hashes if h in known_regression_hashes]
+
+          output_path = os.environ["GITHUB_OUTPUT"]
+          with open(output_path, "a", encoding="utf-8") as out:
+              out.write("crash_hashes_json<<EOF\n")
+              out.write(json.dumps(crash_hashes))
+              out.write("\nEOF\n")
+              out.write("regression_hashes_json<<EOF\n")
+              out.write(json.dumps(regression_matches))
+              out.write("\nEOF\n")
+          PY
+
+      - name: File deduplicated issues on crash
         if: steps.check_crashes.outputs.has_crashes == 'true'
         uses: actions/github-script@v7
+        env:
+          CRASH_HASHES_JSON: ${{ steps.crash_meta.outputs.crash_hashes_json }}
+          REGRESSION_HASHES_JSON: ${{ steps.crash_meta.outputs.regression_hashes_json }}
         with:
           script: |
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `🐛 Fuzzing crash: ${{ matrix.fuzzer }}`,
-              labels: ['bug', 'fuzzing', 'automated'],
-              body: `## Fuzzing Crash Report\n\n**Target:** \`${{ matrix.fuzzer }}\`\n**Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n**Commit:** ${context.sha}\n\nDownload crash artifacts from the workflow run.\n\nReproduce:\n\`\`\`\npython fuzzing/${{ matrix.fuzzer }}.py crash-<hash>\n\`\`\`\n\n- [ ] Reproduce locally\n- [ ] Classify severity\n- [ ] Fix and add to regression seeds`
+            const crashHashes = JSON.parse(process.env.CRASH_HASHES_JSON || "[]");
+            const regressionHashes = new Set(JSON.parse(process.env.REGRESSION_HASHES_JSON || "[]"));
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            if (!Array.isArray(crashHashes) || crashHashes.length === 0) {
+              core.info("No crash hashes found after metadata step.");
+              return;
+            }
+
+            const openIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "open",
+              labels: "fuzzing",
+              per_page: 100,
             });
+
+            for (const crashHash of crashHashes) {
+              const shortHash = crashHash.slice(0, 12);
+
+              if (regressionHashes.has(crashHash)) {
+                core.info(`Skipping issue for ${shortHash}: matches known regression test.`);
+                continue;
+              }
+
+              const exists = openIssues.some((issue) => {
+                if (issue.pull_request) {
+                  return false;
+                }
+                const title = issue.title || "";
+                const body = issue.body || "";
+                return title.includes(shortHash) || body.includes(`Crash-Hash: ${crashHash}`);
+              });
+
+              if (exists) {
+                core.info(`Skipping issue for ${shortHash}: existing open issue with same hash.`);
+                continue;
+              }
+
+              await github.rest.issues.create({
+                owner,
+                repo,
+                title: `🐛 Fuzzing crash [deduplicate][${shortHash}]: ${{ matrix.fuzzer }}`,
+                labels: ["bug", "fuzzing", "automated"],
+                body: `## Fuzzing Crash Report
+
+**Target:** \`${{ matrix.fuzzer }}\`
+**Crash-Hash:** \`${crashHash}\`
+**Run:** ${runUrl}
+**Commit:** ${context.sha}
+
+Download crash artifacts from the workflow run.
+
+Reproduce:
+\`\`\`
+python fuzzing/${{ matrix.fuzzer }}.py crash-${shortHash}
+\`\`\`
+
+- [ ] Reproduce locally
+- [ ] Classify severity
+- [ ] Fix and add to regression seeds
+
+Crash-Hash: ${crashHash}`,
+              });
+            }
