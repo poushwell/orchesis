@@ -878,6 +878,63 @@ def _normalize_threat_intel(policy: dict[str, Any]) -> None:
     policy["threat_intel"] = raw
 
 
+def _normalize_alerts(policy: dict[str, Any]) -> None:
+    raw = policy.get("alerts")
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise PolicyError("alerts must be a mapping")
+
+    telegram_raw = raw.get("telegram")
+    telegram = telegram_raw if isinstance(telegram_raw, dict) else {}
+    webhook_raw = raw.get("webhook")
+    webhook = webhook_raw if isinstance(webhook_raw, dict) else {}
+    headers_raw = webhook.get("headers")
+    headers = headers_raw if isinstance(headers_raw, dict) else {}
+    normalized_headers: dict[str, str] = {}
+    for key, value in headers.items():
+        if isinstance(key, str) and key.strip() and isinstance(value, str):
+            normalized_headers[key.strip()] = value
+
+    notify_on_raw = raw.get("notify_on")
+    if isinstance(notify_on_raw, list):
+        notify_on = [item.strip() for item in notify_on_raw if isinstance(item, str) and item.strip()]
+    else:
+        notify_on = ["threat_blocked", "budget_exceeded", "circuit_open"]
+
+    min_severity = str(raw.get("min_severity", "warning")).strip().lower()
+    if min_severity not in {"info", "warning", "critical"}:
+        min_severity = "warning"
+
+    cooldown_seconds = raw.get("cooldown_seconds", 60)
+    max_per_hour = raw.get("max_per_hour", 20)
+    daily_digest_hour = raw.get("daily_digest_hour", 9)
+
+    policy["alerts"] = {
+        "enabled": bool(raw.get("enabled", False)),
+        "telegram": {
+            "bot_token": str(telegram.get("bot_token", "")),
+            "chat_id": str(telegram.get("chat_id", "")),
+        },
+        "webhook": {
+            "url": str(webhook.get("url", "")),
+            "headers": normalized_headers,
+        },
+        "notify_on": notify_on,
+        "min_severity": min_severity,
+        "cooldown_seconds": int(cooldown_seconds)
+        if isinstance(cooldown_seconds, int | float) and int(cooldown_seconds) >= 0
+        else 60,
+        "max_per_hour": int(max_per_hour)
+        if isinstance(max_per_hour, int | float) and int(max_per_hour) > 0
+        else 20,
+        "daily_digest_enabled": bool(raw.get("daily_digest_enabled", False)),
+        "daily_digest_hour": int(daily_digest_hour)
+        if isinstance(daily_digest_hour, int | float) and 0 <= int(daily_digest_hour) <= 23
+        else 9,
+    }
+
+
 def _normalize_semantic_cache(policy: dict[str, Any]) -> None:
     raw = policy.get("semantic_cache")
     if raw is None:
@@ -1052,6 +1109,7 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     _normalize_task_tracking(loaded)
     _normalize_compliance(loaded)
     _normalize_threat_intel(loaded)
+    _normalize_alerts(loaded)
     _normalize_semantic_cache(loaded)
     _normalize_context_engine(loaded)
     _normalize_otel_export(loaded)

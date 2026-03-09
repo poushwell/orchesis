@@ -34,6 +34,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency path
     Response = Any  # type: ignore[assignment]
 
 from orchesis.auth import AgentAuthenticator, CredentialStore
+from orchesis.alerting import AlertConfig, AlertEvent, AlertManager, AlertSeverity
 from orchesis.behavioral import BehavioralDetector, extract_agent_id
 from orchesis.cost_tracker import CostTracker
 from orchesis.circuit_breaker import CircuitBreaker
@@ -1963,6 +1964,11 @@ class LLMHTTPProxy:
         self._kill_time = ""
         self._secret_trigger_hits = 0
         self._loop_trigger_hits = 0
+        self._alert_manager: AlertManager | None = None
+        alerts_cfg = self._policy.get("alerts")
+        if isinstance(alerts_cfg, dict):
+            alert_cfg = AlertConfig.from_policy_dict(alerts_cfg)
+            self._alert_manager = AlertManager(alert_cfg)
         self._server: HTTPServer | None = None
         self._start_time = time.time()
         self._stats_lock = threading.Lock()
@@ -2053,6 +2059,8 @@ class LLMHTTPProxy:
                 thread_queue = 0
         if self._otlp_exporter is not None:
             payload["otel_export"] = self._otlp_exporter.get_stats()
+        if self._alert_manager is not None:
+            payload["alerts"] = self._alert_manager.stats
         payload["proxy_engine"] = {
             "thread_pool": {
                 "max_workers": int(self._max_workers),
@@ -2121,6 +2129,8 @@ class LLMHTTPProxy:
             self._recorder.close_all()
         if self._otlp_exporter is not None:
             self._otlp_exporter.stop()
+        if self._alert_manager is not None:
+            self._alert_manager.stop()
 
     def _inc(self, field: str) -> None:
         with self._stats_lock:
@@ -2374,6 +2384,14 @@ class LLMHTTPProxy:
             return
         if path in {"/stats", "/api/v1/stats"}:
             self._send_json(handler, 200, self.stats)
+            return
+        if path == "/api/v1/alerts":
+            payload = (
+                {"enabled": self._alert_manager.enabled, "stats": self._alert_manager.stats}
+                if self._alert_manager is not None
+                else {"enabled": False, "stats": {"sent": 0, "dropped_rate_limit": 0, "dropped_severity": 0, "errors": 0}}
+            )
+            self._send_json(handler, 200, payload)
             return
         if path == "/api/v1/savings":
             self._send_json(handler, 200, self._build_savings_payload())
@@ -2806,6 +2824,8 @@ class LLMHTTPProxy:
                 ctx.handler.send_header("Access-Control-Allow-Origin", "*")
             ctx.handler.end_headers()
             ctx.handler.wfile.write(payload_fb)
+            if self._alert_manager:
+                self._alert_manager.alert(AlertEvent(severity=AlertSeverity.WARNING, event_type="circuit_open", title="Circuit breaker open", details=self._circuit_breaker.fallback_message, session_id=ctx.session_id))
             return False
         ctx.circuit_state_header = self._circuit_breaker.get_state().lower().replace("_", "-")
         return True
@@ -2899,6 +2919,8 @@ class LLMHTTPProxy:
                                 "X-Orchesis-Loop-Count": str(int(result.get("count", 0))),
                             },
                         )
+                        if self._alert_manager:
+                            self._alert_manager.alert(AlertEvent(severity=AlertSeverity.CRITICAL, event_type="loop_detected", title="Content loop blocked", details=f"{result.get('count', 0)} identical messages in {result.get('window_seconds', 0)}s", session_id=str(session_id)))
                         return False
         return True
 
@@ -2982,6 +3004,8 @@ class LLMHTTPProxy:
                         }
                     },
                 )
+                if self._alert_manager:
+                    self._alert_manager.alert(AlertEvent(severity=AlertSeverity.CRITICAL, event_type="budget_exceeded", title="Budget exceeded", details=f"Daily budget exceeded. Spent ${budget_status.get('daily_spent', 0):.4f}", session_id=ctx.session_id))
                 return False
         if self._spend_rate_detector is not None:
             # Spend-rate check: eventually consistent. We check rate BEFORE the upstream
@@ -3008,6 +3032,8 @@ class LLMHTTPProxy:
                     },
                     extra_headers={"Retry-After": str(retry_after)},
                 )
+                if self._alert_manager:
+                    self._alert_manager.alert(AlertEvent(severity=AlertSeverity.WARNING, event_type="spend_rate_exceeded", title="Spend rate exceeded", details=f"Spending too fast: ${rate_result.window_spend:.2f} in {rate_result.reason}", session_id=ctx.session_id))
                 return False
         return True
 
@@ -3065,6 +3091,8 @@ class LLMHTTPProxy:
                         "mitigation": match.mitigation,
                     },
                 )
+                if self._alert_manager:
+                    self._alert_manager.alert(AlertEvent(severity=AlertSeverity.CRITICAL, event_type="threat_blocked", title="Threat blocked", details=f"{match.name} ({match.threat_id})", session_id=ctx.session_id))
                 return False
         threat_ids = ",".join(m.threat_id for m in matches)
         ctx.session_headers["X-Orchesis-Threat-Detected"] = threat_ids
