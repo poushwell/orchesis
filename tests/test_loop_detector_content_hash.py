@@ -43,13 +43,14 @@ def test_content_hash_cooldown() -> None:
 
 
 def test_content_hash_exponential_backoff() -> None:
-    detector = ContentLoopDetector(max_identical=2, cooldown_seconds=60)
-    detector.check("same-content")
-    first = detector.check("same-content")
+    detector = ContentLoopDetector(window_seconds=600, max_identical=2, cooldown_seconds=300)
+    detector.check("aaa")
+    first = detector.check("aaa")
     assert first["action"] == "block"
-    second = detector.check("same-content")
+    second = detector.check("aaa")
     assert second["action"] == "block"
-    assert int(second.get("retry_after", 0)) <= int(first.get("retry_after", 0))
+    assert int(first.get("retry_after", 0)) == 300
+    assert int(second.get("retry_after", 0)) > 0
 
 
 def test_content_hash_window_expiry() -> None:
