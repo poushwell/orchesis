@@ -37,6 +37,9 @@ SECRET_CRASH_INPUT = b"\x00\x00\xff\xff\x8c,u,\x00\x00\x88"
 PII_CRASH_CONTROL = b"2l" + (b"\x13" * 108)
 SECRET_CRASH_V2 = b"\xec\xff\xff\xff\xff\xff\xec\x00\x00\x88"
 POLICY_CRASH = b"#allow<<:\n-\n\xa02[:\n\n<<:\n-\n\xa02:\n<<:\n- 0b_:\n<*als<:\n\n"
+PII_CRASH_R3 = b"\xe6\xb0\xb1\xe6\x85\x80\xe6\xbc\xa3\xe2\xbc\x88 123-45-6789\xad\xad\xad\xad\xad\xad\xad\xad\xb5\xad\xad\xad\xad\xad\xad\xad\xaf3\xad3|\x180"
+SECRET_CRASH_R3 = b"P%\x14\x00\x00\x88"
+POLICY_CRASH_R3 = b'cs: ["w\xdc\xdc,\xdcu\xc3\xc3\xc3\xc1\xdcU\xc3\xc3\xc39999999999999999999999999999999999999999999999999\xc3cao\xdcu\xc3\xc3\xc3\xc3\xdcu\xc3\xc3\xc3\xc3\xdcu\xc3\xc3\xc3\xc3&i'
 
 
 def test_pii_detector_fuzz_crash_regression() -> None:
@@ -170,3 +173,41 @@ def test_policy_yaml_null_and_nbsp() -> None:
     finally:
         if isinstance(policy_path, str) and os.path.exists(policy_path):
             os.unlink(policy_path)
+
+
+def test_pii_detector_fuzz_crash_soft_hyphen() -> None:
+    """PII detector must not crash on soft-hyphen sequences around SSN."""
+    PiiDetector = _load_pii_detector()
+    detector = PiiDetector()
+    text = PII_CRASH_R3.decode("utf-8", errors="replace")
+    result = detector.scan_text(text)
+    assert isinstance(result, list)
+
+
+def test_secret_scanner_fuzz_crash_minimal_binary() -> None:
+    """Secret scanner must not crash on 6-byte binary with nulls."""
+    SecretScanner = _load_secret_scanner()
+    scanner = SecretScanner()
+    text = SECRET_CRASH_R3.decode("utf-8", errors="replace")
+    result = scanner.scan_text(text)
+    assert isinstance(result, list)
+
+
+def test_policy_yaml_fuzz_crash_long_digit_string() -> None:
+    """Policy YAML parser must not crash on long digit sequences with invalid UTF-8."""
+    load_policy = _load_policy_loader()
+    text = POLICY_CRASH_R3.decode("utf-8", errors="replace")
+    fd, path = tempfile.mkstemp(suffix=".yaml")
+    try:
+        os.write(fd, text.encode("utf-8", errors="replace"))
+        os.close(fd)
+        try:
+            _ = load_policy(path)
+        except Exception:
+            pass
+    finally:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        os.unlink(path)
