@@ -241,6 +241,22 @@ async def test_status_endpoint(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_favicon_endpoint_returns_no_content(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(_policy_yaml(), encoding="utf-8")
+    app = create_api_app(
+        policy_path=str(policy_path),
+        state_persist=str(tmp_path / "state.jsonl"),
+        decisions_log=str(tmp_path / "decisions.jsonl"),
+        history_path=str(tmp_path / "policy_versions.jsonl"),
+    )
+    async with await _client(app) as client:
+        response = await client.get("/favicon.ico")
+    assert response.status_code == 204
+    assert response.content == b""
+
+
+@pytest.mark.asyncio
 async def test_evaluate_via_api(tmp_path: Path) -> None:
     policy_path = tmp_path / "policy.yaml"
     policy_path.write_text(_policy_yaml(max_cost=1.0), encoding="utf-8")

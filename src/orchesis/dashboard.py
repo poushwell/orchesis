@@ -839,7 +839,9 @@ def get_dashboard_html() -> str:
       const exp = (stats && stats.experiments) ? stats.experiments : {};
       const task = (stats && stats.task_tracking) ? stats.task_tracking : {};
       updateAnimatedMetric("m-threats", Number(ti.total_matches || 0), (v)=>Math.round(v).toLocaleString());
-      updateAnimatedMetric("m-cache-rate", Number(sc.hit_rate_percent || 0), (v)=>Number(v || 0).toFixed(1) + "%");
+      const semanticRate = Number(sc.hit_rate_percent || 0);
+      const cascadeRate = Number((stats && (stats.cache_hit_rate_percent ?? stats.cache_hit_rate)) || 0);
+      updateAnimatedMetric("m-cache-rate", Math.max(semanticRate, cascadeRate), (v)=>Number(v || 0).toFixed(1) + "%");
       updateAnimatedMetric("m-experiments", Number(exp.active || 0), (v)=>Math.round(v).toLocaleString());
       const sr = Number(task.overall_success_rate || 0);
       updateAnimatedMetric("m-task-success", sr * 100, (v)=>Number(v || 0).toFixed(1) + "%");
@@ -876,12 +878,12 @@ def get_dashboard_html() -> str:
       const poolEl = document.getElementById("pool-stats");
       const hits = Number(pool.hits || 0);
       const misses = Number(pool.misses || 0);
-      const ratio = (hits + misses) > 0 ? (hits / (hits + misses) * 100.0) : 0.0;
+      const poolHitRatio = (hits + misses) > 0 ? (hits / (hits + misses) * 100.0) : 0.0;
       const hosts = pool.pools || {};
       const hostRows = Object.keys(hosts).map((k)=> `${k}: ${hosts[k]}`).join(" | ");
       poolEl.innerHTML = `
         <div>active: ${fmtNum(pool.active || 0)}, total: ${fmtNum(pool.total_connections || 0)}</div>
-        <div>hits/misses: ${fmtNum(hits)}/${fmtNum(misses)} (${ratio.toFixed(1)}% hit)</div>
+        <div>hits/misses: ${fmtNum(hits)}/${fmtNum(misses)} (${poolHitRatio.toFixed(1)}% hit)</div>
         <div class="subtle">${hostRows || "no hosts"}</div>
       `;
 
@@ -1248,14 +1250,26 @@ def get_dashboard_html() -> str:
     function renderCache(stats){
       const sc = (stats && stats.semantic_cache) ? stats.semantic_cache : {};
       const ce = (stats && stats.context_engine) ? stats.context_engine : {};
-      document.getElementById("c-hit-rate").textContent = (sc.hit_rate_percent != null ? sc.hit_rate_percent.toFixed(1) : "0") + "%";
+      const semanticRate = Number(sc.hit_rate_percent || 0);
+      const cascadeRate = Number((stats && (stats.cache_hit_rate_percent ?? stats.cache_hit_rate)) || 0);
+      const semanticEntries = Number(sc.entries || 0);
+      const cascadeEntries = Number((stats && stats.cache_entries_count) || 0);
+      const totalEntries = semanticEntries + cascadeEntries;
+      document.getElementById("c-hit-rate").textContent = Math.max(semanticRate, cascadeRate).toFixed(1) + "%";
       document.getElementById("c-tokens").textContent = fmtNum((sc.total_tokens_saved || 0) + (ce.total_tokens_saved || 0));
       document.getElementById("c-cost").textContent = fmtMoney(sc.total_cost_saved_usd || 0);
-      document.getElementById("c-entries").textContent = `${fmtNum(sc.entries || 0)}/${fmtNum(sc.max_entries || 0)}`;
+      const maxEntries = Number(sc.max_entries || 0);
+      const entriesLabel = maxEntries > 0
+        ? `${fmtNum(totalEntries)}/${fmtNum(maxEntries)}`
+        : `${fmtNum(totalEntries)}`;
+      document.getElementById("c-entries").textContent = entriesLabel;
 
       const semEl = document.getElementById("c-semantic-breakdown");
       if(!sc.enabled){
-        semEl.innerHTML = `<div class="empty">Semantic cache not configured.</div>`;
+        semEl.innerHTML = `
+          <div class="empty">Semantic cache not configured.</div>
+          <div style="margin-top:8px;">Cascade cache hit rate: ${cascadeRate.toFixed(1)}% | Entries: ${fmtNum(cascadeEntries)}</div>
+        `;
       }else{
         const exact = Number(sc.exact_hits || 0);
         const sem = Number(sc.semantic_hits || 0);
@@ -1263,6 +1277,7 @@ def get_dashboard_html() -> str:
         const tot = exact + sem + miss || 1;
         semEl.innerHTML = `
           <div>Exact hits: ${fmtNum(exact)} | Semantic hits: ${fmtNum(sem)} | Misses: ${fmtNum(miss)}</div>
+          <div style="margin-top:6px;">Cascade hits rate: ${cascadeRate.toFixed(1)}% | Cascade entries: ${fmtNum(cascadeEntries)}</div>
           <div class="outcome-bar" style="margin-top:8px;">
             <div class="outcome-success" style="width:${(exact/tot*100).toFixed(1)}%"></div>
             <div class="outcome-escalated" style="width:${(sem/tot*100).toFixed(1)}%"></div>
