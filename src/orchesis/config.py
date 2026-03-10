@@ -935,6 +935,53 @@ def _normalize_alerts(policy: dict[str, Any]) -> None:
     }
 
 
+def _normalize_session_risk(policy: dict[str, Any]) -> None:
+    raw = policy.get("session_risk")
+    if raw is None:
+        policy["session_risk"] = {
+            "enabled": False,
+            "warn_threshold": 30.0,
+            "block_threshold": 60.0,
+            "decay_half_life_seconds": 300.0,
+            "max_signals_per_session": 100,
+            "session_ttl_seconds": 3600.0,
+            "category_diversity_bonus": 10.0,
+        }
+        return
+    if not isinstance(raw, dict):
+        raise PolicyError("session_risk must be a mapping")
+
+    warn_threshold = raw.get("warn_threshold", 30.0)
+    block_threshold = raw.get("block_threshold", 60.0)
+    decay_half_life_seconds = raw.get("decay_half_life_seconds", 300.0)
+    max_signals_per_session = raw.get("max_signals_per_session", 100)
+    session_ttl_seconds = raw.get("session_ttl_seconds", 3600.0)
+    category_diversity_bonus = raw.get("category_diversity_bonus", 10.0)
+
+    warn_val = float(warn_threshold) if _is_number(warn_threshold) else 30.0
+    block_val = float(block_threshold) if _is_number(block_threshold) else 60.0
+    if block_val < warn_val:
+        block_val = warn_val
+
+    policy["session_risk"] = {
+        "enabled": bool(raw.get("enabled", False)),
+        "warn_threshold": max(0.0, warn_val),
+        "block_threshold": max(0.0, block_val),
+        "decay_half_life_seconds": float(decay_half_life_seconds)
+        if _is_number(decay_half_life_seconds) and float(decay_half_life_seconds) > 0
+        else 300.0,
+        "max_signals_per_session": int(max_signals_per_session)
+        if _is_number(max_signals_per_session) and int(max_signals_per_session) > 0
+        else 100,
+        "session_ttl_seconds": float(session_ttl_seconds)
+        if _is_number(session_ttl_seconds) and float(session_ttl_seconds) > 0
+        else 3600.0,
+        "category_diversity_bonus": float(category_diversity_bonus)
+        if _is_number(category_diversity_bonus) and float(category_diversity_bonus) >= 0
+        else 10.0,
+    }
+
+
 def _normalize_semantic_cache(policy: dict[str, Any]) -> None:
     raw = policy.get("semantic_cache")
     if raw is None:
@@ -1110,6 +1157,7 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     _normalize_compliance(loaded)
     _normalize_threat_intel(loaded)
     _normalize_alerts(loaded)
+    _normalize_session_risk(loaded)
     _normalize_semantic_cache(loaded)
     _normalize_context_engine(loaded)
     _normalize_otel_export(loaded)

@@ -62,6 +62,7 @@ from orchesis.webhooks import WebhookConfig, WebhookEmitter
 from orchesis.request_parser import ParsedResponse, parse_request, parse_response
 from orchesis.recorder import SessionRecord, SessionRecorder
 from orchesis.response_handler import ResponseProcessor, SECRET_PATTERNS
+from orchesis.session_risk import RiskSignal, SessionRiskAccumulator
 from orchesis.flow_xray import FlowAnalyzer, FlowXRayConfig
 from orchesis.dashboard import get_dashboard_html
 from orchesis.air_export import export_session_to_air
@@ -1969,6 +1970,18 @@ class LLMHTTPProxy:
         if isinstance(alerts_cfg, dict):
             alert_cfg = AlertConfig.from_policy_dict(alerts_cfg)
             self._alert_manager = AlertManager(alert_cfg)
+        session_risk_cfg = self._policy.get("session_risk")
+        self._session_risk: SessionRiskAccumulator | None = None
+        if isinstance(session_risk_cfg, dict) and bool(session_risk_cfg.get("enabled", False)):
+            self._session_risk = SessionRiskAccumulator(
+                warn_threshold=float(session_risk_cfg.get("warn_threshold", 30.0)),
+                block_threshold=float(session_risk_cfg.get("block_threshold", 60.0)),
+                decay_half_life_seconds=float(session_risk_cfg.get("decay_half_life_seconds", 300.0)),
+                max_signals_per_session=int(session_risk_cfg.get("max_signals_per_session", 100)),
+                session_ttl_seconds=float(session_risk_cfg.get("session_ttl_seconds", 3600.0)),
+                category_diversity_bonus=float(session_risk_cfg.get("category_diversity_bonus", 10.0)),
+                enabled=True,
+            )
         self._server: HTTPServer | None = None
         self._start_time = time.time()
         self._stats_lock = threading.Lock()
@@ -2061,6 +2074,8 @@ class LLMHTTPProxy:
             payload["otel_export"] = self._otlp_exporter.get_stats()
         if self._alert_manager is not None:
             payload["alerts"] = self._alert_manager.stats
+        if self._session_risk is not None:
+            payload["session_risk"] = self._session_risk.stats
         payload["proxy_engine"] = {
             "thread_pool": {
                 "max_workers": int(self._max_workers),
@@ -2392,6 +2407,14 @@ class LLMHTTPProxy:
                 else {"enabled": False, "stats": {"sent": 0, "dropped_rate_limit": 0, "dropped_severity": 0, "errors": 0}}
             )
             self._send_json(handler, 200, payload)
+            return
+        if path.startswith("/api/v1/session-risk/"):
+            session_id = path.split("/api/v1/session-risk/", 1)[1].strip("/")
+            if self._session_risk is None:
+                self._send_json(handler, 200, {"error": "session_risk not enabled"})
+                return
+            state = self._session_risk.get_session_state(session_id)
+            self._send_json(handler, 200, state or {"error": "session not found"})
             return
         if path == "/api/v1/savings":
             self._send_json(handler, 200, self._build_savings_payload())
@@ -3039,43 +3062,55 @@ class LLMHTTPProxy:
 
     def _phase_threat_intel(self, ctx: _RequestContext) -> bool:
         """Scan request against threat intelligence database."""
-        if self._threat_matcher is None or not self._threat_matcher.enabled:
-            return True
-        messages = ctx.body.get("messages", [])
-        if not isinstance(messages, list):
-            messages = []
-        tools = [
-            str(t.get("name", ""))
-            for t in ctx.body.get("tools", [])
-            if isinstance(t, dict) and t.get("name")
-        ]
-        parsed = ctx.parsed_req
-        tool_calls: list[dict[str, Any]] = []
-        if parsed and hasattr(parsed, "tool_calls"):
-            for tc in parsed.tool_calls:
-                name = getattr(tc, "name", None) or (tc.get("name") if isinstance(tc, dict) else "")
-                inp = getattr(tc, "params", None) or getattr(tc, "input", None)
-                if inp is None and isinstance(tc, dict):
-                    inp = tc.get("input", tc.get("params", {}))
-                tool_calls.append({"name": str(name) if name else "", "input": inp or {}})
-        model = str(ctx.body.get("model", ""))
-        headers_dict: dict[str, str] = {}
-        if hasattr(ctx.handler, "headers"):
-            h = ctx.handler.headers
-            if hasattr(h, "items"):
-                headers_dict = dict(h)
-            elif hasattr(h, "keys"):
-                headers_dict = {k: h.get(k, "") for k in h.keys()}
-        matches = self._threat_matcher.scan_request(
-            messages=messages,
-            tools=tools,
-            tool_calls=tool_calls,
-            model=model,
-            headers=headers_dict or None,
-        )
-        if not matches:
-            return True
-        ctx.threat_matches = matches
+        matches: list[Any] = []
+        if self._threat_matcher is not None and self._threat_matcher.enabled:
+            messages = ctx.body.get("messages", [])
+            if not isinstance(messages, list):
+                messages = []
+            tools = [
+                str(t.get("name", ""))
+                for t in ctx.body.get("tools", [])
+                if isinstance(t, dict) and t.get("name")
+            ]
+            parsed = ctx.parsed_req
+            tool_calls: list[dict[str, Any]] = []
+            if parsed and hasattr(parsed, "tool_calls"):
+                for tc in parsed.tool_calls:
+                    name = getattr(tc, "name", None) or (tc.get("name") if isinstance(tc, dict) else "")
+                    inp = getattr(tc, "params", None) or getattr(tc, "input", None)
+                    if inp is None and isinstance(tc, dict):
+                        inp = tc.get("input", tc.get("params", {}))
+                    tool_calls.append({"name": str(name) if name else "", "input": inp or {}})
+            model = str(ctx.body.get("model", ""))
+            headers_dict: dict[str, str] = {}
+            if hasattr(ctx.handler, "headers"):
+                h = ctx.handler.headers
+                if hasattr(h, "items"):
+                    headers_dict = dict(h)
+                elif hasattr(h, "keys"):
+                    headers_dict = {k: h.get(k, "") for k in h.keys()}
+            matches = self._threat_matcher.scan_request(
+                messages=messages,
+                tools=tools,
+                tool_calls=tool_calls,
+                model=model,
+                headers=headers_dict or None,
+            )
+            if matches:
+                ctx.threat_matches = matches
+                if self._session_risk:
+                    session_id = str(ctx.session_id or ctx.proc_result.get("session_id", "unknown"))
+                    for match in matches:
+                        self._session_risk.record_signal(
+                            session_id,
+                            RiskSignal(
+                                category=str(getattr(match, "category", "unknown")),
+                                confidence=float(getattr(match, "confidence", 0.0)),
+                                severity=str(getattr(match, "severity", "low")),
+                                source="threat_intel",
+                                description=f"{getattr(match, 'name', 'threat')}: {str(getattr(match, 'description', ''))[:100]}",
+                            ),
+                        )
         for match in matches:
             if match.action == "block":
                 self._inc("blocked")
@@ -3094,9 +3129,45 @@ class LLMHTTPProxy:
                 if self._alert_manager:
                     self._alert_manager.alert(AlertEvent(severity=AlertSeverity.CRITICAL, event_type="threat_blocked", title="Threat blocked", details=f"{match.name} ({match.threat_id})", session_id=ctx.session_id))
                 return False
-        threat_ids = ",".join(m.threat_id for m in matches)
-        ctx.session_headers["X-Orchesis-Threat-Detected"] = threat_ids
-        ctx.session_headers["X-Orchesis-Threat-Severity"] = matches[0].severity
+        if matches:
+            threat_ids = ",".join(m.threat_id for m in matches)
+            ctx.session_headers["X-Orchesis-Threat-Detected"] = threat_ids
+            ctx.session_headers["X-Orchesis-Threat-Severity"] = matches[0].severity
+
+        if self._session_risk:
+            session_id = str(ctx.session_id or ctx.proc_result.get("session_id", "unknown"))
+            assessment = self._session_risk.evaluate(session_id)
+            ctx.proc_result["session_risk_score"] = assessment.composite_score
+            ctx.proc_result["session_risk_level"] = assessment.escalation_level
+            if assessment.composite_score > 0:
+                ctx.session_headers["X-Orchesis-Session-Risk"] = f"{assessment.composite_score:.1f}"
+                ctx.session_headers["X-Orchesis-Session-Risk-Level"] = assessment.escalation_level
+            if assessment.action == "block":
+                self._inc("blocked")
+                self._send_json(
+                    ctx.handler,
+                    429,
+                    {
+                        "error": {
+                            "type": "session_risk_exceeded",
+                            "message": assessment.reason,
+                            "score": assessment.composite_score,
+                            "categories": assessment.unique_categories,
+                            "signals": assessment.total_signals,
+                        }
+                    },
+                )
+                if self._alert_manager:
+                    self._alert_manager.alert(
+                        AlertEvent(
+                            severity=AlertSeverity.CRITICAL,
+                            event_type="session_risk_block",
+                            title="Session risk threshold exceeded",
+                            details=assessment.reason,
+                            session_id=session_id,
+                        )
+                    )
+                return False
         return True
 
     def _phase_policy(self, ctx: _RequestContext) -> bool:
@@ -3712,6 +3783,10 @@ class LLMHTTPProxy:
             if ctx.threat_matches:
                 ctx.handler.send_header("X-Orchesis-Threat-Detected", ",".join(m.threat_id for m in ctx.threat_matches))
                 ctx.handler.send_header("X-Orchesis-Threat-Severity", ctx.threat_matches[0].severity)
+            if self._session_risk is not None:
+                score = float(ctx.proc_result.get("session_risk_score", 0.0))
+                if score > 0:
+                    ctx.handler.send_header("X-Orchesis-Session-Risk", f"{score:.1f}")
             if self._behavioral_detector.enabled:
                 ctx.handler.send_header("X-Orchesis-Behavior", ctx.behavior_header)
                 if ctx.behavior_score_header:
