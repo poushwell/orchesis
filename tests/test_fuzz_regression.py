@@ -40,6 +40,8 @@ POLICY_CRASH = b"#allow<<:\n-\n\xa02[:\n\n<<:\n-\n\xa02:\n<<:\n- 0b_:\n<*als<:\n
 PII_CRASH_R3 = b"\xe6\xb0\xb1\xe6\x85\x80\xe6\xbc\xa3\xe2\xbc\x88 123-45-6789\xad\xad\xad\xad\xad\xad\xad\xad\xb5\xad\xad\xad\xad\xad\xad\xad\xaf3\xad3|\x180"
 SECRET_CRASH_R3 = b"P%\x14\x00\x00\x88"
 POLICY_CRASH_R3 = b'cs: ["w\xdc\xdc,\xdcu\xc3\xc3\xc3\xc1\xdcU\xc3\xc3\xc39999999999999999999999999999999999999999999999999\xc3cao\xdcu\xc3\xc3\xc3\xc3\xdcu\xc3\xc3\xc3\xc3\xdcu\xc3\xc3\xc3\xc3&i'
+PII_CRASH_R4 = b"z\x03@oj2x@e.ac x.cc s@g.acoj2x@e.ac x.cc s@g.ac r@o.ca@o@e.ac\xdfx7@e.ac \xef@x.c@x.cc s@g.c\xf3@g.8z \xad~\xad\xad\xad\xad\xad\xadYYx r@o.ca@o@e.ac\xdfx7@e.ac \xef@x.c@x.cc s@g.c\xf3@g.8z \xad~\xad\xad\xad\xad\xad\xadYYx"
+SECRET_CRASH_R4 = b"\x1d\x02\x00\x00\x00"
 
 
 def test_pii_detector_fuzz_crash_regression() -> None:
@@ -211,3 +213,21 @@ def test_policy_yaml_fuzz_crash_long_digit_string() -> None:
         except Exception:
             pass
         os.unlink(path)
+
+
+def test_pii_detector_fuzz_crash_email_like_patterns() -> None:
+    """PII detector must not crash on email-like patterns with invalid UTF-8 and soft hyphens."""
+    PiiDetector = _load_pii_detector()
+    detector = PiiDetector()
+    text = PII_CRASH_R4.decode("utf-8", errors="replace")
+    result = detector.scan_text(text)
+    assert isinstance(result, list)
+
+
+def test_secret_scanner_fuzz_crash_control_chars() -> None:
+    """Secret scanner must not crash on 5-byte control char input with nulls."""
+    SecretScanner = _load_secret_scanner()
+    scanner = SecretScanner()
+    text = SECRET_CRASH_R4.decode("utf-8", errors="replace")
+    result = scanner.scan_text(text)
+    assert isinstance(result, list)
