@@ -32,6 +32,7 @@ def _safe_path(path: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Scan GitHub MCP config files.")
     parser.add_argument("--max-configs", type=int, default=0, help="Limit number of configs for testing.")
+    parser.add_argument("--verbose", action="store_true", help="Show fetch/debug progress.")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent
@@ -39,10 +40,14 @@ def main() -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     out_path = data_dir / "configs.jsonl"
 
-    client = GitHubCodeSearchClient()
+    client = GitHubCodeSearchClient(verbose=args.verbose)
     results = client.search_mcp_configs()
+    if args.verbose:
+        print(f"[scan] discovered configs before limit: {len(results)}")
     if args.max_configs and args.max_configs > 0:
         results = results[: args.max_configs]
+    if args.verbose and not results:
+        print("[scan] no search results returned; check GITHUB_TOKEN/rate limits/query scope")
 
     total = 0
     parsed_ok = 0
@@ -51,10 +56,16 @@ def main() -> None:
             repo = str(row.get("repo", ""))
             path = _safe_path(str(row.get("path", "")))
             raw_url = str(row.get("raw_url", ""))
+            branch = str(row.get("default_branch", "main"))
             config_type = str(row.get("config_type", "generic"))
             repo_id = _repo_hash(repo)
+            if args.verbose:
+                print(f"[scan] repo={repo} path={path} type={config_type} branch={branch}")
 
-            content = client.fetch_raw_content(raw_url)
+            try:
+                content = client.fetch_raw_content(raw_url, repo=repo, path=path, branch=branch)
+            except Exception:
+                content = None
             if content is None:
                 payload = {
                     "repo_hash": repo_id,

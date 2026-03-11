@@ -48,7 +48,7 @@ _API_KEY_PATTERNS = [
     re.compile(r"[a-z]+://[^:@/\s]+:[^@/\s]+@", re.I),
 ]
 _SENSITIVE_KEYS = {"password", "secret", "token", "api_key", "apikey", "database_url", "aws_secret"}
-_SHELL_CMDS = {"bash", "sh", "cmd", "powershell", "pwsh", "zsh"}
+_SHELL_CMDS = {"bash", "sh", "cmd", "powershell", "pwsh", "zsh", "run", "exec", "docker"}
 _KNOWN_GOOD_PREFIXES = (
     "@modelcontextprotocol/",
     "modelcontextprotocol-",
@@ -169,6 +169,19 @@ def check_permissions(server: MCPServerEntry) -> list[Finding]:
                 title="Shell access granted",
                 description="Server command is a shell interpreter.",
                 evidence=server.command,
+                server_name=server.name,
+            )
+        )
+    # npx/uvx wrappers can still grant shell-like execution via args.
+    if cmd in {"npx", "uvx"} and any(marker in args_joined for marker in (" exec ", " shell ", " bash ")):
+        findings.append(
+            Finding(
+                check_id="MCP-004",
+                severity="high",
+                category="permissions",
+                title="Shell access granted",
+                description="Package runner args indicate shell/exec behavior.",
+                evidence=_trim(f"{server.command} {' '.join(server.args)}", 120),
                 server_name=server.name,
             )
         )
