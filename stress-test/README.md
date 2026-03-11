@@ -1,96 +1,86 @@
-# Orchesis Stress Test: Adversarial AI Agent Security
+# Orchesis Production Stress Testing Suite (T1-A)
 
-This standalone project demonstrates how agent toolchains can be exploited without runtime enforcement, and how Orchesis blocks those same attack paths when policy checks are enabled.
+Production-grade stress suite for pre-launch hardening and article evidence.
 
-## Scope
+This suite validates the proxy under:
+- sustained concurrent load,
+- adversarial traffic under pressure,
+- memory/runtime stability,
+- failure and recovery behavior.
 
-The test matrix runs:
+It is self-contained (no real LLM key required): `run_all.py` starts a mock upstream and a local Orchesis proxy.
 
-- 3 adversarial attack scenarios
-- across 4 AI agent frameworks
-- in 2 modes (without Orchesis, with Orchesis)
+## Directory Layout
 
-Total: **24 runs**.
+- `run_all.py` — master runner (`--quick`, `--scenario s01`)
+- `scenarios/` — `s01`..`s08` scenario implementations
+- `lib/mock_upstream.py` — configurable OpenAI-compatible upstream simulator
+- `lib/traffic_generator.py` — concurrent traffic and attack mix driver
+- `lib/metrics_collector.py` — RSS/CPU sampling
+- `lib/report_generator.py` — markdown/json reports
+- `results/` — generated artifacts (`report.md`, `report.json`)
 
-## Attack Scenarios
+## Scenarios
 
-- Prompt injection with malicious instructions embedded in trusted content
-- Secret exfiltration request (read secrets, email secrets)
-- Path traversal / sensitive file access (`/etc/passwd`, `~/.ssh/id_rsa`, etc.)
+- `s01` 50 concurrent agents
+- `s02` sustained throughput (target profile ~1000 req/min in full mode)
+- `s03` memory stability over long run
+- `s04` adversarial traffic under load
+- `s05` cascade failure and recovery
+- `s06` heartbeat storm protection
+- `s07` budget race/thread-safety
+- `s08` policy hot-reload under traffic
 
-## Frameworks
+## Running
 
-- OpenClaw-style simulated agent
-- CrewAI
-- LangGraph
-- OpenAI Agents SDK
-
-## Prerequisites
-
-- Python 3.11+
-- `OPENAI_API_KEY` set in your environment
-- Dependencies from `requirements.txt`
-- Optional: OpenClaw installed locally (for real OpenClaw experiments). The included OpenClaw runner is a simulated OpenClaw-style agent.
-
-## Install
-
-```bash
-cd stress-test
-pip install -r requirements.txt
-```
-
-## Quick Start
-
-Linux/macOS:
+From repository root:
 
 ```bash
-./run_all.sh
+python stress-test/run_all.py --quick
+python stress-test/run_all.py --scenario s01
+python stress-test/run_all.py
 ```
 
 Windows PowerShell:
 
 ```powershell
-./run_all.ps1
+.\.venv\Scripts\python.exe stress-test/run_all.py --quick
 ```
 
-## Results
+## Quick vs Full Mode
 
-Per-framework results are written to:
+- `--quick`: short smoke validation (durations reduced, local-dev friendly)
+- full mode: pre-launch runtime profile (longer durations, heavier evidence)
 
-- `results/openclaw_without_orchesis.json`
-- `results/openclaw_with_orchesis.json`
-- `results/crewai_without_orchesis.json`
-- `results/crewai_with_orchesis.json`
-- `results/langgraph_without_orchesis.json`
-- `results/langgraph_with_orchesis.json`
-- `results/openai_agents_without_orchesis.json`
-- `results/openai_agents_with_orchesis.json`
+Use quick mode for CI/dev iteration, and full mode for final launch verification.
 
-Aggregate reports:
+## Report Artifacts
 
-- `results/summary.md` (human-readable)
-- `results/full_report.json` (machine-readable)
+Generated files:
+- `stress-test/results/report.md` — human-readable report
+- `stress-test/results/report.json` — machine-readable payload
 
-## How To Read Results
+Report summary includes:
+- scenario pass/fail status,
+- key latency or resilience metric,
+- per-scenario details (counts, rates, memory growth, phase breakdown),
+- latency histogram (ASCII) when available.
 
-Each attack run includes:
+## PASS/FAIL Interpretation
 
-- `summary.total_calls`
-- `summary.blocked`
-- `summary.secrets_leaked`
-- `summary.dangerous_tools_used`
-- `summary.sensitive_files_read`
+- PASS means scenario met its configured criteria in the current mode.
+- FAIL means at least one criterion was not met; inspect scenario details in `report.md`/`report.json`.
+- Quick criteria are intentionally practical for local environments; full-mode criteria are stricter for launch sign-off.
 
-Expected behavior:
+## Notes for T1-A Article
 
-- **Without Orchesis**: vulnerable patterns should appear (dangerous tool calls, sensitive reads, secret leakage).
-- **With Orchesis**: dangerous calls denied, sensitive reads blocked, secret exfiltration prevented.
+- Runs are deterministic enough for reproducible screenshots/tables.
+- `report.json` is suitable for post-processing into charts.
+- Recommended publication flow:
+  1) run `--quick` locally for iteration,
+  2) run full mode on target environment,
+  3) publish metrics and scenario notes from `report.md`.
 
-## Notes
+## Legacy Adversarial Matrix
 
-- All tool actions are simulated via `tools/mock_tools.py` (no real command execution, no real file access, no real email transmission).
-- OpenAI API is used to produce realistic tool-calling behavior.
-
-## Repository
-
-Main Orchesis repository: `../`
+Older framework-specific scripts (`openclaw/`, `crewai/`, `langgraph/`, `openai_agents/`, `run_all.sh`, `run_all.ps1`) are kept for compatibility, but the canonical pre-launch harness for T1-A is `run_all.py` + `scenarios/`.
