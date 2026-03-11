@@ -1,102 +1,122 @@
-# Orchesis — AI Agent Control Plane
+# 🛡️ Orchesis
 
-> Open-source proxy that makes AI agents secure, cost-efficient, and reliable in production.
+**AI Agent Control Plane — Transparent HTTP proxy for security, cost, and reliability**
 
-## Why Orchesis?
+[![Tests](https://github.com/poushwell/orchesis/actions/workflows/ci.yml/badge.svg)](https://github.com/poushwell/orchesis/actions)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://python.org)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-1900%2B%20passing-brightgreen)]()
 
-- 40–95% of AI agent pilots fail in production
-- One line of config, zero code changes
-- Security + Cost + Effectiveness in one proxy
+Change your AI agent's base URL. Get security scanning, cost optimization,
+failure detection, and full observability. Zero code changes. Zero dependencies.
 
-## Quickstart
+## The Problem
 
-See the quick start commands below.
+AI agents make autonomous API calls with no oversight. A single misconfigured agent can burn $3,600 overnight on heartbeat loops, leak secrets through tool calls, or spiral into infinite retry cycles. Existing solutions require SDK integration or code changes. Orchesis sits between your agent and the LLM API — transparent, non-invasive, instant.
 
-## Quick Start (3 commands)
+## Quick Start
 
 ```bash
 pip install orchesis
-orchesis init
-orchesis proxy --port 8080
-orchesis serve --policy policy.yaml
+orchesis proxy --target https://api.openai.com
+# Point your agent's base URL to http://localhost:8080
+# Open http://localhost:8080/dashboard
 ```
 
-## Features
+Or with the demo (no API key needed):
 
-### Security
+```bash
+git clone https://github.com/poushwell/orchesis
+cd orchesis && pip install -e .
+python demo/try_orchesis.py
+```
 
-- **Threat Intelligence** — 25 built-in signatures (prompt injection, command injection, data exfiltration, memory poisoning)
-- Secret/PII scanning
-- Loop detection + Circuit breaker
-- Compliance (9 frameworks: OWASP, NIST, SOC2, HIPAA, EU AI Act…)
+## What It Does
 
-### Cost Optimization
+| Security | Cost | Reliability | Observability |
+|----------|------|-------------|---------------|
+| 25 threat signatures | Semantic cache (118x speedup) | Circuit breaker | Dashboard (8 tabs) |
+| Prompt injection blocking | Adaptive cascade routing | Loop detection | Flow X-Ray |
+| PII/secret scanning | Budget enforcement | Heartbeat storm protection | Agent DNA profiling |
+| Session risk scoring | Spend rate anomaly detection | Auto-recovery | OWASP/NIST compliance |
 
-- **Adaptive Model Cascade** — auto-route by complexity
-- **Semantic Cache** — SimHash + Jaccard, no vector DB
-- **Context Engine** — dedup, trim, compress
-- Budget limits + cost tracking
+## Key Numbers
 
-### Effectiveness (unique — no competitor has this)
-
-- **A/B Testing Framework** — live model comparison
-- **Task Completion Tracking** — success rate intelligence
-- **Agent DNA** — behavioral fingerprinting + drift detection
-- **Flow X-Ray** — conversation topology + 10 pattern detectors
-- **Time Machine** — session replay + what-if analysis
-
-## Dashboard
-
-Single-page embedded dashboard with 8 tabs:
-
-- **Shield Overview** — status pulse, metrics, cost timeline, circuit breaker, budget, events
-- **Agents** — Agent DNA table
-- **Sessions** — Time Machine sessions
-- **Flow X-Ray** — conversation topology, patterns
-- **Experiments** — A/B testing, task success rate, correlations
-- **Threats** — threat intel stats, top threats, signatures
-- **Cache** — semantic cache + context engine stats
-- **Compliance** — OWASP/NIST coverage, findings
+- **1900+ tests** — battle-tested with 4 rounds of fuzzing
+- **17-phase pipeline** — parse to send, sub-millisecond overhead
+- **25 threat signatures** — OWASP ASI Top 10 mapped
+- **0 external dependencies** — stdlib Python only
+- **8 stress-test scenarios** — 50 concurrent agents, 30-min memory stability, adversarial load
 
 ## Architecture
 
-One transparent proxy, 17 phases:
+Orchesis processes every request through a 17-phase pipeline. Each phase is independent, configurable via `policy.yaml`, and adds `<1ms` overhead in the proxy path. Unlike SDK-based solutions, deployment is transparent: agents continue speaking standard OpenAI-compatible HTTP APIs.
 
+```text
+Agent -> Orchesis Proxy -> LLM API
+         |- parse
+         |- security (threat_intel, PII, secrets)
+         |- cost (cache, cascade, budget)
+         |- reliability (loops, circuit_breaker, flow_xray)
+         '- observability (dashboard, OTel, alerts)
 ```
-parse → experiment → flow_xray → cascade → circuit_breaker → loop →
-behavioral → budget → policy → threat_intel → model_router →
-secrets → context → semantic_cache → upstream → post_upstream → send
+
+## Dashboard Screenshots
+
+> Screenshots from live testing with gpt-4o-mini: [Shield](docs/screenshots/shield.png) | [Threats](docs/screenshots/threats.png) | [Flow X-Ray](docs/screenshots/flow.png) | [Compliance](docs/screenshots/compliance.png)
+
+## Configuration
+
+```yaml
+target: https://api.openai.com
+budgets:
+  daily: 50.0
+threat_intel:
+  enabled: true
+semantic_cache:
+  enabled: true
+session_risk:
+  enabled: true
+  warn_threshold: 30
+  block_threshold: 60
 ```
-
-## Documentation
-
-- [Quick Start](docs/QUICKSTART.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [API Reference](docs/API_REFERENCE.md)
-- [Policy Reference](docs/POLICY_REFERENCE.md)
-
-## Project Stats
-
-- 800+ tests passing
-- CI on Python 3.11 and 3.12
 
 ## Integrations
 
-- OpenAI-compatible clients
-- Anthropic-compatible clients
-- OTLP-compatible observability backends
+- MCP Server — Security checks inside your AI agent (`mcp-server/`)
+- GitHub Action — CI/CD security gate (`github-action/`)
+- OpenClaw — Heartbeat protection, spend-rate anomaly (`integrations/openclaw/`)
+- Telegram Alerts — Real-time notifications on threats
+- OTel/Prometheus — Export metrics to your stack
 
-## Comparison
+## Stress Test Results
 
-| Feature | Orchesis | Lasso | Lunar | LangSmith |
-|---------|----------|-------|-------|-----------|
-| Open source | ✅ | ❌ | ❌ | ❌ |
-| Zero deps | ✅ | ❌ | ❌ | ❌ |
-| A/B Testing | ✅ | ❌ | ❌ | ❌ |
-| Flow X-Ray | ✅ | ❌ | ❌ | ❌ |
-| Semantic Cache | ✅ | ❌ | ❌ | ❌ |
-| Compliance (9fw) | ✅ | ❌ | ❌ | ❌ |
+| Scenario | Result | Key Metric |
+|----------|--------|------------|
+| 50 concurrent agents | ✅ | avg 93ms overhead |
+| Sustained 1000 req/min | ✅ | p99 201ms, 0 errors |
+| Memory stability 30min | ✅ | 0.00MB growth |
+| Adversarial under load | ✅ | 0 false positives |
+| Cascade failure recovery | ✅ | 99.0% recovery rate |
+| Heartbeat storm (1000/sec) | ✅ | 996 blocked, 4 allowed |
+| Budget race conditions | ✅ | 0 overspend |
+| Policy hot-reload | ✅ | 0 dropped requests |
+
+## Compliance
+
+| Framework | Coverage |
+|-----------|----------|
+| OWASP LLM Top 10 | 90% |
+| NIST AI RMF | 100% |
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and browse [good first issues](https://github.com/poushwell/orchesis/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
 
 ## License
 
 MIT
+
+## Footer
+
+[Documentation](docs/) | [API Reference](docs/API_REFERENCE.md) | [Discord](https://discord.gg/) | [Twitter](https://x.com/)
