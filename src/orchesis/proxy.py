@@ -1982,6 +1982,25 @@ class LLMHTTPProxy:
                 category_diversity_bonus=float(session_risk_cfg.get("category_diversity_bonus", 10.0)),
                 enabled=True,
             )
+        self._telemetry_collector = None
+        telemetry_cfg = self._policy.get("telemetry_export")
+        if isinstance(telemetry_cfg, dict) and bool(telemetry_cfg.get("enabled", False)):
+            try:
+                from orchesis.telemetry_export import TelemetryCollector
+
+                self._telemetry_collector = TelemetryCollector(
+                    max_records=int(telemetry_cfg.get("max_records", 100_000)),
+                    auto_export_path=(
+                        str(telemetry_cfg.get("auto_export_path"))
+                        if isinstance(telemetry_cfg.get("auto_export_path"), str)
+                        and telemetry_cfg.get("auto_export_path")
+                        else None
+                    ),
+                    auto_export_interval=float(telemetry_cfg.get("auto_export_interval", 300.0)),
+                    enabled=True,
+                )
+            except Exception:
+                self._telemetry_collector = None
         self._server: HTTPServer | None = None
         self._start_time = time.time()
         self._stats_lock = threading.Lock()
@@ -2146,6 +2165,8 @@ class LLMHTTPProxy:
             self._otlp_exporter.stop()
         if self._alert_manager is not None:
             self._alert_manager.stop()
+        if self._telemetry_collector is not None:
+            self._telemetry_collector.stop()
 
     def _inc(self, field: str) -> None:
         with self._stats_lock:
@@ -2409,6 +2430,36 @@ class LLMHTTPProxy:
             return
         if path in {"/stats", "/api/v1/stats"}:
             self._send_json(handler, 200, self.stats)
+            return
+        if path == "/api/v1/telemetry/stats":
+            if self._telemetry_collector is None:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            self._send_json(handler, 200, self._telemetry_collector.stats)
+            return
+        if path == "/api/v1/telemetry/export":
+            if self._telemetry_collector is None:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            last_raw = (query_params.get("last") or ["0"])[0]
+            try:
+                last_n = max(0, int(last_raw))
+            except Exception:
+                last_n = 0
+            fmt = str((query_params.get("format") or ["json"])[0]).strip().lower()
+            records = self._telemetry_collector.get_records(last_n=last_n)
+            if fmt == "jsonl":
+                lines = "\n".join(json.dumps(item, default=str) for item in records)
+                payload = lines.encode("utf-8")
+                handler.send_response(200)
+                handler.send_header("Content-Type", "application/x-ndjson")
+                handler.send_header("Content-Length", str(len(payload)))
+                if self._config.cors:
+                    handler.send_header("Access-Control-Allow-Origin", "*")
+                handler.end_headers()
+                handler.wfile.write(payload)
+                return
+            self._send_json(handler, 200, {"records": records, "count": len(records)})
             return
         if path == "/api/v1/alerts":
             payload = (
@@ -2855,6 +2906,7 @@ class LLMHTTPProxy:
                 }
             }
             payload_fb = json.dumps(fallback, ensure_ascii=False).encode("utf-8")
+            ctx.resp_status = int(self._circuit_breaker.fallback_status)
             ctx.handler.send_response(self._circuit_breaker.fallback_status)
             ctx.handler.send_header("Content-Type", "application/json")
             ctx.handler.send_header("Content-Length", str(len(payload_fb)))
@@ -2914,6 +2966,7 @@ class LLMHTTPProxy:
                     }
                 }
                 body_lb = json.dumps(payload_lb, ensure_ascii=False).encode("utf-8")
+                ctx.resp_status = 429
                 ctx.handler.send_response(429)
                 ctx.handler.send_header("Content-Type", "application/json")
                 ctx.handler.send_header("Content-Length", str(len(body_lb)))
@@ -3774,6 +3827,24 @@ class LLMHTTPProxy:
         )
 
     def _phase_send_response(self, ctx: _RequestContext) -> None:
+        if isinstance(ctx.proc_result, dict):
+            ctx.proc_result.setdefault("status_code", int(ctx.resp_status))
+            if ctx.resp_status >= 400 and not ctx.proc_result.get("error_type"):
+                ctx.proc_result["error_type"] = f"http_{ctx.resp_status}"
+            ctx.proc_result.setdefault("blocked", bool(ctx.resp_status >= 400))
+            ctx.proc_result.setdefault("request_id", str(ctx.request_id or ""))
+            ctx.proc_result.setdefault("session_id", str(ctx.session_id or "unknown"))
+            ctx.proc_result.setdefault("agent_id", str(ctx.behavior_agent_id or ""))
+            ctx.proc_result.setdefault("model", str(ctx.original_model or ctx.body.get("model", "")))
+            ctx.proc_result.setdefault("model_used", str(ctx.body.get("model", ctx.original_model)))
+            ctx.proc_result.setdefault("cache_hit", bool(ctx.from_semantic_cache))
+            ctx.proc_result.setdefault("cache_type", "semantic" if ctx.from_semantic_cache else "miss")
+            ctx.proc_result.setdefault("loop_detected", bool(ctx.was_loop_detected))
+            ctx.proc_result.setdefault("loop_count", int(ctx.content_loop_count))
+            ctx.proc_result.setdefault("heartbeat_detected", bool(ctx.heartbeat_detected))
+            ctx.proc_result.setdefault("spend_rate_5min", float(ctx.spend_rate_per_min))
+            ctx.proc_result.setdefault("cascaded", bool(ctx.was_escalated))
+            ctx.proc_result.setdefault("cascade_reason", "escalated" if ctx.was_escalated else "")
         if not ctx.is_streaming:
             ctx.handler.send_response(ctx.resp_status)
             self._copy_upstream_headers(ctx.handler, ctx.resp_headers, len(ctx.resp_body))
@@ -3832,6 +3903,9 @@ class LLMHTTPProxy:
 
     def _handle_post(self, handler: BaseHTTPRequestHandler) -> None:
         self._inc("requests")
+        parsed_path = urlsplit(handler.path)
+        request_path = parsed_path.path
+        query_params = parse_qs(parsed_path.query, keep_blank_values=True)
         ctx = _RequestContext(
             handler=handler,
             request_started=time.perf_counter(),
@@ -3848,13 +3922,26 @@ class LLMHTTPProxy:
             headers_dict = {k: v for k, v in handler.headers.items()}
             ctx.trace_ctx = TraceContext.from_headers(headers_dict)
         try:
-            if handler.path == "/kill":
+            if request_path == "/api/v1/telemetry/export-file":
+                if self._telemetry_collector is None:
+                    self._send_json(handler, 200, {"enabled": False})
+                    return
+                fmt = str((query_params.get("format") or ["jsonl"])[0]).strip().lower()
+                if fmt == "csv":
+                    export_path = "telemetry_export.csv"
+                    count = self._telemetry_collector.export_csv(export_path)
+                else:
+                    export_path = "telemetry_export.jsonl"
+                    count = self._telemetry_collector.export_jsonl(export_path)
+                self._send_json(handler, 200, {"exported": count, "path": export_path})
+                return
+            if request_path == "/kill":
                 self._handle_kill(handler)
                 return
-            if handler.path == "/resume":
+            if request_path == "/resume":
                 self._handle_resume(handler)
                 return
-            if self._experiment_manager is not None and handler.path == "/api/experiments":
+            if self._experiment_manager is not None and request_path == "/api/experiments":
                 body = self._read_json_body(handler)
                 if isinstance(body, dict) and body.get("name") and body.get("variants"):
                     try:
@@ -3999,6 +4086,85 @@ class LLMHTTPProxy:
                 {"error": {"type": "proxy_error", "message": str(error)}},
                 extra_headers=ctx.session_headers,
             )
+        finally:
+            self._record_telemetry_for_ctx(ctx)
+
+    def _record_telemetry_for_ctx(self, ctx: _RequestContext) -> None:
+        if self._telemetry_collector is None:
+            return
+        try:
+            proc = ctx.proc_result if isinstance(ctx.proc_result, dict) else {}
+            if not isinstance(proc, dict):
+                proc = {}
+            elapsed_ms = (time.perf_counter() - float(ctx.request_started or 0.0)) * 1000.0
+            if elapsed_ms > 0:
+                proc["total_ms"] = float(proc.get("total_ms", 0.0) or elapsed_ms)
+            if "upstream_ms" not in proc:
+                proc["upstream_ms"] = float(proc.get("upstream_ms", 0.0) or 0.0)
+            if "request_id" not in proc or not proc.get("request_id"):
+                proc["request_id"] = str(ctx.request_id or "")
+            if "session_id" not in proc or not proc.get("session_id"):
+                proc["session_id"] = str(ctx.session_id or "unknown")
+            if "agent_id" not in proc or not proc.get("agent_id"):
+                proc["agent_id"] = str(ctx.behavior_agent_id or "")
+            if "model" not in proc or not proc.get("model"):
+                proc["model"] = str(ctx.original_model or ctx.body.get("model", ""))
+            if "model_used" not in proc or not proc.get("model_used"):
+                proc["model_used"] = str(ctx.body.get("model", ctx.original_model))
+            if "cost_usd" not in proc:
+                proc["cost_usd"] = float(proc.get("cost", 0.0) or 0.0)
+            if "input_tokens" not in proc:
+                proc["input_tokens"] = int(getattr(ctx.parsed_resp_obj, "input_tokens", 0) or 0)
+            if "output_tokens" not in proc:
+                proc["output_tokens"] = int(getattr(ctx.parsed_resp_obj, "output_tokens", 0) or 0)
+            if "tool_calls_count" not in proc:
+                proc["tool_calls_count"] = len(getattr(ctx.parsed_req, "tool_calls", []) or [])
+            if "has_tool_results" not in proc:
+                proc["has_tool_results"] = bool(getattr(ctx.parsed_resp_obj, "tool_calls", []) or [])
+            if "streaming" not in proc:
+                proc["streaming"] = bool(ctx.is_streaming)
+            if "cache_hit" not in proc:
+                proc["cache_hit"] = bool(ctx.from_semantic_cache)
+            if "cache_type" not in proc:
+                proc["cache_type"] = (
+                    str(ctx.semantic_cache_type or "semantic")
+                    if ctx.from_semantic_cache
+                    else str("miss" if ctx.cascade_cache_state == "miss" else "exact")
+                )
+            if "loop_detected" not in proc:
+                proc["loop_detected"] = bool(ctx.was_loop_detected)
+            if "loop_count" not in proc:
+                proc["loop_count"] = int(ctx.content_loop_count)
+            if "content_hash_blocked" not in proc:
+                proc["content_hash_blocked"] = bool(
+                    getattr(ctx.handler, "_orchesis_last_error_type", "") == "content_loop_detected"
+                )
+            if "heartbeat_detected" not in proc:
+                proc["heartbeat_detected"] = bool(ctx.heartbeat_detected)
+            if "spend_rate_5min" not in proc:
+                proc["spend_rate_5min"] = float(ctx.spend_rate_per_min)
+            if "cascaded" not in proc:
+                proc["cascaded"] = bool(ctx.was_escalated)
+            if "cascade_reason" not in proc:
+                proc["cascade_reason"] = "escalated" if ctx.was_escalated else ""
+            if "threat_matches" not in proc and ctx.threat_matches:
+                proc["threat_matches"] = list(ctx.threat_matches)
+            status_hint = int(getattr(ctx.handler, "_orchesis_last_status", 0) or 0)
+            if "status_code" not in proc or int(proc.get("status_code", 0) or 0) <= 0:
+                proc["status_code"] = int(ctx.resp_status if ctx.resp_status > 0 else status_hint or 200)
+            if "error_type" not in proc or not proc.get("error_type"):
+                proc["error_type"] = str(getattr(ctx.handler, "_orchesis_last_error_type", ""))[:120]
+            if "blocked" not in proc:
+                proc["blocked"] = bool(int(proc.get("status_code", 0) or 0) >= 400)
+            if "block_reason" not in proc or not proc.get("block_reason"):
+                proc["block_reason"] = str(proc.get("error_type", ""))
+            ctx.proc_result = proc
+            from orchesis.telemetry_export import build_record_from_context
+
+            rec = build_record_from_context(ctx)
+            self._telemetry_collector.record(rec)
+        except Exception:
+            return
 
     def _handle_kill(self, handler: BaseHTTPRequestHandler) -> None:
         payload = self._read_json_body(handler)
@@ -4204,6 +4370,19 @@ class LLMHTTPProxy:
         extra_headers: dict[str, str] | None = None,
     ) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        try:
+            setattr(handler, "_orchesis_last_status", int(status))
+            error_type = ""
+            raw_err = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(raw_err, dict):
+                maybe = raw_err.get("type", "") or raw_err.get("error", "")
+                if isinstance(maybe, str):
+                    error_type = maybe
+            elif isinstance(raw_err, str):
+                error_type = raw_err
+            setattr(handler, "_orchesis_last_error_type", str(error_type))
+        except Exception:
+            pass
         try:
             handler.send_response(status)
             handler.send_header("Content-Type", "application/json")
