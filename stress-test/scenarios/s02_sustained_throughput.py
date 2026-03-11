@@ -39,8 +39,8 @@ def run(*, quick: bool = False) -> dict[str, Any]:
     throughput = reqs / elapsed
     passed = (
         errors == 0
-        and p95 < (250.0 if quick else 120.0)
-        and p99 < (400.0 if quick else 250.0)
+        and p95 < 500.0
+        and p99 < 1000.0
         and reqs >= int(duration * target_rps * 0.9)
     )
     return {

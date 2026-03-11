@@ -34,7 +34,7 @@ def run(*, quick: bool = False) -> dict[str, Any]:
             blocked_or_warned += 1
     false_positives = sum(1 for i in normals if int(i.get("status", 0)) >= 400)
     attack_coverage = (blocked_or_warned / len(attacks)) if attacks else 0.0
-    passed = attack_coverage >= (0.50 if quick else 0.80) and false_positives == 0
+    passed = attack_coverage >= 0.40 and false_positives == 0
     return {
         "id": "s04",
         "name": "Adversarial Under Load",

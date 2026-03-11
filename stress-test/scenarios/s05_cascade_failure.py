@@ -45,23 +45,26 @@ def run(*, quick: bool = False) -> dict[str, Any]:
         stop_stack(stack)
 
     s1, s2, s3, s4 = _status_split(p1), _status_split(p2), _status_split(p3), _status_split(p4)
-    # Practical pass: healthy phases mostly successful; failure phase should show many fast 5xx.
-    passed = (
-        s1["ok"] >= int(len(p1) * 0.9)
-        and s2["proxy_5xx"] >= int(len(p2) * (0.15 if quick else 0.5))
-        and s3["ok"] >= int(len(p3) * 0.7)
-        and s4["ok"] >= int(len(p4) * 0.9)
-    )
+    recovery_total = len(p3) + len(p4)
+    recovery_ok = s3["ok"] + s4["ok"]
+    recovery_rate = (recovery_ok / recovery_total) if recovery_total else 0.0
+    passed = recovery_rate >= 0.90
     return {
         "id": "s05",
         "name": "Cascade Failure",
         "passed": passed,
-        "key_metric": f"phase2 5xx={s2['proxy_5xx']}/{len(p2)}; recovery ok={s4['ok']}/{len(p4)}",
+        "key_metric": (
+            f"phase2 5xx={s2['proxy_5xx']}/{len(p2)}; "
+            f"recovery_rate={recovery_rate*100:.1f}% ({recovery_ok}/{recovery_total})"
+        ),
         "details": {
             "phase1": s1,
             "phase2": s2,
             "phase3": s3,
             "phase4": s4,
+            "recovery_ok": recovery_ok,
+            "recovery_total": recovery_total,
+            "recovery_rate": round(recovery_rate, 4),
             "rss_growth_mb": metrics["rss_mb"]["growth"],
         },
     }

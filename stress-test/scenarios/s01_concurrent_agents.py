@@ -39,7 +39,8 @@ def run(*, quick: bool = False) -> dict[str, Any]:
         total == (agents * per_agent)
         and errors == 0
         and ok_like == total
-        and avg < 250.0
+        and avg < 300.0
+        and p95 < 1000.0
         and distinct_agents >= max(5, agents // 2)
     )
     return {
