@@ -64,6 +64,7 @@ from orchesis.recorder import SessionRecord, SessionRecorder
 from orchesis.response_handler import ResponseProcessor, SECRET_PATTERNS
 from orchesis.session_risk import RiskSignal, SessionRiskAccumulator
 from orchesis.flow_xray import FlowAnalyzer, FlowXRayConfig
+from orchesis.ars import AgentReliabilityScore
 from orchesis.dashboard import get_dashboard_html
 from orchesis.air_export import export_session_to_air
 from orchesis import __version__ as ORCHESIS_VERSION
@@ -1982,6 +1983,14 @@ class LLMHTTPProxy:
                 category_diversity_bonus=float(session_risk_cfg.get("category_diversity_bonus", 10.0)),
                 enabled=True,
             )
+        ars_cfg = self._policy.get("ars")
+        self._ars: AgentReliabilityScore | None = None
+        if isinstance(ars_cfg, dict) and bool(ars_cfg.get("enabled", False)):
+            self._ars = AgentReliabilityScore(
+                weights=ars_cfg.get("weights") if isinstance(ars_cfg.get("weights"), dict) else None,
+                latency_baseline_ms=float(ars_cfg.get("latency_baseline_ms", 2000.0)),
+                enabled=True,
+            )
         self._telemetry_collector = None
         telemetry_cfg = self._policy.get("telemetry_export")
         if isinstance(telemetry_cfg, dict) and bool(telemetry_cfg.get("enabled", False)):
@@ -2095,6 +2104,8 @@ class LLMHTTPProxy:
             payload["alerts"] = self._alert_manager.stats
         if self._session_risk is not None:
             payload["session_risk"] = self._session_risk.stats
+        if self._ars is not None:
+            payload["ars"] = self._ars.stats
         payload["proxy_engine"] = {
             "thread_pool": {
                 "max_workers": int(self._max_workers),
@@ -2476,6 +2487,51 @@ class LLMHTTPProxy:
                 return
             state = self._session_risk.get_session_state(session_id)
             self._send_json(handler, 200, state or {"error": "session not found"})
+            return
+        if path == "/api/v1/ars":
+            if self._ars is None:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            results = self._ars.compute_all()
+            self._send_json(
+                handler,
+                200,
+                {
+                    "agents": [
+                        {
+                            "agent_id": item.agent_id,
+                            "score": item.score,
+                            "grade": item.grade,
+                            "components": item.components,
+                            "sample_size": item.sample_size,
+                            "confidence": item.confidence,
+                        }
+                        for item in results
+                    ]
+                },
+            )
+            return
+        if path.startswith("/api/v1/ars/"):
+            agent_id = path.split("/api/v1/ars/", 1)[1].strip("/")
+            if self._ars is None:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            result = self._ars.compute(agent_id)
+            if result is None:
+                self._send_json(handler, 200, {"error": "agent not found"})
+                return
+            self._send_json(
+                handler,
+                200,
+                {
+                    "agent_id": result.agent_id,
+                    "score": result.score,
+                    "grade": result.grade,
+                    "components": result.components,
+                    "sample_size": result.sample_size,
+                    "confidence": result.confidence,
+                },
+            )
             return
         if path == "/api/v1/savings":
             self._send_json(handler, 200, self._build_savings_payload())
@@ -4090,8 +4146,6 @@ class LLMHTTPProxy:
             self._record_telemetry_for_ctx(ctx)
 
     def _record_telemetry_for_ctx(self, ctx: _RequestContext) -> None:
-        if self._telemetry_collector is None:
-            return
         try:
             proc = ctx.proc_result if isinstance(ctx.proc_result, dict) else {}
             if not isinstance(proc, dict):
@@ -4159,10 +4213,34 @@ class LLMHTTPProxy:
             if "block_reason" not in proc or not proc.get("block_reason"):
                 proc["block_reason"] = str(proc.get("error_type", ""))
             ctx.proc_result = proc
-            from orchesis.telemetry_export import build_record_from_context
+            if self._ars is not None:
+                agent_id = str(proc.get("agent_id", "") or "")
+                if agent_id:
+                    status_code = int(proc.get("status_code", 200) or 200)
+                    error_type = str(proc.get("error_type", "") or "").lower()
+                    session_success = bool(status_code < 400 and not proc.get("blocked", False))
+                    clean_termination = bool(
+                        status_code < 500
+                        and "timeout" not in error_type
+                        and "circuit" not in error_type
+                        and "budget_exceeded" not in error_type
+                    )
+                    self._ars.update(
+                        agent_id,
+                        is_session_end=True,
+                        session_success=session_success,
+                        loop_flagged=bool(proc.get("loop_detected", False)),
+                        cost_usd=float(proc.get("cost_usd", 0.0) or 0.0),
+                        latency_ms=float(proc.get("total_ms", 0.0) or 0.0),
+                        token_count=int(proc.get("input_tokens", 0) or 0) + int(proc.get("output_tokens", 0) or 0),
+                        clean_termination=clean_termination,
+                        has_threat=bool(proc.get("threat_matches")),
+                    )
+            if self._telemetry_collector is not None:
+                from orchesis.telemetry_export import build_record_from_context
 
-            rec = build_record_from_context(ctx)
-            self._telemetry_collector.record(rec)
+                rec = build_record_from_context(ctx)
+                self._telemetry_collector.record(rec)
         except Exception:
             return
 
