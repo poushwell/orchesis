@@ -1,14 +1,25 @@
 default_trust_tier: assistant
 default_action: deny
+capabilities:
+  - tool: post_v1
+    allow:
+      paths: ["*"]
+  - tool: get_v1
+    allow:
+      paths: ["*"]
+  - tool: options_v1
+    allow:
+      paths: ["*"]
 
 budgets:
   daily: 50.0
 
 rules:
-  - type: rate_limit
-    requests_per_minute: 60
-  - type: budget_limit
-    daily_budget_usd: 5.0
+  - name: rate_limit
+    max_requests_per_minute: 60
+  - name: budget_limit
+    max_cost_per_call: 10.0
+    daily_budget: 50.0
   - name: default_deny
     denied_paths: ["/etc", "/root", "~/.ssh", "~/.aws"]
 

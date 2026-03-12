@@ -26,6 +26,16 @@ rules:
     max_requests_per_minute: 100
 
 default_action: deny
+capabilities:
+  - tool: post_v1
+    allow:
+      paths: ["*"]
+  - tool: get_v1
+    allow:
+      paths: ["*"]
+  - tool: options_v1
+    allow:
+      paths: ["*"]
 
 budgets:
   daily: 50.0
