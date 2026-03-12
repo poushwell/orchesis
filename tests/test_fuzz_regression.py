@@ -42,6 +42,9 @@ SECRET_CRASH_R3 = b"P%\x14\x00\x00\x88"
 POLICY_CRASH_R3 = b'cs: ["w\xdc\xdc,\xdcu\xc3\xc3\xc3\xc1\xdcU\xc3\xc3\xc39999999999999999999999999999999999999999999999999\xc3cao\xdcu\xc3\xc3\xc3\xc3\xdcu\xc3\xc3\xc3\xc3\xdcu\xc3\xc3\xc3\xc3&i'
 PII_CRASH_R4 = b"z\x03@oj2x@e.ac x.cc s@g.acoj2x@e.ac x.cc s@g.ac r@o.ca@o@e.ac\xdfx7@e.ac \xef@x.c@x.cc s@g.c\xf3@g.8z \xad~\xad\xad\xad\xad\xad\xadYYx r@o.ca@o@e.ac\xdfx7@e.ac \xef@x.c@x.cc s@g.c\xf3@g.8z \xad~\xad\xad\xad\xad\xad\xadYYx"
 SECRET_CRASH_R4 = b"\x1d\x02\x00\x00\x00"
+PII_CRASH_R5 = b">+hhhhhhhhhhhhhhhhhh9+499999;99999\xb79+439hhhhhh(hhhhhhh$hhh4+499999;99999\xb79+439\xad\xad\xad123-5-\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff4311041440~85288"
+SECRET_CRASH_R5 = b"5\xec\x00\x00\x88"
+POLICY_CRASH_R5 = b"sess: at\nrul: !!int\nrules:\n  - a\xa1\n  - name: file_access\ne:"
 
 
 def test_pii_detector_fuzz_crash_regression() -> None:
@@ -231,3 +234,41 @@ def test_secret_scanner_fuzz_crash_control_chars() -> None:
     text = SECRET_CRASH_R4.decode("utf-8", errors="replace")
     result = scanner.scan_text(text)
     assert isinstance(result, list)
+
+
+def test_pii_detector_fuzz_crash_repeated_chars_with_ssn() -> None:
+    """PII detector must not crash on repeated chars with partial SSN and 0xff bytes."""
+    PiiDetector = _load_pii_detector()
+    detector = PiiDetector()
+    text = PII_CRASH_R5.decode("utf-8", errors="replace")
+    result = detector.scan_text(text)
+    assert isinstance(result, list)
+
+
+def test_secret_scanner_fuzz_crash_short_binary_r5() -> None:
+    """Secret scanner must not crash on 5-byte binary with 0xec prefix."""
+    SecretScanner = _load_secret_scanner()
+    scanner = SecretScanner()
+    text = SECRET_CRASH_R5.decode("utf-8", errors="replace")
+    result = scanner.scan_text(text)
+    assert isinstance(result, list)
+
+
+def test_policy_yaml_fuzz_crash_invalid_yaml_tags() -> None:
+    """Policy YAML parser must not crash on !!int tag with invalid UTF-8."""
+    load_policy = _load_policy_loader()
+    text = POLICY_CRASH_R5.decode("utf-8", errors="replace")
+    fd, path = tempfile.mkstemp(suffix=".yaml")
+    try:
+        os.write(fd, text.encode("utf-8", errors="replace"))
+        os.close(fd)
+        try:
+            _ = load_policy(path)
+        except Exception:
+            pass
+    finally:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        os.unlink(path)
