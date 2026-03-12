@@ -50,16 +50,12 @@ cascade:
   levels:
     trivial:
       model: gpt-4o-mini
-      max_tokens: 1000
     simple:
       model: gpt-4o-mini
-      max_tokens: 2000
     medium:
       model: gpt-4o
-      max_tokens: 4000
     complex:
       model: gpt-4o
-      max_tokens: 8000
 
 context_engine:
   enabled: true
@@ -71,6 +67,8 @@ context_engine:
 
 threat_intel:
   enabled: true
+  disabled_threats:
+    - ORCH-TA-002
   severity_actions:
     critical: block
     high: warn
