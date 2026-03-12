@@ -2853,6 +2853,51 @@ class LLMHTTPProxy:
             ctx.session_headers["X-Orchesis-Variant"] = assignment.variant_name
         return True
 
+    def _apply_cascade_token_limit(self, body: dict[str, Any], cascade_max_tokens: int) -> None:
+        if cascade_max_tokens <= 0:
+            return
+        respect_client_tokens = bool(self._cascade_cfg.get("respect_client_tokens", False))
+        has_max_completion = "max_completion_tokens" in body
+        has_max_tokens = "max_tokens" in body
+        # Prevent OpenAI validation collisions.
+        if has_max_completion and has_max_tokens:
+            body.pop("max_tokens", None)
+            has_max_tokens = False
+        if respect_client_tokens and (has_max_completion or has_max_tokens):
+            return
+        if has_max_completion:
+            body["max_completion_tokens"] = cascade_max_tokens
+            return
+        if has_max_tokens:
+            body["max_tokens"] = cascade_max_tokens
+            return
+        body["max_tokens"] = cascade_max_tokens
+
+    @staticmethod
+    def _apply_threat_context_adjustments(messages: list[Any], matches: list[Any]) -> None:
+        has_tool_results = any(
+            isinstance(msg, dict) and str(msg.get("role", "")).strip().lower() == "tool"
+            for msg in messages
+        )
+        if not has_tool_results or not matches:
+            return
+        for match in matches:
+            try:
+                current = float(getattr(match, "confidence", 0.0) or 0.0)
+            except Exception:
+                current = 0.0
+            adjusted = max(0.0, min(1.0, current * 0.5))
+            try:
+                match.confidence = adjusted
+            except Exception:
+                pass
+            try:
+                action = str(getattr(match, "action", "")).lower()
+                if action == "block" and adjusted < 0.7:
+                    match.action = "warn"
+            except Exception:
+                continue
+
     def _phase_cascade(self, ctx: _RequestContext) -> bool:
         if self._cascade_router is None:
             return True
@@ -2927,7 +2972,7 @@ class LLMHTTPProxy:
         if ctx.cascade_decision.model:
             ctx.body["model"] = ctx.cascade_decision.model
         if ctx.cascade_decision.max_tokens > 0:
-            ctx.body["max_tokens"] = ctx.cascade_decision.max_tokens
+            self._apply_cascade_token_limit(ctx.body, int(ctx.cascade_decision.max_tokens))
         return True
 
     def _phase_flow_xray_record(self, ctx: _RequestContext) -> bool:
@@ -3234,6 +3279,7 @@ class LLMHTTPProxy:
                 model=model,
                 headers=headers_dict or None,
             )
+            self._apply_threat_context_adjustments(messages, matches)
             if matches:
                 ctx.threat_matches = matches
                 if self._session_risk:
@@ -3392,7 +3438,9 @@ class LLMHTTPProxy:
         messages = ctx.body.get("messages")
         if not isinstance(messages, list) or not messages:
             return True
-        max_tokens = int(ctx.body.get("max_tokens", 0) or 0)
+        max_tokens = int(
+            ctx.body.get("max_completion_tokens", ctx.body.get("max_tokens", 0)) or 0
+        )
         model = str(ctx.body.get("model", ""))
         result = self._context_engine.optimize(
             messages=messages,
@@ -3683,7 +3731,7 @@ class LLMHTTPProxy:
             if escalated_decision.model:
                 ctx.body["model"] = escalated_decision.model
             if escalated_decision.max_tokens > 0:
-                ctx.body["max_tokens"] = escalated_decision.max_tokens
+                self._apply_cascade_token_limit(ctx.body, int(escalated_decision.max_tokens))
             upstream_base = self._get_upstream(ctx.provider, ctx.handler.headers)
             upstream_url = f"{upstream_base.rstrip('/')}{ctx.handler.path}"
             payload_retry = json.dumps(ctx.body, ensure_ascii=False).encode("utf-8")

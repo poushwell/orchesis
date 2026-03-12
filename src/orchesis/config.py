@@ -5,6 +5,7 @@ import logging
 import posixpath
 import re
 import unicodedata
+from copy import deepcopy
 from urllib.parse import unquote
 from pathlib import Path
 from typing import Any, Callable
@@ -12,6 +13,7 @@ from typing import Any, Callable
 import yaml
 from orchesis.behavioral import DEFAULT_DIMENSIONS
 from orchesis.identity import AgentIdentity, AgentRegistry, TrustTier
+from orchesis.openclaw_presets import get_named_preset
 
 _TOOL_RATE_LIMIT_PATTERN = re.compile(r"^\s*(\d+)\s*/\s*(second|minute|hour)\s*$", re.IGNORECASE)
 _RATE_LIMIT_WINDOW_SECONDS = {"second": 1, "minute": 60, "hour": 3600}
@@ -382,7 +384,13 @@ def _normalize_kill_switch(policy: dict[str, Any]) -> None:
 def _normalize_cascade(policy: dict[str, Any]) -> None:
     raw = policy.get("cascade")
     if raw is None:
-        policy["cascade"] = {"enabled": False, "levels": {}, "auto_escalate": {}, "cache": {}}
+        policy["cascade"] = {
+            "enabled": False,
+            "levels": {},
+            "auto_escalate": {},
+            "cache": {},
+            "respect_client_tokens": False,
+        }
         return
     if not isinstance(raw, dict):
         raise PolicyError("cascade must be a mapping")
@@ -446,6 +454,7 @@ def _normalize_cascade(policy: dict[str, Any]) -> None:
     cache["ttl_seconds"] = int(ttl_seconds) if _is_number(ttl_seconds) and int(ttl_seconds) > 0 else 300
     cache["max_entries"] = int(max_entries) if _is_number(max_entries) and int(max_entries) > 0 else 1000
     raw["cache"] = cache
+    raw["respect_client_tokens"] = bool(raw.get("respect_client_tokens", False))
 
     policy["cascade"] = raw
 
@@ -1126,6 +1135,37 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool)
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _apply_policy_preset(loaded: dict[str, Any]) -> dict[str, Any]:
+    preset_name = loaded.get("preset")
+    if preset_name is None:
+        return loaded
+    if not isinstance(preset_name, str) or not preset_name.strip():
+        raise PolicyError("preset must be a non-empty string")
+    try:
+        preset = get_named_preset(preset_name)
+    except ValueError as error:
+        raise PolicyError(str(error)) from error
+    merged = deepcopy(preset)
+    top_level_overrides = {k: v for k, v in loaded.items() if k not in {"preset", "policy"}}
+    merged = _deep_merge(merged, top_level_overrides)
+    nested_policy = loaded.get("policy")
+    if nested_policy is not None:
+        if not isinstance(nested_policy, dict):
+            raise PolicyError("policy override under preset must be a mapping")
+        merged = _deep_merge(merged, nested_policy)
+    return merged
+
+
 def load_policy(path: str | Path) -> dict[str, Any]:
     """Load policy from YAML file path."""
     policy_path = Path(path)
@@ -1140,6 +1180,7 @@ def load_policy(path: str | Path) -> dict[str, Any]:
 
     if not isinstance(loaded, dict):
         raise PolicyError("Policy top-level YAML object must be a mapping.")
+    loaded = _apply_policy_preset(loaded)
 
     _normalize_policy_paths(loaded)
     _normalize_tool_access_rate_limits(loaded)
