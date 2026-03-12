@@ -65,6 +65,7 @@ from orchesis.response_handler import ResponseProcessor, SECRET_PATTERNS
 from orchesis.session_risk import RiskSignal, SessionRiskAccumulator
 from orchesis.flow_xray import FlowAnalyzer, FlowXRayConfig
 from orchesis.ars import AgentReliabilityScore
+from orchesis.message_chain import validate_tool_chain
 from orchesis.dashboard import get_dashboard_html
 from orchesis.air_export import export_session_to_air
 from orchesis import __version__ as ORCHESIS_VERSION
@@ -2973,6 +2974,9 @@ class LLMHTTPProxy:
             ctx.body["model"] = ctx.cascade_decision.model
         if ctx.cascade_decision.max_tokens > 0:
             self._apply_cascade_token_limit(ctx.body, int(ctx.cascade_decision.max_tokens))
+        messages = ctx.body.get("messages")
+        if isinstance(messages, list):
+            ctx.body["messages"] = validate_tool_chain(messages)
         return True
 
     def _phase_flow_xray_record(self, ctx: _RequestContext) -> bool:
@@ -3447,7 +3451,7 @@ class LLMHTTPProxy:
             model=model,
             max_tokens=max_tokens,
         )
-        ctx.body["messages"] = result.messages
+        ctx.body["messages"] = validate_tool_chain(result.messages)
         if result.tokens_saved > 0:
             ctx.session_headers["X-Orchesis-Context-Tokens-Saved"] = str(result.tokens_saved)
             ctx.session_headers["X-Orchesis-Context-Strategies"] = ",".join(result.strategies_applied)
@@ -3644,6 +3648,8 @@ class LLMHTTPProxy:
         ):
             messages = ctx.body.get("messages", [])
             if isinstance(messages, list) and messages:
+                ctx.body["messages"] = validate_tool_chain(messages)
+                messages = ctx.body["messages"]
                 model = str(ctx.body.get("model", ""))
                 tools = [
                     str(t.get("name", ""))
@@ -3656,9 +3662,14 @@ class LLMHTTPProxy:
                     ctx.resp_status = 200
                     ctx.resp_headers = {}
                     ctx.from_semantic_cache = True
+                    # Keep request history protocol-safe for downstream/session handling.
+                    ctx.body["messages"] = validate_tool_chain(messages)
                     ctx.session_headers["X-Orchesis-Cache"] = cache_result.match_type
                     ctx.session_headers["X-Orchesis-Cache-Similarity"] = f"{cache_result.similarity:.2f}"
                     return True
+        messages = ctx.body.get("messages", [])
+        if isinstance(messages, list):
+            ctx.body["messages"] = validate_tool_chain(messages)
         upstream_base = self._get_upstream(ctx.provider, ctx.handler.headers)
         upstream_url = f"{upstream_base.rstrip('/')}{ctx.handler.path}"
         payload = json.dumps(ctx.body, ensure_ascii=False).encode("utf-8")
@@ -3732,6 +3743,9 @@ class LLMHTTPProxy:
                 ctx.body["model"] = escalated_decision.model
             if escalated_decision.max_tokens > 0:
                 self._apply_cascade_token_limit(ctx.body, int(escalated_decision.max_tokens))
+            retry_messages = ctx.body.get("messages")
+            if isinstance(retry_messages, list):
+                ctx.body["messages"] = validate_tool_chain(retry_messages)
             upstream_base = self._get_upstream(ctx.provider, ctx.handler.headers)
             upstream_url = f"{upstream_base.rstrip('/')}{ctx.handler.path}"
             payload_retry = json.dumps(ctx.body, ensure_ascii=False).encode("utf-8")
