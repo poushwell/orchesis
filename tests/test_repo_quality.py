@@ -55,13 +55,13 @@ def test_readme_has_badges() -> None:
 
 def test_readme_has_docker_section() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
-    # Docker instructions were replaced by runtime + CI gate usage examples.
-    assert "## Quickstart" in content
-    assert "orchesis serve --policy policy.yaml" in content
+    # README v3 uses "Quick Start" and proxy run command.
+    assert "## Quick Start" in content
+    assert "orchesis proxy --target https://api.openai.com" in content
 
 
 def test_readme_has_project_status() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "## Project Stats" in content
-    assert "800+ tests passing" in content
+    assert "## Key Numbers" in content
+    assert "1900+ tests" in content
     assert "## Integrations" in content
