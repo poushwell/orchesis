@@ -72,6 +72,8 @@ from orchesis.message_chain import validate_tool_chain
 from orchesis.context_optimizer import ContextOptimizer
 from orchesis.auto_healer import AutoHealer
 from orchesis.thompson_router import ThompsonRouter
+from orchesis.agent_discovery import AgentDiscovery
+from orchesis.tool_policy import ToolPolicyEngine
 from orchesis.dashboard import get_dashboard_html
 from orchesis.air_export import export_session_to_air
 from orchesis import __version__ as ORCHESIS_VERSION
@@ -2051,6 +2053,14 @@ class LLMHTTPProxy:
         self._thompson: ThompsonRouter | None = None
         if isinstance(thompson_cfg, dict) and bool(thompson_cfg.get("enabled", False)):
             self._thompson = ThompsonRouter(thompson_cfg)
+        self._agent_discovery = AgentDiscovery(self._policy.get("agent_discovery"))
+        self._tool_policy: ToolPolicyEngine | None = None
+        tools_cfg_raw = self._policy.get("capabilities", {})
+        tools_cfg = tools_cfg_raw.get("tools") if isinstance(tools_cfg_raw, dict) else {}
+        if isinstance(tools_cfg, dict) and (
+            isinstance(tools_cfg.get("rules"), dict) or isinstance(tools_cfg.get("allowed"), list)
+        ):
+            self._tool_policy = ToolPolicyEngine(tools_cfg)
         self._server: HTTPServer | None = None
         self._start_time = time.time()
         self._stats_lock = threading.Lock()
@@ -2157,6 +2167,10 @@ class LLMHTTPProxy:
             payload["auto_healing"] = self._auto_healer.get_stats()
         if self._thompson is not None:
             payload["thompson_router"] = self._thompson.get_model_stats()
+        if self._agent_discovery is not None and self._agent_discovery.enabled:
+            payload["agent_discovery"] = self._agent_discovery.get_stats()
+        if self._tool_policy is not None:
+            payload["tool_policy"] = self._tool_policy.get_tool_stats()
         if self._community is not None:
             payload["community"] = self._community.get_status()
         payload["proxy_engine"] = {
@@ -2569,6 +2583,41 @@ class LLMHTTPProxy:
                 self._send_json(handler, 200, {"enabled": False})
                 return
             self._send_json(handler, 200, self._auto_healer.get_agent_healing_history(agent_id))
+            return
+        if path == "/api/v1/agents":
+            if self._agent_discovery is None or not self._agent_discovery.enabled:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            self._send_json(handler, 200, [asdict(item) for item in self._agent_discovery.get_all_agents()])
+            return
+        if path == "/api/v1/agents/summary":
+            if self._agent_discovery is None or not self._agent_discovery.enabled:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            self._send_json(handler, 200, self._agent_discovery.get_summary())
+            return
+        if path.startswith("/api/v1/agents/"):
+            agent_id = path.split("/api/v1/agents/", 1)[1].strip("/")
+            if self._agent_discovery is None or not self._agent_discovery.enabled:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            profile = self._agent_discovery.get_agent(agent_id)
+            if profile is None:
+                self._send_json(handler, 200, {"found": False, "agent_id": agent_id})
+                return
+            self._send_json(handler, 200, asdict(profile))
+            return
+        if path == "/api/v1/tools":
+            if self._tool_policy is None:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            self._send_json(handler, 200, self._tool_policy.get_tool_stats())
+            return
+        if path == "/api/v1/tools/blocked":
+            if self._tool_policy is None:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            self._send_json(handler, 200, self._tool_policy.get_blocked_attempts())
             return
         if path == "/api/v1/router":
             if self._thompson is None:
@@ -3380,6 +3429,24 @@ class LLMHTTPProxy:
         ctx.proc_result["adaptive_drift_type"] = str(detection.drift_type)
         ctx.session_headers["X-Orchesis-Anomaly-Score"] = str(int(detection.anomaly_score))
         ctx.session_headers["X-Orchesis-Risk-Level"] = detection.risk_level
+        if self._agent_discovery is not None and self._agent_discovery.enabled:
+            ars_grade = None
+            ars_score = None
+            if self._ars is not None:
+                ars_result_now = self._ars.compute(agent_id)
+                if ars_result_now is not None:
+                    ars_grade = ars_result_now.grade
+                    ars_score = ars_result_now.score
+            self._agent_discovery.record_detection(
+                agent_id=agent_id,
+                anomaly_score=float(detection.anomaly_score),
+                mast_findings=0,
+                risk_level=detection.risk_level,
+                ars_grade=ars_grade,
+                ars_score=ars_score,
+                is_cron=bool(ctx.heartbeat_detected),
+                status="blocked" if detection.recommended_action == "block" else None,
+            )
         if detection.is_anomalous and self._session_risk is not None:
             self._session_risk.record_signal(
                 str(ctx.session_id or "unknown"),
@@ -3470,6 +3537,20 @@ class LLMHTTPProxy:
         if findings:
             ctx.proc_result["mast_findings"] = [asdict(item) for item in findings]
             ctx.mast_request_findings = list(findings)
+            if self._agent_discovery is not None and self._agent_discovery.enabled:
+                severity_rank = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+                worst = "low"
+                for item in findings:
+                    if severity_rank.get(item.severity, 0) > severity_rank.get(worst, 0):
+                        worst = item.severity
+                self._agent_discovery.record_detection(
+                    agent_id=agent_id,
+                    anomaly_score=100.0 if worst in {"high", "critical"} else 1.0,
+                    mast_findings=len(findings),
+                    risk_level=worst,
+                    is_cron=bool(ctx.heartbeat_detected),
+                    status="blocked" if worst == "critical" else None,
+                )
         for finding in findings:
             if finding.severity == "critical":
                 if self._auto_healer is not None and self._auto_healer.enabled:
@@ -3495,6 +3576,13 @@ class LLMHTTPProxy:
             return True
         agent_id = str(ctx.behavior_agent_id or extract_agent_id(ctx.handler.headers) or "default")
         if not self._auto_healer.rate_limiter.check(agent_id):
+            if self._agent_discovery is not None and self._agent_discovery.enabled:
+                self._agent_discovery.record_detection(
+                    agent_id=agent_id,
+                    anomaly_score=50.0,
+                    risk_level="high",
+                    status="rate_limited",
+                )
             self._inc("blocked")
             self._send_json(
                 ctx.handler,
@@ -3651,6 +3739,35 @@ class LLMHTTPProxy:
 
     def _phase_policy(self, ctx: _RequestContext) -> bool:
         for call in ctx.parsed_req.tool_calls:
+            if self._tool_policy is not None:
+                tp_decision = self._tool_policy.evaluate(
+                    tool_name=call.name,
+                    agent_id=str(ctx.behavior_agent_id or "default"),
+                    tool_args=call.params if isinstance(call.params, dict) else {},
+                    session_id=str(ctx.session_id or "default"),
+                )
+                if tp_decision.action == "block":
+                    self._inc("blocked")
+                    self._send_json(
+                        ctx.handler,
+                        403,
+                        {
+                            "error": {
+                                "type": "tool_policy_block",
+                                "message": f"Tool '{call.name}' blocked: {tp_decision.reason}",
+                            }
+                        },
+                    )
+                    return False
+                if tp_decision.action == "approve":
+                    ctx.session_headers["X-Orchesis-Tool-Approval"] = f"{call.name}:required"
+                if tp_decision.action == "warn":
+                    ctx.session_headers["X-Orchesis-Tool-Warn"] = f"{call.name}:{tp_decision.reason[:120]}"
+                self._tool_policy.record_usage(
+                    tool_name=call.name,
+                    agent_id=str(ctx.behavior_agent_id or "default"),
+                    session_id=str(ctx.session_id or "default"),
+                )
             eval_request = {
                 "tool": call.name,
                 "params": call.params if isinstance(call.params, dict) else {},
@@ -4242,6 +4359,25 @@ class LLMHTTPProxy:
                     category=category,
                     outcome=outcome,
                 )
+        if self._agent_discovery is not None and self._agent_discovery.enabled:
+            tools_used: list[str] = []
+            for tool_call in getattr(ctx.parsed_req, "tool_calls", []):
+                name = getattr(tool_call, "name", "")
+                if isinstance(name, str) and name:
+                    tools_used.append(name)
+            parsed = ctx.parsed_resp_obj
+            total_tokens = 0
+            if parsed is not None:
+                total_tokens = int(getattr(parsed, "input_tokens", 0)) + int(getattr(parsed, "output_tokens", 0))
+            self._agent_discovery.record_request(
+                agent_id=str(ctx.behavior_agent_id or "default"),
+                request_data={"session_id": ctx.session_id, "model": str(ctx.body.get("model", ""))},
+                model=str(ctx.body.get("model", "")),
+                tokens=total_tokens,
+                cost=float(ctx.proc_result.get("cost", 0.0) or 0.0),
+                latency_ms=(time.perf_counter() - float(ctx.request_started or 0.0)) * 1000.0,
+                tools=tools_used,
+            )
         if self._behavioral_detector.enabled:
             completion_tokens = 0
             if ctx.parsed_resp_obj is not None:
