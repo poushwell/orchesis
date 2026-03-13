@@ -67,6 +67,7 @@ from orchesis.flow_xray import FlowAnalyzer, FlowXRayConfig
 from orchesis.ars import AgentReliabilityScore
 from orchesis.adaptive_detector import AdaptiveDetector
 from orchesis.community import CommunityClient
+from orchesis.mast_detectors import MASTDetectors
 from orchesis.message_chain import validate_tool_chain
 from orchesis.dashboard import get_dashboard_html
 from orchesis.air_export import export_session_to_air
@@ -2026,6 +2027,10 @@ class LLMHTTPProxy:
         self._adaptive_detector: AdaptiveDetector | None = None
         if isinstance(adaptive_cfg, dict) and bool(adaptive_cfg.get("enabled", False)):
             self._adaptive_detector = AdaptiveDetector(adaptive_cfg)
+        mast_cfg = self._policy.get("mast")
+        self._mast: MASTDetectors | None = None
+        if isinstance(mast_cfg, dict) and bool(mast_cfg.get("enabled", False)):
+            self._mast = MASTDetectors(mast_cfg)
         self._server: HTTPServer | None = None
         self._start_time = time.time()
         self._stats_lock = threading.Lock()
@@ -2124,6 +2129,8 @@ class LLMHTTPProxy:
             payload["ars"] = self._ars.stats
         if self._adaptive_detector is not None:
             payload["adaptive_detection"] = self._adaptive_detector.get_stats()
+        if self._mast is not None:
+            payload["mast"] = self._mast.get_stats()
         if self._community is not None:
             payload["community"] = self._community.get_status()
         payload["proxy_engine"] = {
@@ -2520,6 +2527,13 @@ class LLMHTTPProxy:
                 self._send_json(handler, 200, {"enabled": False})
                 return
             self._send_json(handler, 200, asdict(self._community.get_stats()))
+            return
+        if path.startswith("/api/v1/mast/"):
+            agent_id = path.split("/api/v1/mast/", 1)[1].strip("/")
+            if self._mast is None:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            self._send_json(handler, 200, self._mast.get_agent_compliance(agent_id))
             return
         if path.startswith("/api/v1/session-risk/"):
             session_id = path.split("/api/v1/session-risk/", 1)[1].strip("/")
@@ -3370,6 +3384,54 @@ class LLMHTTPProxy:
             )
         return True
 
+    def _phase_mast_request(self, ctx: _RequestContext) -> bool:
+        if self._mast is None:
+            return True
+        agent_id = str(ctx.behavior_agent_id or "default")
+        findings = self._mast.check_request(
+            agent_id,
+            {
+                **ctx.body,
+                "session_id": ctx.session_id,
+                "request_id": ctx.request_id,
+            },
+            context={
+                "policy": self._policy,
+                "approved_tools": (
+                    self._policy.get("capabilities", {}).get("tools", {}).get("allowed", [])
+                    if isinstance(self._policy.get("capabilities", {}), dict)
+                    else []
+                ),
+                "approved_models": (
+                    self._policy.get("models", {}).get("allowed", [])
+                    if isinstance(self._policy.get("models", {}), dict)
+                    else []
+                ),
+                "token_budget": {"max_tokens": int(ctx.body.get("max_completion_tokens", ctx.body.get("max_tokens", 0)) or 0)},
+                "session_id": ctx.session_id,
+                "tool_metadata_present": True,
+            },
+        )
+        if findings:
+            ctx.proc_result["mast_findings"] = [asdict(item) for item in findings]
+        for finding in findings:
+            if finding.severity == "critical":
+                self._inc("blocked")
+                self._send_json(
+                    ctx.handler,
+                    403,
+                    {
+                        "error": {
+                            "type": f"mast_{finding.failure_mode.lower()}",
+                            "message": finding.description,
+                        }
+                    },
+                )
+                return False
+            if finding.severity == "high":
+                ctx.session_headers[f"X-Orchesis-MAST-{finding.failure_mode}"] = finding.description[:180]
+        return True
+
     def _phase_threat_intel(self, ctx: _RequestContext) -> bool:
         """Scan request against threat intelligence database."""
         matches: list[Any] = []
@@ -3907,6 +3969,39 @@ class LLMHTTPProxy:
                     ctx.proc_result = self._response_processor.process(parsed_resp_retry)
             except Exception:
                 pass
+        if self._mast is not None:
+            mast_response_payload: dict[str, Any] = {}
+            try:
+                decoded_resp = json.loads(ctx.resp_body.decode("utf-8")) if ctx.resp_body else {}
+                if isinstance(decoded_resp, dict):
+                    mast_response_payload = decoded_resp
+            except Exception:
+                mast_response_payload = {}
+            mast_resp_findings = self._mast.check_response(
+                str(ctx.behavior_agent_id or "default"),
+                mast_response_payload,
+                ctx.body,
+            )
+            if mast_resp_findings:
+                existing = ctx.proc_result.get("mast_findings")
+                if not isinstance(existing, list):
+                    existing = []
+                existing.extend(asdict(item) for item in mast_resp_findings)
+                ctx.proc_result["mast_findings"] = existing
+                for item in mast_resp_findings:
+                    if item.severity == "critical":
+                        self._inc("blocked")
+                        self._send_json(
+                            ctx.handler,
+                            403,
+                            {
+                                "error": {
+                                    "type": f"mast_{item.failure_mode.lower()}",
+                                    "message": item.description,
+                                }
+                            },
+                        )
+                        return False
         if self._cascade_router is not None and ctx.cascade_decision is not None and ctx.parsed_resp_obj is not None:
             token_sum = int(getattr(ctx.parsed_resp_obj, "input_tokens", 0)) + int(
                 getattr(ctx.parsed_resp_obj, "output_tokens", 0)
@@ -4291,6 +4386,9 @@ class LLMHTTPProxy:
                 _end_root_early()
                 return
             if not self._run_phase_span(ctx, "adaptive_detection", self._phase_adaptive_detection):
+                _end_root_early()
+                return
+            if not self._run_phase_span(ctx, "mast_request", self._phase_mast_request):
                 _end_root_early()
                 return
             if not self._run_phase_span(ctx, "budget", self._phase_budget):
