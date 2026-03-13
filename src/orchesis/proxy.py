@@ -71,6 +71,7 @@ from orchesis.mast_detectors import MASTDetectors
 from orchesis.message_chain import validate_tool_chain
 from orchesis.context_optimizer import ContextOptimizer
 from orchesis.auto_healer import AutoHealer
+from orchesis.thompson_router import ThompsonRouter
 from orchesis.dashboard import get_dashboard_html
 from orchesis.air_export import export_session_to_air
 from orchesis import __version__ as ORCHESIS_VERSION
@@ -1782,6 +1783,8 @@ class _RequestContext:
     mast_request_findings: list[Any] = field(default_factory=list)
     was_auto_healed: bool = False
     healing_pre_score: float = 0.0
+    thompson_category: str = ""
+    thompson_selected_model: str = ""
 
 
 class LLMHTTPProxy:
@@ -2044,6 +2047,10 @@ class LLMHTTPProxy:
         self._auto_healer: AutoHealer | None = None
         if isinstance(auto_healing_cfg, dict) and bool(auto_healing_cfg.get("enabled", False)):
             self._auto_healer = AutoHealer(auto_healing_cfg)
+        thompson_cfg = self._policy.get("thompson_router")
+        self._thompson: ThompsonRouter | None = None
+        if isinstance(thompson_cfg, dict) and bool(thompson_cfg.get("enabled", False)):
+            self._thompson = ThompsonRouter(thompson_cfg)
         self._server: HTTPServer | None = None
         self._start_time = time.time()
         self._stats_lock = threading.Lock()
@@ -2148,6 +2155,8 @@ class LLMHTTPProxy:
             payload["context_optimizer"] = self._context_optimizer.get_stats()
         if self._auto_healer is not None:
             payload["auto_healing"] = self._auto_healer.get_stats()
+        if self._thompson is not None:
+            payload["thompson_router"] = self._thompson.get_model_stats()
         if self._community is not None:
             payload["community"] = self._community.get_status()
         payload["proxy_engine"] = {
@@ -2224,6 +2233,8 @@ class LLMHTTPProxy:
             self._telemetry_collector.stop()
         if self._community is not None:
             self._community.stop()
+        if self._thompson is not None:
+            self._thompson.stop()
 
     def _inc(self, field: str) -> None:
         with self._stats_lock:
@@ -2558,6 +2569,26 @@ class LLMHTTPProxy:
                 self._send_json(handler, 200, {"enabled": False})
                 return
             self._send_json(handler, 200, self._auto_healer.get_agent_healing_history(agent_id))
+            return
+        if path == "/api/v1/router":
+            if self._thompson is None:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            self._send_json(
+                handler,
+                200,
+                {
+                    "enabled": True,
+                    "model_stats": self._thompson.get_model_stats(),
+                    "report": self._thompson.get_routing_report(),
+                },
+            )
+            return
+        if path == "/api/v1/router/recommend":
+            if self._thompson is None:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            self._send_json(handler, 200, self._thompson.get_recommendation())
             return
         if path.startswith("/api/v1/session-risk/"):
             session_id = path.split("/api/v1/session-risk/", 1)[1].strip("/")
@@ -3659,6 +3690,31 @@ class LLMHTTPProxy:
             routed_model = route.get("model")
             if isinstance(routed_model, str) and routed_model and routed_model != ctx.parsed_req.model:
                 ctx.body["model"] = routed_model
+        if self._thompson is not None:
+            failed_models_raw = ctx.proc_result.get("failed_models", [])
+            failed_models = failed_models_raw if isinstance(failed_models_raw, list) else []
+            category = self._thompson.classify_request(
+                request_data=ctx.body,
+                agent_id=str(ctx.behavior_agent_id or "default"),
+            )
+            decision = self._thompson.select_model(
+                request_data=ctx.body,
+                agent_id=str(ctx.behavior_agent_id or "default"),
+                excluded_models=failed_models,
+            )
+            if isinstance(decision.selected_model, str) and decision.selected_model:
+                ctx.body["model"] = decision.selected_model
+                ctx.thompson_selected_model = decision.selected_model
+            ctx.thompson_category = category
+            ctx.session_headers["X-Orchesis-Router-Model"] = decision.selected_model
+            ctx.session_headers["X-Orchesis-Router-Reason"] = decision.reason
+            ctx.proc_result["thompson_router"] = {
+                "category": category,
+                "selected_model": decision.selected_model,
+                "reason": decision.reason,
+                "confidence": float(decision.confidence),
+                "sampled_scores": dict(decision.sampled_scores),
+            }
         return True
 
     def _phase_secrets(self, ctx: _RequestContext) -> bool:
@@ -4137,6 +4193,55 @@ class LLMHTTPProxy:
             if 200 <= ctx.resp_status < 300:
                 self._cascade_router.record_result(ctx.cascade_decision, ctx.parsed_resp_obj)
                 self._cascade_router.cache_response(ctx.cascade_decision, ctx.resp_body)
+        if self._thompson is not None:
+            used_model = str(ctx.body.get("model", "") or ctx.thompson_selected_model or "")
+            category = ctx.thompson_category or self._thompson.classify_request(
+                request_data=ctx.body,
+                agent_id=str(ctx.behavior_agent_id or "default"),
+            )
+            parsed = ctx.parsed_resp_obj
+            input_tokens = int(getattr(parsed, "input_tokens", 0)) if parsed is not None else 0
+            output_tokens = int(getattr(parsed, "output_tokens", 0)) if parsed is not None else 0
+            latency_ms = (time.perf_counter() - float(ctx.request_started or 0.0)) * 1000.0
+            success = bool(ctx.resp_status < 400 and ctx.proc_result.get("allowed", True))
+            error_type = ""
+            if not success:
+                if ctx.resp_status == 429:
+                    error_type = "rate_limit"
+                elif ctx.resp_status >= 500:
+                    error_type = "upstream_error"
+                else:
+                    stop_reason = str(getattr(parsed, "stop_reason", "") or "").lower() if parsed is not None else ""
+                    if stop_reason in {"length", "max_tokens"}:
+                        error_type = "context_length"
+            mast_findings = ctx.proc_result.get("mast_findings", [])
+            has_injection = False
+            if isinstance(mast_findings, list):
+                for item in mast_findings:
+                    if isinstance(item, dict) and str(item.get("failure_mode", "")).upper() == "FM-3.1":
+                        has_injection = True
+                        break
+            outcome = {
+                "model": used_model,
+                "success": success,
+                "latency_ms": float(latency_ms),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cost_usd": float(ctx.proc_result.get("cost", 0.0) or 0.0),
+                "loop_detected": bool(ctx.was_loop_detected),
+                "injection_detected": has_injection,
+                "error_type": error_type,
+            }
+            outcome["quality_score"] = self._thompson.compute_quality_score(
+                outcome=outcome,
+                detection_result=ctx.adaptive_detection_result,
+            )
+            if used_model:
+                self._thompson.record_outcome(
+                    model=used_model,
+                    category=category,
+                    outcome=outcome,
+                )
         if self._behavioral_detector.enabled:
             completion_tokens = 0
             if ctx.parsed_resp_obj is not None:
