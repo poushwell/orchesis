@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from orchesis.input_guard import sanitize_text
 
 
 @dataclass
@@ -280,6 +281,10 @@ class OpenClawAuditor:
                 fix="Ensure file exists and has readable permissions.",
                 references=[],
             )
+
+        text = text.replace("\x00", "")
+        sanitized = sanitize_text(text)
+        text = sanitized if sanitized is not None else text
 
         if not text.strip():
             return {}, None

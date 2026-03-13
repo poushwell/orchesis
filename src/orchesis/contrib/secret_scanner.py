@@ -10,6 +10,7 @@ from urllib.parse import unquote
 from typing import Any
 
 from orchesis.fast_scanner import FastSecretScanner
+from orchesis.input_guard import sanitize_text
 
 # Pattern registry: name -> (regex, severity, description)
 SECRET_PATTERNS: dict[str, tuple[re.Pattern[str], str, str]] = {
@@ -315,13 +316,9 @@ class SecretScanner:
         return sorted(findings, key=lambda item: int(item.get("position", 0)))
 
     def scan_text(self, text: str) -> list[dict[str, Any]]:
-        if not text:
+        text = sanitize_text(text)
+        if text is None:
             return []
-        if not isinstance(text, str):
-            try:
-                text = str(text, "utf-8", errors="replace")  # type: ignore[arg-type]
-            except Exception:
-                return []
         all_findings: list[dict[str, Any]] = []
         try:
             versions = preprocess_for_scanning(text)

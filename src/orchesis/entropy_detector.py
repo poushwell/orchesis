@@ -10,11 +10,14 @@ from collections import Counter, deque
 from dataclasses import dataclass
 from typing import Optional
 
+from orchesis.input_guard import sanitize_text
+
 
 def _tokenize(text: str) -> list[str]:
-    if not isinstance(text, str):
+    safe = sanitize_text(text)
+    if safe is None:
         return []
-    words = re.findall(r"\w+", text.lower(), flags=re.UNICODE)
+    words = re.findall(r"\w+", safe.lower(), flags=re.UNICODE)
     if len(words) > 1:
         return words
     if len(words) == 1 and len(words[0]) >= 12:
@@ -251,16 +254,19 @@ class EntropyDetector:
 
     def analyze_message(self, content: str, role: str = "user") -> EntropyProfile:
         _ = role
+        safe = sanitize_text(content)
+        if safe is None:
+            safe = ""
         profile = EntropyProfile()
         if self.enable_token_entropy:
-            profile.token_entropy = shannon_entropy(content)
-        profile.message_length_entropy = length_entropy([len(_tokenize(content))])
+            profile.token_entropy = shannon_entropy(safe)
+        profile.message_length_entropy = length_entropy([len(_tokenize(safe))])
         profile.tool_call_entropy = 0.0
         if self.enable_timing_entropy:
             profile.timing_entropy = 0.0
-        profile.vocab_richness = vocab_richness(content)
+        profile.vocab_richness = vocab_richness(safe)
         if self.enable_repetition:
-            profile.repetition_score = ngram_repetition(content, self.ngram_size)
+            profile.repetition_score = ngram_repetition(safe, self.ngram_size)
         return profile
 
     def analyze_request(self, request_data: dict) -> EntropyProfile:
@@ -278,9 +284,11 @@ class EntropyDetector:
         lengths: list[int] = []
         for item in messages:
             if isinstance(item, dict):
-                content = str(item.get("content", ""))
+                safe = sanitize_text(item.get("content", ""))
+                content = safe if safe is not None else ""
             else:
-                content = str(item)
+                safe = sanitize_text(item)
+                content = safe if safe is not None else ""
             contents.append(content)
             lengths.append(len(_tokenize(content)))
         all_text = " ".join(contents).strip()

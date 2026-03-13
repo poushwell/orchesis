@@ -8,6 +8,7 @@ from copy import deepcopy
 from typing import Any
 
 from orchesis.fast_scanner import FastPIIDetector
+from orchesis.input_guard import sanitize_text
 from orchesis.plugins import PluginInfo
 
 PII_PATTERNS: dict[str, tuple[re.Pattern[str], str, str]] = {
@@ -171,6 +172,9 @@ class PiiDetector:
         return findings
 
     def scan_text(self, text: str) -> list[dict[str, Any]]:
+        text = sanitize_text(text)
+        if text is None:
+            return []
         all_findings: list[dict[str, Any]] = []
         try:
             versions = preprocess_for_pii(text)

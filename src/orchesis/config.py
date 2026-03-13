@@ -13,6 +13,7 @@ from typing import Any, Callable
 import yaml
 from orchesis.behavioral import DEFAULT_DIMENSIONS
 from orchesis.identity import AgentIdentity, AgentRegistry, TrustTier
+from orchesis.input_guard import sanitize_text
 from orchesis.openclaw_presets import get_named_preset
 
 _TOOL_RATE_LIMIT_PATTERN = re.compile(r"^\s*(\d+)\s*/\s*(second|minute|hour)\s*$", re.IGNORECASE)
@@ -1169,14 +1170,23 @@ def _apply_policy_preset(loaded: dict[str, Any]) -> dict[str, Any]:
 def load_policy(path: str | Path) -> dict[str, Any]:
     """Load policy from YAML file path."""
     policy_path = Path(path)
-    with policy_path.open("r", encoding="utf-8") as file:
-        try:
-            loaded = yaml.safe_load(file)
-        except (yaml.YAMLError, RecursionError, MemoryError) as error:
-            raise ValueError(f"Invalid YAML policy: {error}") from error
-        except Exception as error:
-            # Fuzz-hardening: convert unexpected parser internals into user-facing parse error.
-            raise ValueError(f"Invalid YAML policy: unexpected parser error: {error}") from error
+    try:
+        with policy_path.open("r", encoding="utf-8", errors="replace") as file:
+            content = file.read()
+    except (OSError, IOError) as error:
+        raise PolicyError(f"Cannot read policy file: {policy_path}") from error
+
+    content = content.replace("\x00", "")
+    sanitized = sanitize_text(content)
+    content = sanitized if sanitized is not None else content
+
+    try:
+        loaded = yaml.safe_load(content)
+    except (yaml.YAMLError, RecursionError, MemoryError) as error:
+        raise ValueError(f"Invalid YAML policy: {error}") from error
+    except Exception as error:
+        # Fuzz-hardening: convert unexpected parser internals into user-facing parse error.
+        raise ValueError(f"Invalid YAML policy: unexpected parser error: {error}") from error
 
     if not isinstance(loaded, dict):
         raise PolicyError("Policy top-level YAML object must be a mapping.")

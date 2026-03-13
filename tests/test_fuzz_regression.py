@@ -45,6 +45,8 @@ SECRET_CRASH_R4 = b"\x1d\x02\x00\x00\x00"
 PII_CRASH_R5 = b">+hhhhhhhhhhhhhhhhhh9+499999;99999\xb79+439hhhhhh(hhhhhhh$hhh4+499999;99999\xb79+439\xad\xad\xad123-5-\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff4311041440~85288"
 SECRET_CRASH_R5 = b"5\xec\x00\x00\x88"
 POLICY_CRASH_R5 = b"sess: at\nrul: !!int\nrules:\n  - a\xa1\n  - name: file_access\ne:"
+PII_CRASH_R6 = b"\x00\x00I\xec\x9b\x86\xe3\x83\x86\xeb\xb0\x80\xe9\xb8\x80\xe3\x90\xb9\x00\x00I\xec\x9b\x86\xe3\x83\x86\xeb\xb0\x80\xe9\xb8\x80\xe3\x90\xb9\xe3\xa4\xb3\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xe3\xa4\xb3\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef\xbf\xbf\xef8088473695\xff\xff\xff\x100"
+SECRET_CRASH_R6 = b"\x10%\x02\x00\x00\x88"
 
 
 def test_pii_detector_fuzz_crash_regression() -> None:
@@ -272,3 +274,83 @@ def test_policy_yaml_fuzz_crash_invalid_yaml_tags() -> None:
         except Exception:
             pass
         os.unlink(path)
+
+
+def test_pii_detector_fuzz_crash_cjk_with_nulls_r6() -> None:
+    """PII detector must not crash on CJK chars with null bytes and U+FFFF sequences."""
+    PiiDetector = _load_pii_detector()
+    detector = PiiDetector()
+    text = PII_CRASH_R6.decode("utf-8", errors="replace")
+    result = detector.scan_text(text)
+    assert isinstance(result, list)
+
+
+def test_secret_scanner_fuzz_crash_short_binary_r6() -> None:
+    """Secret scanner must not crash on 6-byte binary with percent encoding byte."""
+    SecretScanner = _load_secret_scanner()
+    scanner = SecretScanner()
+    text = SECRET_CRASH_R6.decode("utf-8", errors="replace")
+    result = scanner.scan_text(text)
+    assert isinstance(result, list)
+
+
+def test_pii_guard_all_previous_crashes() -> None:
+    PiiDetector = _load_pii_detector()
+    detector = PiiDetector()
+    payloads = [
+        PII_CRASH_INPUT,
+        PII_CRASH_CONTROL,
+        PII_CRASH_R3,
+        PII_CRASH_R4,
+        PII_CRASH_R5,
+        PII_CRASH_R6,
+    ]
+    for payload in payloads:
+        text = payload.decode("utf-8", errors="replace")
+        result = detector.scan_text(text)
+        assert isinstance(result, list)
+
+
+def test_secret_guard_all_previous_crashes() -> None:
+    SecretScanner = _load_secret_scanner()
+    scanner = SecretScanner()
+    payloads = [
+        SECRET_CRASH_INPUT,
+        SECRET_CRASH_V2,
+        SECRET_CRASH_R3,
+        SECRET_CRASH_R4,
+        SECRET_CRASH_R5,
+        SECRET_CRASH_R6,
+    ]
+    for payload in payloads:
+        text = payload.decode("utf-8", errors="replace")
+        result = scanner.scan_text(text)
+        assert isinstance(result, list)
+
+
+def test_policy_guard_all_previous_crashes() -> None:
+    load_policy = _load_policy_loader()
+    payloads = [
+        POLICY_CRASH,
+        POLICY_CRASH_R3,
+        POLICY_CRASH_R5,
+        b"\x00\x00allow:\n - test",
+        b"rules:\n - <<:\n   - bad:\n",
+        b"not: [valid",
+    ]
+    for payload in payloads:
+        text = payload.decode("utf-8", errors="replace")
+        fd, path = tempfile.mkstemp(suffix=".yaml")
+        try:
+            os.write(fd, text.encode("utf-8", errors="replace"))
+            os.close(fd)
+            try:
+                _ = load_policy(path)
+            except Exception:
+                pass
+        finally:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+            os.unlink(path)

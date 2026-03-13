@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from orchesis.input_guard import sanitize_text
+
 
 def _copy_message(msg: dict[str, Any]) -> dict[str, Any]:
     copied = dict(msg)
@@ -15,12 +17,14 @@ def _copy_message(msg: dict[str, Any]) -> dict[str, Any]:
 def _has_text_content(message: dict[str, Any]) -> bool:
     content = message.get("content")
     if isinstance(content, str):
-        return bool(content.strip())
+        safe = sanitize_text(content)
+        return bool(safe and safe.strip())
     if isinstance(content, list):
         for block in content:
             if isinstance(block, dict):
                 text = block.get("text", block.get("content", ""))
-                if isinstance(text, str) and text.strip():
+                safe = sanitize_text(text)
+                if isinstance(safe, str) and safe.strip():
                     return True
     return False
 
@@ -245,14 +249,16 @@ def truncate_messages_safe(messages: list[dict], max_tokens: int) -> list[dict]:
     def token_cost(msg: dict[str, Any]) -> int:
         content = msg.get("content", "")
         if isinstance(content, str):
-            return max(1, len(content.split())) if content.strip() else 1
+            safe = sanitize_text(content)
+            return max(1, len(safe.split())) if isinstance(safe, str) and safe.strip() else 1
         if isinstance(content, list):
             total = 0
             for block in content:
                 if isinstance(block, dict):
                     text = block.get("text", block.get("content", ""))
-                    if isinstance(text, str) and text.strip():
-                        total += max(1, len(text.split()))
+                    safe = sanitize_text(text)
+                    if isinstance(safe, str) and safe.strip():
+                        total += max(1, len(safe.split()))
             return max(1, total) if total else 1
         return 1
 

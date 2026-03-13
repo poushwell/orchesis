@@ -8,6 +8,8 @@ import threading
 import time
 from typing import Optional
 
+from orchesis.input_guard import sanitize_text
+
 
 @dataclass
 class StructuralSignature:
@@ -71,7 +73,8 @@ class StructuralPatternDetector:
             if role == "tool":
                 has_tool_results = True
 
-            content = str(msg.get("content", "") or "")
+            safe_content = sanitize_text(msg.get("content", ""))
+            content = safe_content if safe_content is not None else ""
             total_tokens += max(1, len(content.split())) if content else 0
 
             calls = msg.get("tool_calls")
@@ -85,14 +88,16 @@ class StructuralPatternDetector:
                             or call.get("tool_name")
                             or ""
                         )
-                        n = str(name).strip().lower()
+                        safe_name = sanitize_text(name)
+                        n = (safe_name or "").strip().lower()
                         if n:
                             tools.append(n)
 
         request_tools = request_data.get("tools")
         if isinstance(request_tools, list):
             for item in request_tools:
-                n = str(item).strip().lower()
+                safe_item = sanitize_text(item)
+                n = (safe_item or "").strip().lower()
                 if n:
                     tools.append(n)
                     has_tool_calls = True

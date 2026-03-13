@@ -9,6 +9,8 @@ import re
 import threading
 from typing import Optional
 
+from orchesis.input_guard import sanitize_text
+
 
 @dataclass
 class NgramProfile:
@@ -136,10 +138,11 @@ class NgramProfiler:
     def tokenize(self, text: str) -> list[str]:
         """Lowercase + punctuation-stripped tokenizer."""
 
-        if not isinstance(text, str):
+        safe = sanitize_text(text)
+        if safe is None:
             return []
         # Unicode-friendly word extraction.
-        tokens = re.findall(r"[^\W_]+(?:['-][^\W_]+)?", text.lower(), flags=re.UNICODE)
+        tokens = re.findall(r"[^\W_]+(?:['-][^\W_]+)?", safe.lower(), flags=re.UNICODE)
         return [tok for tok in tokens if tok]
 
     def compute_ngrams(self, tokens: list[str], n: int) -> dict[str, int]:
@@ -179,14 +182,26 @@ class NgramProfiler:
     def build_profile(self, text: str) -> NgramProfile:
         """Build full n-gram profile for text."""
 
-        cached = self._profile_cache.get(text)
+        safe = sanitize_text(text)
+        if safe is None:
+            return NgramProfile(
+                unigrams={},
+                bigrams={},
+                trigrams={},
+                char_trigrams={},
+                vocab_size=0,
+                total_tokens=0,
+                top_unigrams=[],
+                top_bigrams=[],
+            )
+        cached = self._profile_cache.get(safe)
         if cached is not None:
             return cached
-        tokens = self.tokenize(text)
+        tokens = self.tokenize(safe)
         uni = self._normalize_counts(self.compute_ngrams(tokens, 1) if 1 in self.ngram_sizes else {})
         bi = self._normalize_counts(self.compute_ngrams(tokens, 2) if 2 in self.ngram_sizes else {})
         tri = self._normalize_counts(self.compute_ngrams(tokens, 3) if 3 in self.ngram_sizes else {})
-        ctri = self._normalize_counts(self.compute_char_ngrams(text, self.char_ngram_size))
+        ctri = self._normalize_counts(self.compute_char_ngrams(safe, self.char_ngram_size))
         top_uni = sorted(uni.items(), key=lambda kv: kv[1], reverse=True)[:20]
         top_bi = sorted(bi.items(), key=lambda kv: kv[1], reverse=True)[:20]
         profile = NgramProfile(
@@ -199,8 +214,8 @@ class NgramProfiler:
             top_unigrams=top_uni,
             top_bigrams=top_bi,
         )
-        self._profile_cache[text] = profile
-        self._profile_cache_order.append(text)
+        self._profile_cache[safe] = profile
+        self._profile_cache_order.append(safe)
         while len(self._profile_cache_order) > self._profile_cache_max:
             old = self._profile_cache_order.popleft()
             self._profile_cache.pop(old, None)
@@ -310,8 +325,11 @@ class NgramProfiler:
 
         if str(role).strip().lower() != "assistant":
             return
+        safe = sanitize_text(text)
+        if safe is None:
+            return
         key = str(agent_id or "unknown")
-        value = str(text or "")
+        value = safe
         with self._lock:
             state = self._get_or_create_state(key)
             state["updates"] += 1
