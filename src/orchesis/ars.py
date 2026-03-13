@@ -62,6 +62,7 @@ class AgentReliabilityScore:
         latency_baseline_ms: float = 2000.0,
         max_latencies_stored: int = 1000,
         max_token_counts_stored: int = 1000,
+        max_agents: int = 10_000,
         enabled: bool = True,
     ) -> None:
         self._weights = self.DEFAULT_WEIGHTS.copy()
@@ -72,10 +73,11 @@ class AgentReliabilityScore:
         self._latency_baseline = max(100.0, float(latency_baseline_ms))
         self._max_latencies = max(100, int(max_latencies_stored))
         self._max_tokens = max(100, int(max_token_counts_stored))
+        self._max_agents = max(1, int(max_agents))
         self._enabled = bool(enabled)
         self._lock = threading.Lock()
         self._agents: dict[str, AgentMetrics] = {}
-        self._stats = {"total_updates": 0, "total_computes": 0, "agents_tracked": 0}
+        self._stats = {"total_updates": 0, "total_computes": 0, "agents_tracked": 0, "evictions": 0}
 
     @property
     def enabled(self) -> bool:
@@ -100,6 +102,13 @@ class AgentReliabilityScore:
         with self._lock:
             metrics = self._agents.get(agent_id)
             if metrics is None:
+                if len(self._agents) >= self._max_agents:
+                    oldest_agent_id = min(
+                        self._agents,
+                        key=lambda aid: float(self._agents[aid].last_seen or self._agents[aid].first_seen or 0.0),
+                    )
+                    self._agents.pop(oldest_agent_id, None)
+                    self._stats["evictions"] += 1
                 metrics = AgentMetrics(agent_id=agent_id, first_seen=now, last_seen=now)
                 self._agents[agent_id] = metrics
                 self._stats["agents_tracked"] += 1
@@ -273,4 +282,10 @@ class AgentReliabilityScore:
     @property
     def stats(self) -> dict[str, Any]:
         with self._lock:
-            return {**self._stats, "enabled": self._enabled, "weights": dict(self._weights)}
+            return {
+                **self._stats,
+                "enabled": self._enabled,
+                "weights": dict(self._weights),
+                "max_agents": self._max_agents,
+                "active_agents": len(self._agents),
+            }

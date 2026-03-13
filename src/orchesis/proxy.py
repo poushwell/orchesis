@@ -2882,7 +2882,11 @@ class LLMHTTPProxy:
         )
         if not has_tool_results or not matches:
             return
+        downgrade_ids = {"ORCH-TA-002", "ORCH-TA-005"}
         for match in matches:
+            threat_id = str(getattr(match, "threat_id", "") or "").upper()
+            if threat_id not in downgrade_ids:
+                continue
             try:
                 current = float(getattr(match, "confidence", 0.0) or 0.0)
             except Exception:
@@ -4303,7 +4307,8 @@ class LLMHTTPProxy:
 
                 rec = build_record_from_context(ctx)
                 self._telemetry_collector.record(rec)
-        except Exception:
+        except Exception as error:  # noqa: BLE001
+            _HTTP_PROXY_LOGGER.warning("telemetry/ars finalize hook failed: %s", error)
             return
 
     def _handle_kill(self, handler: BaseHTTPRequestHandler) -> None:

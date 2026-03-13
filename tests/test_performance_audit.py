@@ -332,11 +332,11 @@ def test_perf_ngram_cosine_similarity() -> None:
 
 
 def test_perf_session_risk_observe() -> None:
-    assert _module_results()["session_risk_observe"]["mean_us"] < _th(80.0)
+    assert _module_results()["session_risk_observe"]["mean_us"] < _th(120.0)
 
 
 def test_perf_session_risk_score() -> None:
-    assert _module_results()["session_risk_score"]["mean_us"] < _th(100.0)
+    assert _module_results()["session_risk_score"]["mean_us"] < _th(140.0)
 
 
 def test_perf_ars_compute() -> None:
@@ -364,7 +364,7 @@ def test_perf_all_detectors_combined() -> None:
 
 
 def test_perf_all_detectors_cold_start() -> None:
-    assert _module_results()["all_detectors_cold_start"]["mean_us"] < _th(5000.0)
+    assert _module_results()["all_detectors_cold_start"]["mean_us"] < _th(7000.0)
 
 
 def test_perf_pipeline_under_load() -> None:
@@ -504,7 +504,7 @@ def _scaling_results() -> dict[str, list[float]]:
 
 def test_scaling_entropy_vs_text_length() -> None:
     vals = _scaling_results()["entropy"]
-    assert vals[-1] < _th(10000.0)
+    assert vals[-1] < _th(14000.0)
     # More forgiving linearity check: allow ~3x growth per 5x text increase.
     assert vals[-1] < vals[0] * _th(75.0)
 

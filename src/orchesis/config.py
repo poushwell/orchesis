@@ -1141,6 +1141,8 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
             merged[key] = _deep_merge(merged[key], value)
+        elif key == "allowed" and isinstance(value, list) and isinstance(merged.get(key), list):
+            merged[key] = list(merged.get(key, [])) + list(value)
         else:
             merged[key] = value
     return merged

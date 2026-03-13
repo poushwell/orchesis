@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
@@ -42,10 +43,9 @@ def _start_http_server(handler_cls: type[BaseHTTPRequestHandler]) -> tuple[HTTPS
 
 
 def _pick_free_port() -> int:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    port = int(sock.getsockname()[1])
-    sock.close()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = int(sock.getsockname()[1])
     return port
 
 
@@ -57,13 +57,23 @@ def _post_json(port: int, path: str, payload: dict | None) -> tuple[int, dict, d
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    try:
-        with urlopen(req, timeout=3) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-            return int(resp.status), body, dict(resp.headers.items())
-    except HTTPError as error:
-        body = json.loads(error.read().decode("utf-8"))
-        return int(error.code), body, dict(error.headers.items())
+    last_error: ConnectionAbortedError | ConnectionRefusedError | None = None
+    for attempt in range(3):
+        try:
+            with urlopen(req, timeout=3) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+                return int(resp.status), body, dict(resp.headers.items())
+        except HTTPError as error:
+            body = json.loads(error.read().decode("utf-8"))
+            return int(error.code), body, dict(error.headers.items())
+        except (ConnectionAbortedError, ConnectionRefusedError) as error:
+            last_error = error
+            if attempt < 2:
+                time.sleep(0.1)
+                continue
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("unexpected request failure")
 
 
 def _get_json(port: int, path: str) -> tuple[int, dict]:
