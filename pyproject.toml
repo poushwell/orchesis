@@ -4,53 +4,32 @@ build-backend = "setuptools.build_meta:__legacy__"
 
 [project]
 name = "orchesis"
-version = "0.7.0"
-description = "AI Agent Security Runtime — Policy enforcement for autonomous AI agents"
+version = "0.1.0"
+description = "AI Agent Control Plane — transparent HTTP proxy for security, cost optimization, and reliability"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.11"
-authors = [{name = "Orchesis Project"}]
-keywords = ["ai", "security", "agents", "mcp", "policy", "runtime", "compliance"]
+requires-python = ">=3.12"
+authors = [{name = "Pavel", email = "contact@orchesis.io"}]
+keywords = ["ai", "agents", "security", "proxy", "llm", "openai", "anthropic", "mcp"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Topic :: Security",
-    "Topic :: Software Development :: Libraries",
+    "Topic :: Internet :: Proxy Servers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-dependencies = [
-    "pyyaml>=6.0",
-    "click>=8.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
-crypto = ["cryptography>=41.0"]
-server = [
-    "fastapi>=0.100.0",
-    "uvicorn>=0.23.0",
-    "httpx>=0.24.0",
-]
-dev = [
-    "pytest>=7.0",
-    "ruff>=0.1.0",
-    "hypothesis>=6.0",
-    "fastapi>=0.100.0",
-    "uvicorn>=0.23.0",
-    "httpx>=0.24.0",
-    "cryptography>=41.0",
-    "mcp>=0.1.0",
-    "pytest-asyncio>=0.21.0",
-]
+dev = ["pytest", "ruff"]
 
 [project.urls]
-Homepage = "https://github.com/orchesis-security/orchesis"
-Documentation = "https://github.com/orchesis-security/orchesis/docs"
-Repository = "https://github.com/orchesis-security/orchesis"
-Issues = "https://github.com/orchesis-security/orchesis/issues"
+Homepage = "https://orchesis.io"
+Repository = "https://github.com/poushwell/orchesis"
+Issues = "https://github.com/poushwell/orchesis/issues"
 
 [project.scripts]
 orchesis = "orchesis.cli:main"
@@ -59,7 +38,7 @@ orchesis = "orchesis.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-orchesis = ["marketplace/packs/*.yaml", "yara_rules/*.yar"]
+orchesis = ["*.html", "*.yaml", "*.json", "marketplace/packs/*.yaml", "yara_rules/*.yar"]
 
 [tool.ruff]
 line-length = 100

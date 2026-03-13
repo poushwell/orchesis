@@ -1,6 +1,6 @@
-"""Orchesis — AI Agent Security Runtime."""
+"""Orchesis — AI Agent Control Plane."""
 
-__version__ = "0.7.0"
+__version__ = "0.1.0"
 
 from orchesis.engine import Decision, PolicyEngine
 from orchesis.scanner import McpConfigScanner, PolicyScanner, SkillScanner

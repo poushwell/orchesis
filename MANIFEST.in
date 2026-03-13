@@ -1,4 +1,7 @@
 include README.md
+include LICENSE
+include pyproject.toml
 include CHANGELOG.md
 recursive-include docs *.md
 recursive-include examples *.yaml *.yml *.json *.py
+recursive-include src/orchesis *.html *.yaml *.json

@@ -1,9 +1,11 @@
 import json
+import importlib
 from pathlib import Path
 
 from click.testing import CliRunner
 
 from orchesis.cli import main
+from orchesis import __version__
 
 
 def _write_file(path: Path, content: str) -> None:
@@ -375,3 +377,49 @@ proxy:
     assert _FakeProxy.last_config.upstream["anthropic"] == "https://anthropic.override"
     assert _FakeProxy.last_config.upstream["openai"] == "https://openai.override"
     assert "Listening: http://127.0.0.1:8101" in result.output
+
+
+def test_version_flag() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["--version"])
+    assert result.exit_code == 0
+    assert __version__ in result.output
+
+
+def test_proxy_requires_config() -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        result = runner.invoke(main, ["proxy", "--config", "missing.yaml"])
+    assert result.exit_code != 0
+
+
+def test_audit_openclaw_requires_config() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["audit-openclaw"])
+    assert result.exit_code != 0
+
+
+def test_no_command_shows_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, [])
+    assert result.exit_code == 0
+    assert "Usage:" in result.output
+
+
+def test_unknown_command_shows_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["unknown-command"])
+    assert result.exit_code != 0
+    assert "No such command" in result.output
+
+
+def test_cli_entry_point_importable() -> None:
+    module = importlib.import_module("orchesis.cli")
+    assert callable(getattr(module, "main"))
+
+
+def test_version_matches_init() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["--version"])
+    assert result.exit_code == 0
+    assert __version__ in result.output

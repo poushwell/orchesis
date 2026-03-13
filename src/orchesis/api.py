@@ -455,7 +455,7 @@ def create_api_app(
         )
         corpus_stats = corpus.stats()
         return {
-            "version": "0.7.0",
+            "version": "0.1.0",
             "uptime_seconds": int(max(0.0, time.perf_counter() - started_at)),
             "policy_version": app.state.current_version.version_id,
             "total_decisions": total_decisions,

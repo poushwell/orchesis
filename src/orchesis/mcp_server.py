@@ -87,7 +87,7 @@ class MCPServer:
             {
                 "protocolVersion": MCP_VERSION,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "orchesis", "version": "0.7.0"},
+                "serverInfo": {"name": "orchesis", "version": "0.1.0"},
             },
         )
 

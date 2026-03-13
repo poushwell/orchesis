@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from orchesis.demo_backend import app as backend_app
 from orchesis.proxy import create_proxy_app
+from orchesis import __version__
 
 
 def test_health_endpoint() -> None:
@@ -16,7 +17,7 @@ def test_health_endpoint() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "healthy"
-    assert payload["version"] == "0.7.0"
+    assert payload["version"] == __version__
     assert "policy_version" in payload
     assert "uptime_seconds" in payload
     assert "total_decisions" in payload

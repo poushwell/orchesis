@@ -70,6 +70,7 @@ from orchesis.mutations import MutationEngine
 from orchesis.marketplace import PolicyMarketplace
 from orchesis.structured_log import StructuredLogger
 from orchesis.templates import TEMPLATE_NAMES, load_template_text
+from orchesis import __version__
 
 DEFAULT_KEYS_DIR = Path(".orchesis") / "keys"
 DEFAULT_PRIVATE_KEY_PATH = DEFAULT_KEYS_DIR / "private.pem"
@@ -82,10 +83,13 @@ DEFAULT_REPLAY_RUNS_PATH = Path(".orchesis") / "replay_runs.jsonl"
 OPERATIONS_LOG = StructuredLogger("cli")
 
 
-@click.group()
-@click.version_option(version="0.7.0")
-def main() -> None:
+@click.group(invoke_without_command=True)
+@click.version_option(version=__version__)
+@click.pass_context
+def main(ctx: click.Context) -> None:
     """Orchesis command line interface."""
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
 
 
 def _percentile_us(values: list[int], percentile: float) -> int:
@@ -738,6 +742,7 @@ def serve(port: int, policy_path: str, plugin_modules: tuple[str, ...]) -> None:
 
 @main.command("proxy")
 @click.option("--policy", "policy_path", type=click.Path(), default=None)
+@click.option("--config", "config_path", type=click.Path(), default=None)
 @click.option("--port", type=int, default=None)
 @click.option("--host", "listen_host", type=str, default=None)
 @click.option("--upstream-anthropic", "upstream_anthropic", type=str, default=None)
@@ -746,6 +751,7 @@ def serve(port: int, policy_path: str, plugin_modules: tuple[str, ...]) -> None:
 @click.option("--verbose", is_flag=True, default=False)
 def proxy_command(
     policy_path: str | None,
+    config_path: str | None,
     port: int | None,
     listen_host: str | None,
     upstream_anthropic: str | None,
@@ -763,8 +769,9 @@ def proxy_command(
 
     safe_policy_path = None
     policy: dict[str, Any] | None = None
-    if isinstance(policy_path, str) and policy_path.strip():
-        candidate = Path(policy_path).expanduser()
+    effective_policy_path = config_path if isinstance(config_path, str) and config_path.strip() else policy_path
+    if isinstance(effective_policy_path, str) and effective_policy_path.strip():
+        candidate = Path(effective_policy_path).expanduser()
         if not candidate.exists():
             raise click.ClickException(f"Policy file not found: {candidate}")
         safe_policy_path = str(candidate)
@@ -854,6 +861,22 @@ def proxy_command(
     except KeyboardInterrupt:
         proxy.stop()
         click.echo("\nProxy stopped.")
+
+
+@main.command("audit-openclaw")
+@click.option("--config", "config_path", type=click.Path(exists=True), required=True)
+@click.option("--format", "output_format", type=click.Choice(["text", "json", "markdown"]), default="text")
+def audit_openclaw_command(config_path: str, output_format: str) -> None:
+    """Audit OpenClaw deployment config and print report."""
+    from orchesis.openclaw_auditor import OpenClawAuditor
+
+    cfg_path = Path(config_path).expanduser()
+    auditor = OpenClawAuditor()
+    result = auditor.audit_config(str(cfg_path))
+    if output_format == "json":
+        click.echo(json.dumps(asdict(result), indent=2, ensure_ascii=False))
+        return
+    click.echo(auditor.generate_report(result, format=output_format))
 
 
 def _post_proxy_control(port: int, path: str, payload: dict[str, Any]) -> dict[str, Any]:

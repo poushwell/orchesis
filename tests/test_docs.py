@@ -9,6 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from orchesis.cli import main
+from orchesis import __version__
 
 
 def test_all_doc_files_exist() -> None:
@@ -91,8 +92,8 @@ def test_package_builds_cleanly(tmp_path: Path) -> None:
             pytest.skip("build invocation unavailable in this environment")
     assert result.returncode == 0, result.stdout + result.stderr
 
-    artifacts = sorted(dist_dir.glob("orchesis-0.7.0*"))
-    assert artifacts, "Build artifacts for 0.7.0 not found"
+    artifacts = sorted(dist_dir.glob(f"orchesis-{__version__}*"))
+    assert artifacts, f"Build artifacts for {__version__} not found"
 
     twine_cmd = [sys.executable, "-m", "twine", "check", *[str(item) for item in artifacts]]
     check = subprocess.run(twine_cmd, capture_output=True, text=True)
