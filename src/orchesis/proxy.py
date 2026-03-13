@@ -69,6 +69,7 @@ from orchesis.adaptive_detector import AdaptiveDetector
 from orchesis.community import CommunityClient
 from orchesis.mast_detectors import MASTDetectors
 from orchesis.message_chain import validate_tool_chain
+from orchesis.context_optimizer import ContextOptimizer
 from orchesis.dashboard import get_dashboard_html
 from orchesis.air_export import export_session_to_air
 from orchesis import __version__ as ORCHESIS_VERSION
@@ -2027,6 +2028,10 @@ class LLMHTTPProxy:
         self._adaptive_detector: AdaptiveDetector | None = None
         if isinstance(adaptive_cfg, dict) and bool(adaptive_cfg.get("enabled", False)):
             self._adaptive_detector = AdaptiveDetector(adaptive_cfg)
+        context_opt_cfg = self._policy.get("context_optimizer")
+        self._context_optimizer: ContextOptimizer | None = None
+        if isinstance(context_opt_cfg, dict) and bool(context_opt_cfg.get("enabled", False)):
+            self._context_optimizer = ContextOptimizer(context_opt_cfg)
         mast_cfg = self._policy.get("mast")
         self._mast: MASTDetectors | None = None
         if isinstance(mast_cfg, dict) and bool(mast_cfg.get("enabled", False)):
@@ -2131,6 +2136,8 @@ class LLMHTTPProxy:
             payload["adaptive_detection"] = self._adaptive_detector.get_stats()
         if self._mast is not None:
             payload["mast"] = self._mast.get_stats()
+        if self._context_optimizer is not None:
+            payload["context_optimizer"] = self._context_optimizer.get_stats()
         if self._community is not None:
             payload["community"] = self._community.get_status()
         payload["proxy_engine"] = {
@@ -3628,6 +3635,20 @@ class LLMHTTPProxy:
 
     def _phase_context(self, ctx: _RequestContext) -> bool:
         """Optimize context window before sending to LLM."""
+        if self._context_optimizer is not None:
+            messages = ctx.body.get("messages")
+            if isinstance(messages, list):
+                optimized_messages, opt_result = self._context_optimizer.optimize(
+                    messages=messages,
+                    model=str(ctx.body.get("model", "")),
+                    tools=ctx.body.get("tools"),
+                    agent_id=str(ctx.behavior_agent_id or "default"),
+                )
+                ctx.body["messages"] = optimized_messages
+                ctx.proc_result["context_savings_percent"] = float(opt_result.savings_percent)
+                ctx.proc_result["context_original_tokens"] = int(opt_result.original_tokens)
+                ctx.proc_result["context_optimized_tokens"] = int(opt_result.optimized_tokens)
+                ctx.proc_result["context_optimizations_applied"] = list(opt_result.optimizations_applied)
         if self._context_engine is None or not self._context_engine.enabled:
             return True
         messages = ctx.body.get("messages")
