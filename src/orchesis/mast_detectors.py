@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict, deque
 from dataclasses import asdict, dataclass
+import json
 import math
 import re
 import threading

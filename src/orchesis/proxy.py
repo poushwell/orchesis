@@ -70,6 +70,7 @@ from orchesis.community import CommunityClient
 from orchesis.mast_detectors import MASTDetectors
 from orchesis.message_chain import validate_tool_chain
 from orchesis.context_optimizer import ContextOptimizer
+from orchesis.auto_healer import AutoHealer
 from orchesis.dashboard import get_dashboard_html
 from orchesis.air_export import export_session_to_air
 from orchesis import __version__ as ORCHESIS_VERSION
@@ -1778,6 +1779,9 @@ class _RequestContext:
     spend_rate_per_min: float = 0.0
     request_saved_usd: float = 0.0
     adaptive_detection_result: Any = None
+    mast_request_findings: list[Any] = field(default_factory=list)
+    was_auto_healed: bool = False
+    healing_pre_score: float = 0.0
 
 
 class LLMHTTPProxy:
@@ -2036,6 +2040,10 @@ class LLMHTTPProxy:
         self._mast: MASTDetectors | None = None
         if isinstance(mast_cfg, dict) and bool(mast_cfg.get("enabled", False)):
             self._mast = MASTDetectors(mast_cfg)
+        auto_healing_cfg = self._policy.get("auto_healing")
+        self._auto_healer: AutoHealer | None = None
+        if isinstance(auto_healing_cfg, dict) and bool(auto_healing_cfg.get("enabled", False)):
+            self._auto_healer = AutoHealer(auto_healing_cfg)
         self._server: HTTPServer | None = None
         self._start_time = time.time()
         self._stats_lock = threading.Lock()
@@ -2138,6 +2146,8 @@ class LLMHTTPProxy:
             payload["mast"] = self._mast.get_stats()
         if self._context_optimizer is not None:
             payload["context_optimizer"] = self._context_optimizer.get_stats()
+        if self._auto_healer is not None:
+            payload["auto_healing"] = self._auto_healer.get_stats()
         if self._community is not None:
             payload["community"] = self._community.get_status()
         payload["proxy_engine"] = {
@@ -2541,6 +2551,13 @@ class LLMHTTPProxy:
                 self._send_json(handler, 200, {"enabled": False})
                 return
             self._send_json(handler, 200, self._mast.get_agent_compliance(agent_id))
+            return
+        if path.startswith("/api/v1/healing/"):
+            agent_id = path.split("/api/v1/healing/", 1)[1].strip("/")
+            if self._auto_healer is None:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            self._send_json(handler, 200, self._auto_healer.get_agent_healing_history(agent_id))
             return
         if path.startswith("/api/v1/session-risk/"):
             session_id = path.split("/api/v1/session-risk/", 1)[1].strip("/")
@@ -3421,8 +3438,11 @@ class LLMHTTPProxy:
         )
         if findings:
             ctx.proc_result["mast_findings"] = [asdict(item) for item in findings]
+            ctx.mast_request_findings = list(findings)
         for finding in findings:
             if finding.severity == "critical":
+                if self._auto_healer is not None and self._auto_healer.enabled:
+                    continue
                 self._inc("blocked")
                 self._send_json(
                     ctx.handler,
@@ -3437,6 +3457,48 @@ class LLMHTTPProxy:
                 return False
             if finding.severity == "high":
                 ctx.session_headers[f"X-Orchesis-MAST-{finding.failure_mode}"] = finding.description[:180]
+        return True
+
+    def _phase_auto_healing(self, ctx: _RequestContext) -> bool:
+        if self._auto_healer is None or not self._auto_healer.enabled:
+            return True
+        agent_id = str(ctx.behavior_agent_id or extract_agent_id(ctx.handler.headers) or "default")
+        if not self._auto_healer.rate_limiter.check(agent_id):
+            self._inc("blocked")
+            self._send_json(
+                ctx.handler,
+                429,
+                {
+                    "error": {
+                        "type": "agent_rate_limited",
+                        "message": "Agent temporarily rate-limited due to anomalous behavior",
+                    }
+                },
+            )
+            return False
+        detection = ctx.adaptive_detection_result
+        mast_findings = ctx.mast_request_findings
+        has_detection_issue = bool(detection is not None and bool(getattr(detection, "is_anomalous", False)))
+        has_mast_issue = bool(mast_findings)
+        if not has_detection_issue and not has_mast_issue:
+            return True
+        pre_score = float(getattr(detection, "anomaly_score", 0.0) if detection is not None else 0.0)
+        modified_request, healing_result = self._auto_healer.heal(
+            detection_result=detection,
+            mast_findings=mast_findings,
+            request_data=ctx.body,
+            agent_id=agent_id,
+            context={"policy": self._policy},
+        )
+        if healing_result.actions_taken:
+            ctx.body = modified_request
+            ctx.was_auto_healed = True
+            ctx.healing_pre_score = pre_score
+            ctx.proc_result["auto_healing"] = asdict(healing_result)
+            ctx.session_headers["X-Orchesis-Healed"] = "true"
+            ctx.session_headers["X-Orchesis-Healing-Actions"] = ",".join(
+                [item.action_type for item in healing_result.actions_taken]
+            )
         return True
 
     def _phase_threat_intel(self, ctx: _RequestContext) -> bool:
@@ -4023,6 +4085,45 @@ class LLMHTTPProxy:
                             },
                         )
                         return False
+        if (
+            self._auto_healer is not None
+            and self._adaptive_detector is not None
+            and ctx.was_auto_healed
+        ):
+            post_payload: dict[str, Any] = {
+                "messages": [],
+                "model": str(ctx.body.get("model", "")),
+                "tools": [],
+            }
+            try:
+                decoded_post = json.loads(ctx.resp_body.decode("utf-8")) if ctx.resp_body else {}
+                if isinstance(decoded_post, dict):
+                    post_text = ""
+                    if isinstance(decoded_post.get("content"), str):
+                        post_text = str(decoded_post.get("content", ""))
+                    elif isinstance(decoded_post.get("output_text"), str):
+                        post_text = str(decoded_post.get("output_text", ""))
+                    else:
+                        choices = decoded_post.get("choices")
+                        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                            message = choices[0].get("message")
+                            if isinstance(message, dict) and isinstance(message.get("content"), str):
+                                post_text = str(message.get("content", ""))
+                    if post_text:
+                        post_payload["messages"] = [{"role": "assistant", "content": post_text}]
+                post_det = self._adaptive_detector.check(
+                    str(ctx.behavior_agent_id or "default"),
+                    post_payload,
+                )
+                healed_ok = self._auto_healer.verify_healing(
+                    str(ctx.behavior_agent_id or "default"),
+                    pre_healing_score=float(ctx.healing_pre_score),
+                    post_healing_score=float(post_det.anomaly_score),
+                )
+                ctx.proc_result["auto_healing_verified"] = bool(healed_ok)
+                ctx.proc_result["auto_healing_post_score"] = float(post_det.anomaly_score)
+            except Exception:
+                pass
         if self._cascade_router is not None and ctx.cascade_decision is not None and ctx.parsed_resp_obj is not None:
             token_sum = int(getattr(ctx.parsed_resp_obj, "input_tokens", 0)) + int(
                 getattr(ctx.parsed_resp_obj, "output_tokens", 0)
@@ -4410,6 +4511,9 @@ class LLMHTTPProxy:
                 _end_root_early()
                 return
             if not self._run_phase_span(ctx, "mast_request", self._phase_mast_request):
+                _end_root_early()
+                return
+            if not self._run_phase_span(ctx, "auto_healing", self._phase_auto_healing):
                 _end_root_early()
                 return
             if not self._run_phase_span(ctx, "budget", self._phase_budget):

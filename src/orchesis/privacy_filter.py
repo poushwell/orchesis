@@ -264,13 +264,13 @@ class PrivacyFilter:
             signal.ars_grade,
             signal.drift_type,
         ] + list(signal.threat_ids) + list(signal.pattern_types)
-        for field in text_fields:
-            if not isinstance(field, str):
+        for text_field in text_fields:
+            if not isinstance(text_field, str):
                 return False
-            if len(field) > 256:
+            if len(text_field) > 256:
                 return False
             for pattern in _PII_PATTERNS + _SECRET_PATTERNS + _PATH_URL_PATTERNS + _PROMPTISH_PATTERNS:
-                if pattern.search(field):
+                if pattern.search(text_field):
                     return False
         return True
 

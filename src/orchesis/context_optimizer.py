@@ -255,7 +255,6 @@ class ContextOptimizer:
         roles = {str(m.get("role", "")).lower() for m in messages if isinstance(m, dict)}
         if len(roles) == 1 and len(messages) >= self.never_remove_last_n:
             return messages
-        current_idx = 0
         current = dict(messages[0])
         for idx, nxt in enumerate(messages[1:], start=1):
             c_role = str(current.get("role", "")).lower()
@@ -277,7 +276,6 @@ class ContextOptimizer:
                 result.messages_merged += 1
                 continue
             out.append(current)
-            current_idx = idx
             current = dict(nxt)
         out.append(current)
         return out
