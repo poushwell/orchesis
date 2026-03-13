@@ -202,6 +202,28 @@ def test_dashboard_variant_card_css() -> None:
     assert "variant-pair" in html
 
 
+def test_compliance_tab_renders() -> None:
+    html = get_dashboard_html()
+    assert "compliance" in html.lower()
+    assert "cmp-overview-text" in html
+
+
+def test_approvals_tab_renders() -> None:
+    html = get_dashboard_html()
+    assert "approvals" in html.lower()
+    assert "approvals-pending" in html
+
+
+def test_approvals_approve_button() -> None:
+    html = get_dashboard_html()
+    assert "APPROVE" in html
+
+
+def test_approvals_deny_button() -> None:
+    html = get_dashboard_html()
+    assert "DENY" in html
+
+
 # Overview endpoint tests (8)
 def test_dashboard_overview_returns_expected_keys(tmp_path: Path) -> None:
     proxy, upstream = _make_proxy(tmp_path, "rules: []\n")

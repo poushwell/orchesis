@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 
-def get_dashboard_html() -> str:
+def get_dashboard_html(demo_mode: bool = False) -> str:
     """Return a fully self-contained dashboard HTML page."""
-    return """<!doctype html>
+    html = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -393,6 +393,24 @@ def get_dashboard_html() -> str:
       font-size: 9px;
       text-anchor: middle;
     }
+    .demo-banner {
+      border: 1px solid #facc15;
+      color: #fde68a;
+      background: rgba(250, 204, 21, 0.14);
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+      font-weight: 700;
+      text-align: center;
+    }
+    .approval-row {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px;
+      margin-bottom: 8px;
+      background: rgba(255,255,255,0.02);
+    }
+    .approval-actions { display: flex; gap: 8px; margin-bottom: 6px; }
+    .approval-actions .tab-btn { padding: 6px 10px; }
     @media (max-width: 1100px) {
       .grid-4 { grid-template-columns: repeat(2, minmax(160px, 1fr)); }
       .grid-2 { grid-template-columns: 1fr; }
@@ -409,6 +427,7 @@ def get_dashboard_html() -> str:
         <span class="badge" id="status-badge">Status: --</span>
       </div>
     </div>
+    {{DEMO_BANNER}}
 
     <div class="tabs">
       <button class="tab-btn active" data-tab="shield">🛡️ Shield</button>
@@ -419,6 +438,7 @@ def get_dashboard_html() -> str:
       <button class="tab-btn" data-tab="threats">🛡️ Threats</button>
       <button class="tab-btn" data-tab="cache">⚡ Cache</button>
       <button class="tab-btn" data-tab="compliance">📘 Compliance</button>
+      <button class="tab-btn" data-tab="approvals">✅ Approvals</button>
     </div>
 
     <section id="shield" class="screen active">
@@ -671,6 +691,21 @@ def get_dashboard_html() -> str:
           <thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Modules</th></tr></thead>
           <tbody></tbody>
         </table>
+      </div>
+      <div class="panel">
+        <strong>Compliance Overview</strong>
+        <div id="cmp-overview-text" class="subtle" style="margin-top:8px;"></div>
+      </div>
+    </section>
+
+    <section id="approvals" class="screen">
+      <div class="panel">
+        <strong>PENDING APPROVALS (<span id="ap-pending-count">0</span>)</strong>
+        <div id="approvals-pending" style="margin-top:10px;"></div>
+      </div>
+      <div class="panel">
+        <strong>HISTORY</strong>
+        <div id="approvals-history" style="margin-top:10px;"></div>
       </div>
     </section>
   </div>
@@ -1359,7 +1394,7 @@ def get_dashboard_html() -> str:
       }
     }
 
-    function renderCompliance(summary, coverage, findings){
+    function renderCompliance(summary, coverage, findings, overview){
       const fw = (summary && summary.frameworks) ? summary.frameworks : {};
       const owasp = fw["owasp_llm_top10_2025"] || { percent: 0 };
       const nist = fw["nist_ai_rmf_1_0"] || { percent: 0 };
@@ -1402,6 +1437,70 @@ def get_dashboard_html() -> str:
           findingsEl.appendChild(row);
         });
       }
+      const ov = (overview && overview.compliance_overview) ? overview.compliance_overview : {};
+      const mast = ov.mast || { score: 0, covered: 0, total: 14, gaps: [] };
+      const owaspAi = ov.owasp_agentic_ai || { score: oPct, covered: 0, total: 10, gaps: [] };
+      const eu = ov.eu_ai_act || { score: 0, audit_trail: false, incident_reporting: false, risk_assessment: "partial", human_oversight: "partial", documentation: false };
+      const nistRmf = ov.nist_ai_rmf || { score: nPct, govern: "partial", map: "partial", measure: "partial", manage: "partial" };
+      const overviewEl = document.getElementById("cmp-overview-text");
+      if (overviewEl) {
+        overviewEl.innerHTML = `
+          <div><strong>MAST:</strong> ${Number(mast.score || 0).toFixed(1)}% | Covered ${mast.covered || 0}/${mast.total || 14} | Gaps: ${(mast.gaps || []).join(", ") || "-"}</div>
+          <div style="margin-top:6px;"><strong>OWASP Agentic AI:</strong> ${Number(owaspAi.score || 0).toFixed(1)}% | Covered ${owaspAi.covered || 0}/${owaspAi.total || 10} | Gaps: ${(owaspAi.gaps || []).join(", ") || "-"}</div>
+          <div style="margin-top:6px;"><strong>EU AI Act:</strong> ${Number(eu.score || 0).toFixed(1)}% | Audit trail: ${eu.audit_trail ? "✅" : "❌"} | Incident reporting: ${eu.incident_reporting ? "✅" : "❌"} | Risk assessment: ${eu.risk_assessment || "partial"} | Human oversight: ${eu.human_oversight || "partial"} | Documentation: ${eu.documentation ? "✅" : "❌"}</div>
+          <div style="margin-top:6px;"><strong>NIST AI RMF:</strong> ${Number(nistRmf.score || 0).toFixed(1)}% | Govern: ${nistRmf.govern || "partial"} | Map: ${nistRmf.map || "partial"} | Measure: ${nistRmf.measure || "partial"} | Manage: ${nistRmf.manage || "partial"}</div>
+        `;
+      }
+    }
+
+    async function applyApproval(id, action){
+      const endpoint = `/api/v1/approvals/${encodeURIComponent(id)}/${action}`;
+      await fetch(endpoint, { method: "POST" });
+      await pollApprovals();
+    }
+
+    function renderApprovals(data){
+      const pendingEl = document.getElementById("approvals-pending");
+      const historyEl = document.getElementById("approvals-history");
+      const countEl = document.getElementById("ap-pending-count");
+      const pending = (data && Array.isArray(data.pending)) ? data.pending : [];
+      const history = (data && Array.isArray(data.history)) ? data.history : [];
+      if (countEl) countEl.textContent = String(pending.length);
+      if (pendingEl) {
+        if (pending.length === 0) {
+          pendingEl.innerHTML = `<div class="empty">No pending approvals.</div>`;
+        } else {
+          pendingEl.innerHTML = pending.map((item)=>{
+            const id = String(item.approval_id || "");
+            const args = item.tool_args ? JSON.stringify(item.tool_args) : "{}";
+            const risk = String(item.risk || "medium").toUpperCase();
+            return `<div class="approval-row">
+              <div class="approval-actions">
+                <button class="tab-btn" data-approve="${id}">APPROVE</button>
+                <button class="tab-btn" data-deny="${id}">DENY</button>
+              </div>
+              <div>agent: ${item.agent_id || "unknown"} | tool: ${item.tool_name || "unknown"} | action: ${args}</div>
+              <div class="subtle">Risk: ${risk} | Reason: ${item.reason || "-"} | ${fmtTs(item.timestamp)}</div>
+            </div>`;
+          }).join("");
+          pendingEl.querySelectorAll("button[data-approve]").forEach((btn)=>{
+            btn.addEventListener("click", ()=> applyApproval(String(btn.getAttribute("data-approve") || ""), "approve"));
+          });
+          pendingEl.querySelectorAll("button[data-deny]").forEach((btn)=>{
+            btn.addEventListener("click", ()=> applyApproval(String(btn.getAttribute("data-deny") || ""), "deny"));
+          });
+        }
+      }
+      if (historyEl) {
+        if (history.length === 0) {
+          historyEl.innerHTML = `<div class="empty">No approval history.</div>`;
+        } else {
+          historyEl.innerHTML = history.slice(0, 20).map((item)=>{
+            const status = String(item.status || "").toLowerCase() === "approved" ? "✅ Approved" : "❌ Denied";
+            return `<div class="approval-row">${status}: ${item.agent_id || "unknown"} → ${item.tool_name || "unknown"} (${fmtTs(item.timestamp)})</div>`;
+          }).join("");
+        }
+      }
     }
 
     async function pollShield(){
@@ -1436,12 +1535,18 @@ def get_dashboard_html() -> str:
       renderFlowAnalysis(analysis, graph);
     }
     async function pollCompliance(){
-      const [summary, coverage, findings] = await Promise.all([
+      const [summary, coverage, findings, overview] = await Promise.all([
         fetchData("/api/compliance/summary"),
         fetchData("/api/compliance/coverage"),
-        fetchData("/api/compliance/findings?limit=10")
+        fetchData("/api/compliance/findings?limit=10"),
+        fetchData("/api/dashboard/overview"),
       ]);
-      renderCompliance(summary, coverage, findings);
+      renderCompliance(summary, coverage, findings, overview);
+    }
+
+    async function pollApprovals(){
+      const data = await fetchData("/api/v1/approvals");
+      renderApprovals(data || {});
     }
 
     async function pollExperiments(){
@@ -1476,6 +1581,7 @@ def get_dashboard_html() -> str:
       if(currentTab === "threats") return pollThreats();
       if(currentTab === "cache") return pollCache();
       if(currentTab === "compliance") return pollCompliance();
+      if(currentTab === "approvals") return pollApprovals();
     }
 
     function switchTab(tab){
@@ -1514,3 +1620,9 @@ def get_dashboard_html() -> str:
 </body>
 </html>
 """
+    banner = (
+        '<div class="demo-banner">DEMO MODE — showing sample data. Install Orchesis to see real metrics.</div>'
+        if demo_mode
+        else ""
+    )
+    return html.replace("{{DEMO_BANNER}}", banner)

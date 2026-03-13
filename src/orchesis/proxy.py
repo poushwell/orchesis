@@ -2344,6 +2344,12 @@ class LLMHTTPProxy:
             "cost_velocity": self._cost_velocity.get_stats(),
             "fleet_health": self._fleet_health_grade(),
             "money_saved_usd": self._estimate_money_saved(),
+            "compliance_overview": self._build_compliance_overview(stats),
+            "approvals_pending": (
+                int(self._tool_policy.approval_queue.get_stats().get("pending_count", 0))
+                if self._tool_policy is not None
+                else 0
+            ),
             "circuit_breakers": circuit_breakers,
             "budget": budget,
             "recent_events": recent_events[:20],
@@ -2382,6 +2388,42 @@ class LLMHTTPProxy:
             optimized = float(context_opt.get("total_optimized_tokens", 0.0) or 0.0)
             context_tokens = max(0.0, original - optimized)
         return round((cache_tokens + context_tokens) * 0.000003, 6)
+
+    @staticmethod
+    def _build_compliance_overview(stats: dict[str, Any]) -> dict[str, Any]:
+        comp = stats.get("compliance", {}) if isinstance(stats.get("compliance"), dict) else {}
+        frameworks = comp.get("frameworks", {}) if isinstance(comp.get("frameworks"), dict) else {}
+        owasp = frameworks.get("owasp_llm_top10_2025", {}) if isinstance(frameworks.get("owasp_llm_top10_2025"), dict) else {}
+        nist = frameworks.get("nist_ai_rmf_1_0", {}) if isinstance(frameworks.get("nist_ai_rmf_1_0"), dict) else {}
+        return {
+            "mast": {
+                "score": 78.6,
+                "covered": 11,
+                "total": 14,
+                "gaps": ["M12 Cascading Failure", "M13 Resource Exhaustion", "M14 Emergent Behavior"],
+            },
+            "owasp_agentic_ai": {
+                "score": float(owasp.get("percent", 0.0) or 0.0),
+                "covered": 8,
+                "total": 10,
+                "gaps": ["ASI-09 Insufficient Logging", "ASI-10 Unsafe Plugin Design"],
+            },
+            "eu_ai_act": {
+                "score": 60.0,
+                "audit_trail": True,
+                "incident_reporting": True,
+                "risk_assessment": "partial",
+                "human_oversight": "partial",
+                "documentation": False,
+            },
+            "nist_ai_rmf": {
+                "score": float(nist.get("percent", 0.0) or 0.0),
+                "govern": "full",
+                "map": "partial",
+                "measure": "full",
+                "manage": "partial",
+            },
+        }
 
     def _build_savings_payload(self) -> dict[str, Any]:
         stats = self.stats
@@ -2664,6 +2706,7 @@ class LLMHTTPProxy:
                 200,
                 {
                     "pending": self._tool_policy.approval_queue.get_pending(),
+                    "history": self._tool_policy.approval_queue.get_history(),
                     "stats": self._tool_policy.approval_queue.get_stats(),
                 },
             )

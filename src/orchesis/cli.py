@@ -863,6 +863,16 @@ def proxy_command(
         click.echo("\nProxy stopped.")
 
 
+@main.command("demo")
+@click.option("--port", type=int, default=8080)
+def demo_command(port: int) -> None:
+    """Launch dashboard in demo mode with mock data."""
+    from orchesis.demo import DemoServer
+
+    server = DemoServer()
+    server.start(port=max(1, int(port)))
+
+
 @main.command("audit-openclaw")
 @click.option("--config", "config_path", type=click.Path(exists=True), required=True)
 @click.option("--format", "output_format", type=click.Choice(["text", "json", "markdown"]), default="text")

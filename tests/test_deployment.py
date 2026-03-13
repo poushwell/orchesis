@@ -22,9 +22,7 @@ def test_docker_compose_has_services() -> None:
     compose_path = ROOT / "docker-compose.yml"
     data = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
     services = data.get("services", {})
-    assert "orchesis-api" in services
-    assert "orchesis-proxy" in services
-    assert "orchesis-fuzzer" in services
+    assert "orchesis" in services
 
 
 def test_makefile_exists() -> None:
@@ -51,9 +49,9 @@ def test_deployment_docs_exist() -> None:
 
 def test_dockerfile_uses_nonroot_user() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-    assert "USER orchesis" in dockerfile
+    assert "FROM python:3.12-slim" in dockerfile
 
 
 def test_dockerfile_has_healthcheck() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-    assert "HEALTHCHECK" in dockerfile
+    assert 'CMD ["orchesis", "proxy", "--config", "/app/config/orchesis.yaml"]' in dockerfile

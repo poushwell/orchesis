@@ -29,6 +29,7 @@ class ApprovalQueue:
     def __init__(self, max_pending: int = 100):
         self._pending: dict[str, dict[str, Any]] = {}
         self._approved: dict[str, float] = {}
+        self._history: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         self._max_pending = max(1, int(max_pending))
         self._approved_count = 0
@@ -73,8 +74,21 @@ class ApprovalQueue:
             self._approved_count += 1
             self._handled += 1
             self._total_wait_seconds += max(0.0, now - float(item.get("timestamp", now)))
+            self._history.insert(
+                0,
+                {
+                    "status": "approved",
+                    "approval_id": key,
+                    "timestamp": now,
+                    "agent_id": item.get("agent_id", "unknown"),
+                    "tool_name": item.get("tool_name", ""),
+                    "reason": item.get("reason", ""),
+                },
+            )
             if len(self._approved) > self._max_pending * 10:
                 self._approved = dict(sorted(self._approved.items(), key=lambda kv: kv[1])[-self._max_pending * 5 :])
+            if len(self._history) > self._max_pending * 10:
+                self._history = self._history[: self._max_pending * 10]
             return True
 
     def deny(self, request_id: str) -> bool:
@@ -89,6 +103,19 @@ class ApprovalQueue:
             self._denied_count += 1
             self._handled += 1
             self._total_wait_seconds += max(0.0, now - float(item.get("timestamp", now)))
+            self._history.insert(
+                0,
+                {
+                    "status": "denied",
+                    "approval_id": key,
+                    "timestamp": now,
+                    "agent_id": item.get("agent_id", "unknown"),
+                    "tool_name": item.get("tool_name", ""),
+                    "reason": item.get("reason", ""),
+                },
+            )
+            if len(self._history) > self._max_pending * 10:
+                self._history = self._history[: self._max_pending * 10]
             return True
 
     def consume_approved(self, request_id: str) -> bool:
@@ -113,6 +140,12 @@ class ApprovalQueue:
                 "denied_count": int(self._denied_count),
                 "avg_wait_seconds": round(avg_wait, 3),
             }
+
+    def get_history(self, limit: int = 50) -> list[dict]:
+        with self._lock:
+            if limit <= 0:
+                return []
+            return [dict(item) for item in self._history[:limit]]
 
 
 class ToolPolicyEngine:

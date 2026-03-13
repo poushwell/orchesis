@@ -1,3 +1,18 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY src/ src/
+COPY pyproject.toml .
+COPY README.md .
+COPY config/ config/
+
+RUN pip install --no-cache-dir .
+
+EXPOSE 8080
+
+CMD ["orchesis", "proxy", "--config", "/app/config/orchesis.yaml"]
+
 # Multi-stage build for minimal image
 FROM python:3.12-slim AS builder
 

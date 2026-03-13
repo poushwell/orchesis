@@ -1,54 +1,12 @@
-version: "3.9"
+version: "3.8"
 
 services:
-  orchesis-api:
+  orchesis:
     build: .
-    container_name: orchesis-api
     ports:
       - "8080:8080"
     volumes:
-      - ./policy.yaml:/app/policy.yaml:ro
-      - orchesis-data:/app/.orchesis
+      - ./config:/app/config
     environment:
-      - API_TOKEN=${ORCHESIS_API_TOKEN:-orch_sk_dev_token}
-      - LOG_LEVEL=INFO
-    healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; r=httpx.get('http://localhost:8080/api/v1/status'); exit(0 if r.status_code==200 else 1)"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
+      - ORCHESIS_LOG_LEVEL=info
     restart: unless-stopped
-
-  orchesis-proxy:
-    build: .
-    container_name: orchesis-proxy
-    command: ["orchesis", "mcp-proxy", "--port", "9000", "--policy", "/app/policy.yaml"]
-    ports:
-      - "9000:9000"
-    volumes:
-      - ./policy.yaml:/app/policy.yaml:ro
-      - orchesis-data:/app/.orchesis
-    environment:
-      - LOG_LEVEL=INFO
-    depends_on:
-      orchesis-api:
-        condition: service_healthy
-    restart: unless-stopped
-
-  orchesis-fuzzer:
-    build: .
-    container_name: orchesis-fuzzer
-    command: >
-      sh -c "orchesis fuzz --policy /app/policy.yaml --count 5000 --save-bypasses &&
-             orchesis mutate --policy /app/policy.yaml --count 1000 &&
-             orchesis invariants --policy /app/policy.yaml &&
-             orchesis reliability-report --format json"
-    volumes:
-      - ./policy.yaml:/app/policy.yaml:ro
-      - orchesis-data:/app/.orchesis
-      - ./tests/corpus:/app/tests/corpus
-    profiles:
-      - testing
-
-volumes:
-  orchesis-data:

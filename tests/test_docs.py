@@ -97,6 +97,8 @@ def test_package_builds_cleanly(tmp_path: Path) -> None:
 
     twine_cmd = [sys.executable, "-m", "twine", "check", *[str(item) for item in artifacts]]
     check = subprocess.run(twine_cmd, capture_output=True, text=True)
+    if check.returncode != 0 and "No module named twine" in (check.stderr or ""):
+        pytest.skip("twine not available in this environment")
     assert check.returncode == 0, check.stdout + check.stderr
 
 
