@@ -74,6 +74,7 @@ from orchesis.auto_healer import AutoHealer
 from orchesis.thompson_router import ThompsonRouter
 from orchesis.agent_discovery import AgentDiscovery
 from orchesis.tool_policy import ToolPolicyEngine
+from orchesis.cost_velocity import CostVelocity
 from orchesis.dashboard import get_dashboard_html
 from orchesis.air_export import export_session_to_air
 from orchesis import __version__ as ORCHESIS_VERSION
@@ -2061,6 +2062,7 @@ class LLMHTTPProxy:
             isinstance(tools_cfg.get("rules"), dict) or isinstance(tools_cfg.get("allowed"), list)
         ):
             self._tool_policy = ToolPolicyEngine(tools_cfg)
+        self._cost_velocity = CostVelocity()
         self._server: HTTPServer | None = None
         self._start_time = time.time()
         self._stats_lock = threading.Lock()
@@ -2171,6 +2173,7 @@ class LLMHTTPProxy:
             payload["agent_discovery"] = self._agent_discovery.get_stats()
         if self._tool_policy is not None:
             payload["tool_policy"] = self._tool_policy.get_tool_stats()
+        payload["cost_velocity"] = self._cost_velocity.get_stats()
         if self._community is not None:
             payload["community"] = self._community.get_status()
         payload["proxy_engine"] = {
@@ -2338,6 +2341,9 @@ class LLMHTTPProxy:
             "blocked_requests": int(stats.get("blocked", 0)),
             "total_cost_usd": float(stats.get("cost_today", 0.0)),
             "active_agents": active_agents,
+            "cost_velocity": self._cost_velocity.get_stats(),
+            "fleet_health": self._fleet_health_grade(),
+            "money_saved_usd": self._estimate_money_saved(),
             "circuit_breakers": circuit_breakers,
             "budget": budget,
             "recent_events": recent_events[:20],
@@ -2346,6 +2352,36 @@ class LLMHTTPProxy:
             "connection_pool": stats.get("proxy_engine", {}).get("connection_pool", {}),
             "savings": self._build_savings_payload(),
         }
+
+    def _fleet_health_grade(self) -> str:
+        if self._agent_discovery is None or not self._agent_discovery.enabled:
+            return "A"
+        profiles = self._agent_discovery.get_all_agents()
+        if not profiles:
+            return "A"
+        rank = {"A": 0, "B": 1, "C": 2, "D": 3, "F": 4}
+        worst = "A"
+        for item in profiles:
+            grade = str(item.ars_grade or "").upper()
+            if grade not in rank:
+                continue
+            if rank[grade] > rank[worst]:
+                worst = grade
+        return worst
+
+    def _estimate_money_saved(self) -> float:
+        stats = self.stats
+        cache_tokens = 0.0
+        context_tokens = 0.0
+        sem = stats.get("semantic_cache", {})
+        if isinstance(sem, dict):
+            cache_tokens = float(sem.get("total_tokens_saved", 0.0) or 0.0)
+        context_opt = stats.get("context_optimizer", {})
+        if isinstance(context_opt, dict):
+            original = float(context_opt.get("total_original_tokens", 0.0) or 0.0)
+            optimized = float(context_opt.get("total_optimized_tokens", 0.0) or 0.0)
+            context_tokens = max(0.0, original - optimized)
+        return round((cache_tokens + context_tokens) * 0.000003, 6)
 
     def _build_savings_payload(self) -> dict[str, Any]:
         stats = self.stats
@@ -2618,6 +2654,19 @@ class LLMHTTPProxy:
                 self._send_json(handler, 200, {"enabled": False})
                 return
             self._send_json(handler, 200, self._tool_policy.get_blocked_attempts())
+            return
+        if path == "/api/v1/approvals":
+            if self._tool_policy is None:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            self._send_json(
+                handler,
+                200,
+                {
+                    "pending": self._tool_policy.approval_queue.get_pending(),
+                    "stats": self._tool_policy.approval_queue.get_stats(),
+                },
+            )
             return
         if path == "/api/v1/router":
             if self._thompson is None:
@@ -3083,6 +3132,10 @@ class LLMHTTPProxy:
             ctx.handler.send_header("Content-Type", "application/json")
             ctx.handler.send_header("Content-Length", str(len(cached_payload)))
             ctx.handler.send_header("X-Orchesis-Cost", "0.0")
+            ctx.handler.send_header(
+                "X-Orchesis-Cost-Velocity",
+                str(round(float(self._cost_velocity.current_rate_per_hour()), 6)),
+            )
             ctx.handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
             daily_budget = self._budget_cfg.get("daily")
             if isinstance(daily_budget, int | float):
@@ -3738,6 +3791,11 @@ class LLMHTTPProxy:
         return True
 
     def _phase_policy(self, ctx: _RequestContext) -> bool:
+        approval_id = str(
+            ctx.handler.headers.get("X-Orchesis-Approval-Id")
+            or ctx.body.get("approval_id")
+            or ""
+        )
         for call in ctx.parsed_req.tool_calls:
             if self._tool_policy is not None:
                 tp_decision = self._tool_policy.evaluate(
@@ -3745,6 +3803,8 @@ class LLMHTTPProxy:
                     agent_id=str(ctx.behavior_agent_id or "default"),
                     tool_args=call.params if isinstance(call.params, dict) else {},
                     session_id=str(ctx.session_id or "default"),
+                    request_id=str(ctx.request_id or ""),
+                    approval_id=approval_id,
                 )
                 if tp_decision.action == "block":
                     self._inc("blocked")
@@ -3760,7 +3820,17 @@ class LLMHTTPProxy:
                     )
                     return False
                 if tp_decision.action == "approve":
-                    ctx.session_headers["X-Orchesis-Tool-Approval"] = f"{call.name}:required"
+                    self._send_json(
+                        ctx.handler,
+                        202,
+                        {
+                            "status": "pending_approval",
+                            "approval_id": tp_decision.approval_id,
+                            "tool_name": call.name,
+                            "reason": tp_decision.reason,
+                        },
+                    )
+                    return False
                 if tp_decision.action == "warn":
                     ctx.session_headers["X-Orchesis-Tool-Warn"] = f"{call.name}:{tp_decision.reason[:120]}"
                 self._tool_policy.record_usage(
@@ -4034,6 +4104,10 @@ class LLMHTTPProxy:
             ctx.handler.send_header(key, value)
         ctx.handler.send_header("Transfer-Encoding", "chunked")
         ctx.handler.send_header("X-Orchesis-Cost", str(round(float(ctx.proc_result.get("cost", 0.0)), 6)))
+        ctx.handler.send_header(
+            "X-Orchesis-Cost-Velocity",
+            str(round(float(self._cost_velocity.current_rate_per_hour()), 6)),
+        )
         ctx.handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
         daily_budget = self._budget_cfg.get("daily")
         if isinstance(daily_budget, int | float):
@@ -4459,6 +4533,8 @@ class LLMHTTPProxy:
                 if ctx.experiment_id and ctx.variant_name:
                     self._experiment_manager.record_task_outcome(ctx.experiment_id, ctx.variant_name, outcome)
         cost_value = float(ctx.proc_result.get("cost", 0.0)) if isinstance(ctx.proc_result, dict) else 0.0
+        if cost_value > 0.0:
+            self._cost_velocity.record(cost_value)
         if self._spend_rate_detector is not None and cost_value > 0.0:
             # Record actual cost from upstream response. This updates the spend-rate
             # detector for future checks. See budget phase comment on eventual consistency.
@@ -4554,6 +4630,10 @@ class LLMHTTPProxy:
             ctx.handler.send_response(ctx.resp_status)
             self._copy_upstream_headers(ctx.handler, ctx.resp_headers, len(ctx.resp_body))
             ctx.handler.send_header("X-Orchesis-Cost", str(round(float(ctx.proc_result.get("cost", 0.0)), 6)))
+            ctx.handler.send_header(
+                "X-Orchesis-Cost-Velocity",
+                str(round(float(self._cost_velocity.current_rate_per_hour()), 6)),
+            )
             ctx.handler.send_header("X-Orchesis-Daily-Total", str(round(self._cost_tracker.get_daily_total(), 4)))
             daily_budget = self._budget_cfg.get("daily")
             if isinstance(daily_budget, int | float):
@@ -4646,6 +4726,22 @@ class LLMHTTPProxy:
                     export_path = "telemetry_export.jsonl"
                     count = self._telemetry_collector.export_jsonl(export_path)
                 self._send_json(handler, 200, {"exported": count, "path": export_path})
+                return
+            if request_path.startswith("/api/v1/approvals/") and request_path.endswith("/approve"):
+                if self._tool_policy is None:
+                    self._send_json(handler, 200, {"enabled": False})
+                    return
+                approval_id = request_path.split("/api/v1/approvals/", 1)[1].rsplit("/approve", 1)[0].strip("/")
+                ok = self._tool_policy.approval_queue.approve(approval_id)
+                self._send_json(handler, 200 if ok else 404, {"approved": ok, "approval_id": approval_id})
+                return
+            if request_path.startswith("/api/v1/approvals/") and request_path.endswith("/deny"):
+                if self._tool_policy is None:
+                    self._send_json(handler, 200, {"enabled": False})
+                    return
+                approval_id = request_path.split("/api/v1/approvals/", 1)[1].rsplit("/deny", 1)[0].strip("/")
+                ok = self._tool_policy.approval_queue.deny(approval_id)
+                self._send_json(handler, 200 if ok else 404, {"denied": ok, "approval_id": approval_id})
                 return
             if request_path == "/kill":
                 self._handle_kill(handler)

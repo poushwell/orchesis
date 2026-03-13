@@ -106,6 +106,36 @@ def get_dashboard_html() -> str:
     }
     .grid-4 { display: grid; gap: 12px; grid-template-columns: repeat(4, minmax(160px, 1fr)); }
     .grid-2 { display: grid; gap: 12px; grid-template-columns: 1.4fr 1fr; }
+    .hero-metrics {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(3, minmax(220px, 1fr));
+    }
+    .hero-card {
+      border-radius: var(--radius);
+      padding: 20px;
+      border: 1px solid var(--border);
+      text-align: center;
+      background: var(--panel);
+    }
+    .hero-number {
+      font-size: clamp(48px, 6vw, 72px);
+      line-height: 1;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+    }
+    .hero-label { margin-top: 8px; color: var(--text-secondary); font-weight: 650; }
+    .hero-blocked .hero-number { color: var(--danger); }
+    .hero-saved .hero-number {
+      background: linear-gradient(90deg, var(--ok), #5AA8FF);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .hero-health .hero-number {
+      background: linear-gradient(90deg, #34d399, #5AA8FF);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
     .panel {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -392,11 +422,18 @@ def get_dashboard_html() -> str:
     </div>
 
     <section id="shield" class="screen active">
-      <div class="panel hero">
-        <div id="hero-pulse" class="pulse status-clear"></div>
-        <div>
-          <div id="hero-label" class="metric-value">ALL CLEAR</div>
-          <div class="subtle">Uptime: <span id="hero-uptime">--</span></div>
+      <div class="hero-metrics">
+        <div class="hero-card hero-blocked">
+          <div class="hero-number" id="blocked-count">0</div>
+          <div class="hero-label">Threats Blocked</div>
+        </div>
+        <div class="hero-card hero-saved">
+          <div class="hero-number" id="money-saved">$0.00</div>
+          <div class="hero-label">Money Saved</div>
+        </div>
+        <div class="hero-card hero-health">
+          <div class="hero-number" id="fleet-health">A</div>
+          <div class="hero-label">Fleet Health</div>
         </div>
       </div>
       <div class="grid-4">
@@ -416,9 +453,9 @@ def get_dashboard_html() -> str:
           <svg id="spark-cost" class="sparkline" viewBox="0 0 60 20" preserveAspectRatio="none"></svg>
         </div>
         <div class="panel">
-          <div class="subtle">🤖 Active Agents</div>
-          <div id="m-agents" class="metric-value" data-raw="0">0</div>
-          <svg id="spark-agents" class="sparkline" viewBox="0 0 60 20" preserveAspectRatio="none"></svg>
+          <div class="subtle">⚡ Cost Velocity</div>
+          <div id="m-cost-velocity" class="metric-value" data-raw="0">$0.00/h</div>
+          <div class="subtle">24h projection: <span id="m-cost-projection">$0.00</span></div>
         </div>
       </div>
       <div class="grid-2">
@@ -751,18 +788,22 @@ def get_dashboard_html() -> str:
       const pulse = document.getElementById("hero-pulse");
       const label = document.getElementById("hero-label");
       const badge = document.getElementById("status-badge");
-      pulse.classList.remove("status-clear", "status-monitoring", "status-alert");
-      if(status === "alert"){
-        pulse.classList.add("status-alert");
-        label.textContent = "ALERT";
-      }else if(status === "monitoring"){
-        pulse.classList.add("status-monitoring");
-        label.textContent = "MONITORING";
-      }else{
-        pulse.classList.add("status-clear");
-        label.textContent = "ALL CLEAR";
+      if (pulse && label) {
+        pulse.classList.remove("status-clear", "status-monitoring", "status-alert");
+        if(status === "alert"){
+          pulse.classList.add("status-alert");
+          label.textContent = "ALERT";
+        }else if(status === "monitoring"){
+          pulse.classList.add("status-monitoring");
+          label.textContent = "MONITORING";
+        }else{
+          pulse.classList.add("status-clear");
+          label.textContent = "ALL CLEAR";
+        }
       }
-      badge.textContent = "Status: " + (status || "--");
+      if (badge) {
+        badge.textContent = "Status: " + (status || "--");
+      }
     }
 
     function renderCostChart(points){
@@ -822,17 +863,36 @@ def get_dashboard_html() -> str:
       if(!data){ return; }
       lastOverview = data;
       setStatus(data.status || "clear");
-      document.getElementById("hero-uptime").textContent = fmtDuration(data.uptime_seconds || 0);
       const blocked = Number(data.blocked_requests || 0);
       const total = Math.max(1, Number(data.total_requests || 0));
       updateAnimatedMetric("m-requests", Number(data.total_requests || 0), (v)=>Math.round(v).toLocaleString());
       updateAnimatedMetric("m-blocked", blocked, (v)=>`${Math.round(v).toLocaleString()} (${((v/total)*100).toFixed(1)}%)`);
       updateAnimatedMetric("m-cost", Number(data.total_cost_usd || 0), (v)=>"$" + Number(v || 0).toFixed(2));
-      updateAnimatedMetric("m-agents", Number(data.active_agents || 0), (v)=>Math.round(v).toLocaleString());
+      const velocity = (data && data.cost_velocity) ? data.cost_velocity : {};
+      updateAnimatedMetric("m-cost-velocity", Number(velocity.current_rate_per_hour || 0), (v)=>"$" + Number(v || 0).toFixed(2) + "/h");
+      const projectionEl = document.getElementById("m-cost-projection");
+      if (projectionEl) {
+        projectionEl.textContent = fmtMoney(Number(velocity.projection_24h || 0));
+      }
       updateSparkline("requests", Number(data.total_requests || 0));
       updateSparkline("blocked", blocked);
       updateSparkline("cost", Number(data.total_cost_usd || 0));
-      updateSparkline("agents", Number(data.active_agents || 0));
+      updateSparkline("cost-velocity", Number(velocity.current_rate_per_hour || 0));
+      const blockedHero = document.getElementById("blocked-count");
+      if (blockedHero) {
+        blockedHero.textContent = Math.round(blocked).toLocaleString();
+      }
+      const moneySavedHero = document.getElementById("money-saved");
+      if (moneySavedHero) {
+        moneySavedHero.textContent = fmtMoney(Number(data.money_saved_usd || 0));
+      }
+      const fleetHero = document.getElementById("fleet-health");
+      if (fleetHero) {
+        const grade = String(data.fleet_health || "A").toUpperCase();
+        fleetHero.textContent = grade;
+        const colorMap = { A: "#22c55e", B: "#84cc16", C: "#facc15", D: "#f97316", F: "#ef4444" };
+        fleetHero.style.webkitTextFillColor = colorMap[grade] || "#22c55e";
+      }
 
       const ti = (stats && stats.threat_intel) ? stats.threat_intel : {};
       const sc = (stats && stats.semantic_cache) ? stats.semantic_cache : {};
