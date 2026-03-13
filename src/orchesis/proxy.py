@@ -66,6 +66,7 @@ from orchesis.session_risk import RiskSignal, SessionRiskAccumulator
 from orchesis.flow_xray import FlowAnalyzer, FlowXRayConfig
 from orchesis.ars import AgentReliabilityScore
 from orchesis.adaptive_detector import AdaptiveDetector
+from orchesis.community import CommunityClient
 from orchesis.message_chain import validate_tool_chain
 from orchesis.dashboard import get_dashboard_html
 from orchesis.air_export import export_session_to_air
@@ -2013,6 +2014,14 @@ class LLMHTTPProxy:
                 )
             except Exception:
                 self._telemetry_collector = None
+        self._community: CommunityClient | None = None
+        community_cfg = self._policy.get("community")
+        if isinstance(community_cfg, dict) and bool(community_cfg.get("enabled", False)):
+            try:
+                self._community = CommunityClient(community_cfg)
+                self._community.start()
+            except Exception:
+                self._community = None
         adaptive_cfg = self._policy.get("adaptive_detection")
         self._adaptive_detector: AdaptiveDetector | None = None
         if isinstance(adaptive_cfg, dict) and bool(adaptive_cfg.get("enabled", False)):
@@ -2115,6 +2124,8 @@ class LLMHTTPProxy:
             payload["ars"] = self._ars.stats
         if self._adaptive_detector is not None:
             payload["adaptive_detection"] = self._adaptive_detector.get_stats()
+        if self._community is not None:
+            payload["community"] = self._community.get_status()
         payload["proxy_engine"] = {
             "thread_pool": {
                 "max_workers": int(self._max_workers),
@@ -2187,6 +2198,8 @@ class LLMHTTPProxy:
             self._alert_manager.stop()
         if self._telemetry_collector is not None:
             self._telemetry_collector.stop()
+        if self._community is not None:
+            self._community.stop()
 
     def _inc(self, field: str) -> None:
         with self._stats_lock:
@@ -2501,6 +2514,12 @@ class LLMHTTPProxy:
                 self._send_json(handler, 200, {"enabled": False})
                 return
             self._send_json(handler, 200, self._adaptive_detector.get_agent_status(agent_id))
+            return
+        if path == "/api/v1/community":
+            if self._community is None:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            self._send_json(handler, 200, asdict(self._community.get_stats()))
             return
         if path.startswith("/api/v1/session-risk/"):
             session_id = path.split("/api/v1/session-risk/", 1)[1].strip("/")
@@ -3330,6 +3349,25 @@ class LLMHTTPProxy:
                 detection.anomaly_score,
                 detection.risk_level,
             )
+        if self._community is not None and detection.anomaly_score >= self._community.min_anomaly_score:
+            ars_snapshot: dict[str, Any] | None = None
+            if self._ars is not None:
+                ars_result = self._ars.compute(agent_id)
+                if ars_result is not None:
+                    ars_snapshot = {"grade": ars_result.grade, "score": ars_result.score}
+            telemetry_snapshot = {
+                "input_tokens": int(ctx.proc_result.get("input_tokens", 0) or 0),
+                "output_tokens": int(ctx.proc_result.get("output_tokens", 0) or 0),
+                "model_used": str(ctx.body.get("model", "")),
+                "total_ms": (time.perf_counter() - float(ctx.request_started or 0.0)) * 1000.0,
+                "cache_hit": bool(ctx.from_semantic_cache),
+            }
+            self._community.record_detection(
+                detection_result=detection,
+                telemetry_record=telemetry_snapshot,
+                ars_data=ars_snapshot,
+                request_meta={"model": str(ctx.body.get("model", "")), "agent_type": str(agent_id or "unknown")},
+            )
         return True
 
     def _phase_threat_intel(self, ctx: _RequestContext) -> bool:
@@ -3369,6 +3407,12 @@ class LLMHTTPProxy:
                 headers=headers_dict or None,
             )
             self._apply_threat_context_adjustments(messages, matches)
+            if self._community is not None:
+                try:
+                    community_sigs = self._community.get_community_signatures()
+                    ctx.proc_result["community_signatures_checked"] = len(community_sigs)
+                except Exception:
+                    ctx.proc_result["community_signatures_checked"] = 0
             if matches:
                 ctx.threat_matches = matches
                 if self._session_risk:
