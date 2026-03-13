@@ -65,6 +65,7 @@ from orchesis.response_handler import ResponseProcessor, SECRET_PATTERNS
 from orchesis.session_risk import RiskSignal, SessionRiskAccumulator
 from orchesis.flow_xray import FlowAnalyzer, FlowXRayConfig
 from orchesis.ars import AgentReliabilityScore
+from orchesis.adaptive_detector import AdaptiveDetector
 from orchesis.message_chain import validate_tool_chain
 from orchesis.dashboard import get_dashboard_html
 from orchesis.air_export import export_session_to_air
@@ -1773,6 +1774,7 @@ class _RequestContext:
     content_loop_count: int = 0
     spend_rate_per_min: float = 0.0
     request_saved_usd: float = 0.0
+    adaptive_detection_result: Any = None
 
 
 class LLMHTTPProxy:
@@ -2011,6 +2013,10 @@ class LLMHTTPProxy:
                 )
             except Exception:
                 self._telemetry_collector = None
+        adaptive_cfg = self._policy.get("adaptive_detection")
+        self._adaptive_detector: AdaptiveDetector | None = None
+        if isinstance(adaptive_cfg, dict) and bool(adaptive_cfg.get("enabled", False)):
+            self._adaptive_detector = AdaptiveDetector(adaptive_cfg)
         self._server: HTTPServer | None = None
         self._start_time = time.time()
         self._stats_lock = threading.Lock()
@@ -2107,6 +2113,8 @@ class LLMHTTPProxy:
             payload["session_risk"] = self._session_risk.stats
         if self._ars is not None:
             payload["ars"] = self._ars.stats
+        if self._adaptive_detector is not None:
+            payload["adaptive_detection"] = self._adaptive_detector.get_stats()
         payload["proxy_engine"] = {
             "thread_pool": {
                 "max_workers": int(self._max_workers),
@@ -2480,6 +2488,19 @@ class LLMHTTPProxy:
                 else {"enabled": False, "stats": {"sent": 0, "dropped_rate_limit": 0, "dropped_severity": 0, "errors": 0}}
             )
             self._send_json(handler, 200, payload)
+            return
+        if path == "/api/v1/detection":
+            if self._adaptive_detector is None:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            self._send_json(handler, 200, self._adaptive_detector.get_all_agents())
+            return
+        if path.startswith("/api/v1/detection/"):
+            agent_id = path.split("/api/v1/detection/", 1)[1].strip("/")
+            if self._adaptive_detector is None:
+                self._send_json(handler, 200, {"enabled": False})
+                return
+            self._send_json(handler, 200, self._adaptive_detector.get_agent_status(agent_id))
             return
         if path.startswith("/api/v1/session-risk/"):
             session_id = path.split("/api/v1/session-risk/", 1)[1].strip("/")
@@ -3251,6 +3272,66 @@ class LLMHTTPProxy:
                 return False
         return True
 
+    def _phase_adaptive_detection(self, ctx: _RequestContext) -> bool:
+        if self._adaptive_detector is None:
+            return True
+        agent_id = str(ctx.behavior_agent_id or extract_agent_id(ctx.handler.headers) or "default")
+        request_data = {
+            "messages": ctx.body.get("messages", []),
+            "model": str(ctx.body.get("model", "")),
+            "tools": ctx.body.get("tools", []),
+            "timestamp": time.time(),
+            "tokens": int(ctx.body.get("max_completion_tokens", ctx.body.get("max_tokens", 0)) or 0),
+        }
+        detection = self._adaptive_detector.check(agent_id, request_data)
+        ctx.adaptive_detection_result = detection
+        ctx.proc_result["adaptive_anomaly_score"] = float(detection.anomaly_score)
+        ctx.proc_result["adaptive_risk_level"] = detection.risk_level
+        ctx.proc_result["adaptive_action"] = detection.recommended_action
+        ctx.proc_result["adaptive_detection_anomalous"] = bool(detection.is_anomalous)
+        ctx.proc_result["adaptive_drift_type"] = str(detection.drift_type)
+        ctx.session_headers["X-Orchesis-Anomaly-Score"] = str(int(detection.anomaly_score))
+        ctx.session_headers["X-Orchesis-Risk-Level"] = detection.risk_level
+        if detection.is_anomalous and self._session_risk is not None:
+            self._session_risk.record_signal(
+                str(ctx.session_id or "unknown"),
+                RiskSignal(
+                    category="adaptive_anomaly",
+                    confidence=max(0.0, min(1.0, detection.anomaly_score / 100.0)),
+                    severity="high" if detection.anomaly_score >= 70 else "medium",
+                    source="adaptive_detection",
+                    description=f"{detection.risk_level}:{detection.drift_type}",
+                ),
+            )
+        if detection.recommended_action == "block":
+            self._inc("blocked")
+            self._send_json(
+                ctx.handler,
+                429,
+                {
+                    "error": {
+                        "type": "adaptive_detection_block",
+                        "message": (
+                            f"Anomaly score {detection.anomaly_score:.0f} exceeds "
+                            "critical threshold"
+                        ),
+                    }
+                },
+                extra_headers={
+                    "X-Orchesis-Anomaly-Score": str(int(detection.anomaly_score)),
+                    "X-Orchesis-Risk-Level": detection.risk_level,
+                },
+            )
+            return False
+        if detection.recommended_action == "warn":
+            _HTTP_PROXY_LOGGER.warning(
+                "adaptive detection warning agent=%s score=%.2f level=%s",
+                agent_id,
+                detection.anomaly_score,
+                detection.risk_level,
+            )
+        return True
+
     def _phase_threat_intel(self, ctx: _RequestContext) -> bool:
         """Scan request against threat intelligence database."""
         matches: list[Any] = []
@@ -4015,6 +4096,13 @@ class LLMHTTPProxy:
                     ctx.handler.send_header("X-Orchesis-Anomaly-Score", ctx.behavior_score_header)
                 if ctx.behavior_dims_header:
                     ctx.handler.send_header("X-Orchesis-Anomaly-Dimensions", ctx.behavior_dims_header)
+            adaptive_score = float(ctx.proc_result.get("adaptive_anomaly_score", 0.0) or 0.0)
+            if self._adaptive_detector is not None and adaptive_score > 0.0:
+                ctx.handler.send_header("X-Orchesis-Adaptive-Score", f"{adaptive_score:.1f}")
+                ctx.handler.send_header(
+                    "X-Orchesis-Adaptive-Risk-Level",
+                    str(ctx.proc_result.get("adaptive_risk_level", "low")),
+                )
             if self._config.cors:
                 ctx.handler.send_header("Access-Control-Allow-Origin", "*")
             ctx.handler.end_headers()
@@ -4156,6 +4244,9 @@ class LLMHTTPProxy:
                 _end_root_early()
                 return
             if not self._run_phase_span(ctx, "behavioral", self._phase_behavioral):
+                _end_root_early()
+                return
+            if not self._run_phase_span(ctx, "adaptive_detection", self._phase_adaptive_detection):
                 _end_root_early()
                 return
             if not self._run_phase_span(ctx, "budget", self._phase_budget):
