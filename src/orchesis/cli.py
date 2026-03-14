@@ -24,6 +24,7 @@ from orchesis.auth import AgentAuthenticator, CredentialStore
 from orchesis.audit import AuditEngine, AuditQuery
 from orchesis.compliance import ComplianceEngine, FRAMEWORK_CHECKS, FrameworkCrossReference
 from orchesis.ari import AgentReadinessIndex
+from orchesis.benchmark import BenchmarkSuite
 from orchesis.contrib.ioc_database import IoCMatcher
 from orchesis.contrib.network_scanner import NetworkExposureScanner
 from orchesis.contrib.remote_scanner import RemoteSkillScanner
@@ -2705,6 +2706,60 @@ def reliability_report(output_format: str) -> None:
         click.echo(generator.to_json(report))
         return
     click.echo(generator.to_markdown(report))
+
+
+@main.command("benchmark")
+@click.option("--category", default=None)
+@click.option("--export", "export_path", default=None, type=click.Path())
+def benchmark_command(category: str | None, export_path: str | None) -> None:
+    """Run Orchesis benchmark suite."""
+
+    def _bar(rate: float, width: int = 10) -> str:
+        filled = int(round(max(0.0, min(1.0, rate)) * width))
+        return ("█" * filled) + ("░" * (width - filled))
+
+    suite = BenchmarkSuite()
+    if category:
+        report = suite.run_category(category)
+    else:
+        report = suite.run()
+
+    click.echo("Orchesis Benchmark Suite v1")
+    click.echo("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    click.echo(f"Running {report.total} cases...")
+    click.echo("")
+
+    for cat in ("security", "cost", "reliability", "compliance"):
+        row = report.by_category.get(cat)
+        if row is None:
+            continue
+        total = int(row.get("total", 0))
+        passed = int(row.get("passed", 0))
+        rate = float(row.get("rate", 0.0))
+        click.echo(f"{cat.capitalize():<12} {passed:>2}/{total:<2} {rate*100:>5.1f}%  {_bar(rate)}")
+
+    click.echo("")
+    click.echo(f"Overall: {report.passed}/{report.total}  {report.pass_rate*100:.1f}%")
+    click.echo("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+    failures = [result for result in report.results if not result.passed]
+    if failures:
+        click.echo(f"{len(failures)} failures:")
+        severity_by_case = {
+            case.id: case.severity
+            for case in (suite._cases if category is None else [item for item in suite._cases if item.category == category])
+        }
+        for result in failures:
+            severity = severity_by_case.get(result.case_id, "unknown")
+            click.echo(
+                f"  ✗ {result.case_id} ({severity}): expected {result.expected_action}, got {result.actual_action}"
+            )
+
+    if export_path:
+        suffix = Path(export_path).suffix.lower()
+        fmt = "csv" if suffix == ".csv" else "json"
+        BenchmarkSuite.export_report(report, export_path, fmt=fmt)
+        click.echo(f"\nExported report to {export_path}")
 
 
 @main.command("readiness")
