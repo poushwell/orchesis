@@ -42,10 +42,11 @@ def test_ci_workflow_valid_yaml() -> None:
     assert isinstance(data, dict)
 
 
-def test_ci_tests_multiple_python_versions() -> None:
+def test_ci_tests_python_312_only() -> None:
     content = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    assert '"3.11"' in content
     assert '"3.12"' in content
+    assert '"3.11"' not in content
+    assert '"3.13"' not in content
 
 
 def test_readme_has_badges() -> None:
