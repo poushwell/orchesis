@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +17,32 @@ from orchesis.contrib.ioc_database import IoCMatcher
 from orchesis.contrib.secret_scanner import SecretScanner
 
 SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
+REMEDIATION_GUIDE = {
+    "supply_chain_cve": "Update package to fixed version listed in CVE advisory.",
+    "malicious_package": "Remove this package immediately. It is confirmed malicious.",
+    "typosquatting": "Verify package name against official registry. Use exact name.",
+    "supply_chain": "Pin package to exact version using @X.Y.Z or ==X.Y.Z syntax.",
+    "version_pinning": "Add explicit version: npx package@1.2.3 or uvx package==1.2.3",
+    "secret_leak": "Move secrets to environment variables or a secrets manager. Never hardcode.",
+    "docker_security": "Review Docker security hardening guide: use --user, drop capabilities, add resource limits.",
+    "permissions": "Restrict autoApprove to specific tools only. Avoid wildcards.",
+    "transport_security": "Use HTTPS/WSS for all remote connections. Never transmit over plaintext.",
+    "shell_execution": "Restrict shell access to specific commands. Use allowlists.",
+    "privilege_escalation": "Remove sudo/doas from MCP server commands. Run with least privilege.",
+    "path_traversal": "Validate and sanitize all path arguments. Use absolute paths with allowlists.",
+    "file_access": "Restrict filesystem access to specific subdirectories only.",
+    "exfiltration_risk": "Audit data flow between filesystem and network servers. Add approval gates.",
+    "attack_surface": "Reduce server count. Split into separate configs per use case.",
+    "credential_sharing": "Use unique credentials per server. Rotate shared secrets immediately.",
+    "cors_missing": "Add explicit CORS configuration with allowed origins allowlist.",
+    "binding_exposure": "Bind to 127.0.0.1 instead of 0.0.0.0. Use reverse proxy for external access.",
+    "no_auth": "Enable authentication. Add API key or token to server configuration.",
+    "websocket_no_origin_check": "Add origin validation to WebSocket server configuration.",
+    "suspicious_url": "Verify URL legitimacy. Use HTTPS. Avoid raw IPs and suspicious domains.",
+    "dangerous_tools": "Restrict tool list to minimum required. Remove shell_execute, exec, file_write.",
+    "deprecated_package": "Replace deprecated package with a maintained alternative.",
+}
 
 VULNERABLE_PACKAGES = {
     "mcp-remote": {"fixed": "0.1.16", "cvss": 9.6, "cve": "CVE-2025-6514"},
@@ -61,6 +87,12 @@ EXTENDED_SECRET_PATTERNS = [
 
 SENSITIVE_MOUNTS = ["~/.ssh", "~/.aws", "~/.kube", "/etc", "~/.gnupg", "~/.config"]
 DANGEROUS_CAPS = ["SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "DAC_OVERRIDE"]
+DEPRECATED_PACKAGES = {
+    "mcp-server-fetch": "Consider @modelcontextprotocol/server-fetch instead",
+    "mcp-tools": "Package unmaintained since 2024-06",
+    "mcp-server-basic": "Superseded by official SDK",
+    "langchain-mcp": "Use official MCP SDK directly",
+}
 SHELL_SERVER_PATTERNS = [
     r"\bshell\b",
     r"\bterminal\b",
@@ -101,6 +133,11 @@ class ScanFinding:
     description: str
     location: str
     evidence: str
+    remediation: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.remediation:
+            self.remediation = REMEDIATION_GUIDE.get(self.category, "Review and address this security issue.")
 
 
 @dataclass
@@ -111,6 +148,8 @@ class ScanReport:
     risk_score: int
     summary: str
     scanned_at: str
+    server_scores: dict[str, int] = field(default_factory=dict)
+    attack_surface_score: int = 0
 
 
 def _now_iso() -> str:
@@ -159,10 +198,18 @@ def format_report_text(report: ScanReport, threshold: str = "info") -> str:
             lines.append(
                 f"  [{item.severity.upper():<8}] {item.category:<18} {item.location}: {item.description}"
             )
+            lines.append(f"             → {item.remediation}")
+    server_scores = getattr(report, "server_scores", {}) or {}
+    if server_scores:
+        lines.append("")
+        lines.append("Server Risk Scores:")
+        for server_name, score in sorted(server_scores.items()):
+            lines.append(f"  {server_name}: {int(score):>3}/100")
     lines.extend(
         [
             "",
             f"Risk Score: {report.risk_score}/100",
+            f"Attack Surface Score: {int(getattr(report, 'attack_surface_score', 0))}/100",
             f"Summary: {report.summary}",
         ]
     )
@@ -172,6 +219,7 @@ def format_report_text(report: ScanReport, threshold: str = "info") -> str:
 def format_report_markdown(report: ScanReport, threshold: str = "info") -> str:
     lines = [f"# Scan Report: `{report.target}`", "", f"- Type: `{report.target_type}`"]
     lines.append(f"- Risk Score: `{report.risk_score}/100`")
+    lines.append(f"- Attack Surface Score: `{int(getattr(report, 'attack_surface_score', 0))}/100`")
     lines.append(f"- Summary: {report.summary}")
     lines.append("")
     lines.append("## Findings")
@@ -183,6 +231,13 @@ def format_report_markdown(report: ScanReport, threshold: str = "info") -> str:
             lines.append(
                 f"- **{item.severity.upper()}** `{item.category}` `{item.location}` - {item.description}"
             )
+            lines.append(f"  - **Remediation:** {item.remediation}")
+    server_scores = getattr(report, "server_scores", {}) or {}
+    if server_scores:
+        lines.append("")
+        lines.append("## Server Risk Scores")
+        for server_name, score in sorted(server_scores.items()):
+            lines.append(f"- `{server_name}`: `{int(score)}/100`")
     return "\n".join(lines)
 
 
@@ -592,6 +647,10 @@ class McpConfigScanner:
             self._check_docker_security(name, server, findings)
 
         self._check_cross_server(servers, findings)
+        server_scores = self._compute_server_scores(servers, findings)
+        critical_count = sum(1 for item in findings if item.severity == "critical")
+        high_count = sum(1 for item in findings if item.severity == "high")
+        attack_surface_score = min(100, len(servers) * 5 + critical_count * 15 + high_count * 8)
 
         return ScanReport(
             target=str(source),
@@ -600,6 +659,8 @@ class McpConfigScanner:
             risk_score=_calc_risk_score(findings),
             summary=_build_summary(findings),
             scanned_at=_now_iso(),
+            server_scores=server_scores,
+            attack_surface_score=attack_surface_score,
         )
 
     def _check_supply_chain(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
@@ -695,6 +756,17 @@ class McpConfigScanner:
                         description="Package not pinned to explicit version — may pull breaking or malicious updates",
                         location=f"$.mcpServers.{name}.args",
                         evidence=package,
+                    )
+                )
+            if pkg_name in DEPRECATED_PACKAGES:
+                findings.append(
+                    ScanFinding(
+                        severity="low",
+                        category="deprecated_package",
+                        description=f"Package '{pkg_name}' is deprecated or abandoned",
+                        location=f"$.mcpServers.{name}.args",
+                        evidence=package,
+                        remediation=DEPRECATED_PACKAGES[pkg_name],
                     )
                 )
 
@@ -1015,6 +1087,18 @@ class McpConfigScanner:
         if low in {"password", "secret", "token", "apikey", "api_key", "changeme", "default"}:
             return False
         return bool(re.search(r"[a-zA-Z]", value) and re.search(r"\d", value))
+
+    @staticmethod
+    def _compute_server_scores(servers: list[tuple[str, dict[str, Any]]], findings: list[ScanFinding]) -> dict[str, int]:
+        weights = {"critical": 40, "high": 20, "medium": 10, "low": 5, "info": 1}
+        scores: dict[str, int] = {name: 0 for name, _ in servers}
+        for finding in findings:
+            for name in list(scores.keys()):
+                prefix = f"$.mcpServers.{name}"
+                if finding.location.startswith(prefix):
+                    scores[name] += int(weights.get(finding.severity.lower(), 0))
+                    break
+        return {name: min(100, score) for name, score in scores.items()}
 
     def _check_docker_security(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
         args = self._extract_args(server)
@@ -1516,11 +1600,15 @@ def scan_path(path: Path) -> list[ScanReport]:
 
 
 def report_to_dict(report: ScanReport) -> dict[str, Any]:
+    server_scores = getattr(report, "server_scores", {}) or {}
+    attack_surface_score = int(getattr(report, "attack_surface_score", 0))
     return {
         "target": report.target,
         "target_type": report.target_type,
         "findings": [asdict(item) for item in report.findings],
         "risk_score": report.risk_score,
+        "server_scores": dict(server_scores),
+        "attack_surface_score": attack_surface_score,
         "summary": report.summary,
         "scanned_at": report.scanned_at,
     }
