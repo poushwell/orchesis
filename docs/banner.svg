@@ -1,27 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-label="Orchesis banner">
-  <defs>
-    <linearGradient id="bgGlow" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#111111"/>
-      <stop offset="100%" stop-color="#0a0a0a"/>
-    </linearGradient>
-    <radialGradient id="accentA" cx="0.15" cy="0.2" r="0.6">
-      <stop offset="0%" stop-color="#5aa8ff" stop-opacity="0.18"/>
-      <stop offset="100%" stop-color="#5aa8ff" stop-opacity="0"/>
-    </radialGradient>
-    <radialGradient id="accentB" cx="0.85" cy="0.8" r="0.7">
-      <stop offset="0%" stop-color="#00e5a0" stop-opacity="0.16"/>
-      <stop offset="100%" stop-color="#00e5a0" stop-opacity="0"/>
-    </radialGradient>
-  </defs>
+  <rect x="0" y="0" width="1280" height="320" fill="#0a0a0a"/>
 
-  <rect x="0" y="0" width="1280" height="320" fill="url(#bgGlow)"/>
-  <rect x="0" y="0" width="1280" height="320" fill="url(#accentA)"/>
-  <rect x="0" y="0" width="1280" height="320" fill="url(#accentB)"/>
-
-  <g fill="#ffffff" font-family="Inter, Segoe UI, Arial, sans-serif">
-    <text x="80" y="136" font-size="92" font-weight="800" letter-spacing="3">ORCHESIS</text>
-    <text x="84" y="188" font-size="32" font-weight="500" fill="#d8d8e2">AI Agent Control Plane</text>
-    <text x="84" y="242" font-size="30" font-weight="400" fill="#a8a8bd">Works whether AI wins or loses.</text>
+  <g font-family="Inter, Segoe UI, Arial, sans-serif">
+    <text x="80" y="138" font-size="96" font-weight="800" letter-spacing="3" fill="#ffffff">ORCHESIS</text>
+    <text x="84" y="196" font-size="32" font-weight="500" fill="#ffffff">AI Agent Control Plane</text>
+    <text x="84" y="246" font-size="30" font-weight="400" fill="#ffffff">Works whether AI wins or loses.</text>
   </g>
 </svg>
 
