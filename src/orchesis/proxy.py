@@ -76,6 +76,7 @@ from orchesis.agent_discovery import AgentDiscovery
 from orchesis.tool_policy import ToolPolicyEngine
 from orchesis.cost_velocity import CostVelocity
 from orchesis.dashboard import get_dashboard_html
+from orchesis.error_responses import ErrorResponseBuilder
 from orchesis.air_export import export_session_to_air
 from orchesis import __version__ as ORCHESIS_VERSION
 from orchesis.compliance import ComplianceEngine, Framework, Severity
@@ -3462,15 +3463,16 @@ class LLMHTTPProxy:
                 return False
             if bool(budget_status.get("over_budget", False)):
                 self._inc("blocked")
+                smart = ErrorResponseBuilder.build(
+                    "budget_exceeded",
+                    limit=f"{float(self._budget_cfg.get('daily', 0.0) or 0.0):.2f}",
+                    current=f"{float(budget_status.get('daily_spent', 0.0) or 0.0):.2f}",
+                )
                 self._send_json(
                     ctx.handler,
                     429,
-                    {
-                        "error": {
-                            "type": "budget_exceeded",
-                            "message": f"Daily budget exceeded. Spent ${budget_status.get('daily_spent', 0):.4f}",
-                        }
-                    },
+                        self._smart_error_payload(smart, "budget_exceeded"),
+                    extra_headers={"X-Orchesis-Error": ErrorResponseBuilder.to_header(smart)},
                 )
                 if self._alert_manager:
                     self._alert_manager.alert(AlertEvent(severity=AlertSeverity.CRITICAL, event_type="budget_exceeded", title="Budget exceeded", details=f"Daily budget exceeded. Spent ${budget_status.get('daily_spent', 0):.4f}", session_id=ctx.session_id))
@@ -3680,15 +3682,19 @@ class LLMHTTPProxy:
                     status="rate_limited",
                 )
             self._inc("blocked")
+            smart = ErrorResponseBuilder.build(
+                "rate_limited",
+                agent=agent_id,
+                current=1,
+                max=1,
+                window="auto-healer window",
+                retry_after=60,
+            )
             self._send_json(
                 ctx.handler,
                 429,
-                {
-                    "error": {
-                        "type": "agent_rate_limited",
-                        "message": "Agent temporarily rate-limited due to anomalous behavior",
-                    }
-                },
+                self._smart_error_payload(smart, "agent_rate_limited"),
+                extra_headers={"X-Orchesis-Error": ErrorResponseBuilder.to_header(smart)},
             )
             return False
         detection = ctx.adaptive_detection_result
@@ -3851,18 +3857,26 @@ class LLMHTTPProxy:
                 )
                 if tp_decision.action == "block":
                     self._inc("blocked")
+                    smart = ErrorResponseBuilder.build(
+                        "tool_blocked",
+                        tool=call.name,
+                        agent=str(ctx.behavior_agent_id or "default"),
+                        allowed="configured policy allow-list",
+                    )
                     self._send_json(
                         ctx.handler,
                         403,
-                        {
-                            "error": {
-                                "type": "tool_policy_block",
-                                "message": f"Tool '{call.name}' blocked: {tp_decision.reason}",
-                            }
-                        },
+                        self._smart_error_payload(smart, "tool_policy_block"),
+                        extra_headers={"X-Orchesis-Error": ErrorResponseBuilder.to_header(smart)},
                     )
                     return False
                 if tp_decision.action == "approve":
+                    smart = ErrorResponseBuilder.build(
+                        "approval_required",
+                        tool=call.name,
+                        agent=str(ctx.behavior_agent_id or "default"),
+                        approval_id=tp_decision.approval_id,
+                    )
                     self._send_json(
                         ctx.handler,
                         202,
@@ -3870,8 +3884,11 @@ class LLMHTTPProxy:
                             "status": "pending_approval",
                             "approval_id": tp_decision.approval_id,
                             "tool_name": call.name,
-                            "reason": tp_decision.reason,
+                            "reason": smart.reason,
+                            "suggestion": smart.suggestion,
+                            "code": smart.code,
                         },
+                        extra_headers={"X-Orchesis-Error": ErrorResponseBuilder.to_header(smart)},
                     )
                     return False
                 if tp_decision.action == "warn":
@@ -3890,10 +3907,19 @@ class LLMHTTPProxy:
             if not decision.allowed:
                 self._inc("blocked")
                 reason = decision.reasons[0] if decision.reasons else "blocked_by_policy"
+                smart = ErrorResponseBuilder.build(
+                    "tool_blocked",
+                    tool=call.name,
+                    agent=str(ctx.behavior_agent_id or "default"),
+                    allowed="configured policy allow-list",
+                )
+                if reason:
+                    smart.reason = f"{smart.reason}. {reason}"
                 self._send_json(
                     ctx.handler,
                     403,
-                    {"error": {"type": "policy_violation", "message": f"Tool '{call.name}' blocked: {reason}"}},
+                    self._smart_error_payload(smart, "policy_violation"),
+                    extra_headers={"X-Orchesis-Error": ErrorResponseBuilder.to_header(smart)},
                 )
                 return False
         return True
@@ -5261,6 +5287,10 @@ class LLMHTTPProxy:
                 maybe = raw_err.get("type", "") or raw_err.get("error", "")
                 if isinstance(maybe, str):
                     error_type = maybe
+            elif raw_err is True and isinstance(payload, dict):
+                maybe_code = payload.get("code", "")
+                if isinstance(maybe_code, str):
+                    error_type = maybe_code
             elif isinstance(raw_err, str):
                 error_type = raw_err
             setattr(handler, "_orchesis_last_error_type", str(error_type))
@@ -5279,3 +5309,16 @@ class LLMHTTPProxy:
             handler.wfile.write(body)
         except (ConnectionAbortedError, BrokenPipeError, OSError):
             return
+
+    @staticmethod
+    def _smart_error_payload(error: Any, error_type: str) -> dict[str, Any]:
+        return {
+            "error": {
+                "type": str(error_type or "policy_violation"),
+                "message": str(getattr(error, "reason", "Request blocked")),
+                "suggestion": str(getattr(error, "suggestion", "")),
+                "severity": str(getattr(error, "severity", "medium")),
+                "detector": str(getattr(error, "detector", "policy")),
+                "code": str(getattr(error, "code", "ORCH-UNKNOWN-001")),
+            }
+        }

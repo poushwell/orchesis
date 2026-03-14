@@ -52,6 +52,8 @@ from orchesis.rules_generator import generate_security_rules_from_policy
 from orchesis.scanner_server import run_scanner_http_server
 from orchesis.scenarios import AdversarialScenarios
 from orchesis.integrity import IntegrityMonitor, build_integrity_alert_callback
+from orchesis.hooks import ClaudeCodeHooks, evaluate_hook_tool, log_hook_tool
+from orchesis.quickstart import QuickstartWizard
 from orchesis.yara_engine import load_yara_rules, scan_with_yara, YaraParser
 from orchesis.scanner import (
     ScanFinding,
@@ -90,6 +92,55 @@ def main(ctx: click.Context) -> None:
     """Orchesis command line interface."""
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
+
+
+@main.group("hooks")
+def hooks_group() -> None:
+    """Manage Claude Code hooks."""
+
+
+@hooks_group.command("install")
+def hooks_install_command() -> None:
+    result = ClaudeCodeHooks().install()
+    click.echo(result.message)
+    raise SystemExit(0 if result.success else 1)
+
+
+@hooks_group.command("uninstall")
+def hooks_uninstall_command() -> None:
+    result = ClaudeCodeHooks().uninstall()
+    click.echo(result.message)
+    raise SystemExit(0 if result.success else 1)
+
+
+@hooks_group.command("status")
+def hooks_status_command() -> None:
+    payload = ClaudeCodeHooks().status()
+    click.echo(json.dumps(payload, ensure_ascii=False))
+    raise SystemExit(0)
+
+
+@main.command("hook-check")
+@click.option("--tool", "tool_name", required=True)
+@click.option("--input", "tool_input", required=True)
+@click.option("--config", "config_path", default=None)
+def hook_check_command(tool_name: str, tool_input: str, config_path: str | None) -> None:
+    """[internal] Check tool call against policy."""
+    code, output = evaluate_hook_tool(tool_name=tool_name, tool_input=tool_input, config_path=config_path)
+    if output:
+        click.echo(output)
+    raise SystemExit(int(code))
+
+
+@main.command("hook-log")
+@click.option("--tool", "tool_name", required=True)
+@click.option("--output", "tool_output", default="")
+@click.option("--config", "config_path", default=None)
+def hook_log_command(tool_name: str, tool_output: str, config_path: str | None) -> None:
+    """[internal] Log tool call result."""
+    ok, log_path = log_hook_tool(tool_name=tool_name, tool_output=tool_output, config_path=config_path)
+    click.echo(f"logged:{log_path}")
+    raise SystemExit(0 if ok else 1)
 
 
 def _percentile_us(values: list[int], percentile: float) -> int:
@@ -253,6 +304,28 @@ def auth_verify(agent_id: str, tool_name: str, params_json: str, secret_key: str
     click.echo(f"  X-Orchesis-Signature: {signature}")
 
 
+@main.command("quickstart")
+@click.option("--preset", type=click.Choice(["openclaw", "openai", "generic", "minimal"]), default=None)
+@click.option("--non-interactive", is_flag=True, default=False)
+@click.option("--budget", type=float, default=10.0)
+@click.option("--output", "output_path", default="orchesis.yaml")
+def quickstart_command(
+    preset: str | None,
+    non_interactive: bool,
+    budget: float,
+    output_path: str,
+) -> None:
+    """Interactive setup wizard for a working config."""
+    wizard = QuickstartWizard()
+    _ = wizard.run(
+        non_interactive=bool(non_interactive),
+        preset=preset,
+        budget=float(budget),
+        output_path=output_path,
+    )
+    raise SystemExit(0)
+
+
 @main.command("new")
 @click.argument("target", type=click.Path(), default=".")
 @click.option("--template", "template_name", type=click.Choice(TEMPLATE_NAMES), default="minimal")
@@ -304,50 +377,55 @@ def new_project(target: str, template_name: str, force: bool) -> None:
 
 
 @main.command("doctor")
-@click.option("--policy", "policy_path", type=click.Path(), default="policy.yaml")
-def doctor(policy_path: str) -> None:
+@click.option("--config", "--policy", "config_path", type=click.Path(), default="policy.yaml")
+def doctor(config_path: str) -> None:
     """Run environment and project diagnostics."""
-    checks: list[tuple[str, bool, str]] = []
+    checks: list[tuple[str, bool, str, bool]] = []
     import importlib.util
+    import socket
     import sys
 
-    py_ok = (sys.version_info.major, sys.version_info.minor) >= (3, 11)
-    checks.append(("python_version", py_ok, f"{sys.version_info.major}.{sys.version_info.minor}"))
+    py_ok = (sys.version_info.major, sys.version_info.minor) >= (3, 12)
+    checks.append(("python_version", py_ok, f"{sys.version_info.major}.{sys.version_info.minor}", True))
+    checks.append(("package_installed", importlib.util.find_spec("orchesis") is not None, "importable", True))
 
-    for module_name in ("yaml", "click", "fastapi", "httpx", "mcp"):
-        checks.append(
-            (
-                f"module:{module_name}",
-                importlib.util.find_spec(module_name) is not None,
-                "importable",
-            )
-        )
-
-    policy_file = Path(policy_path)
+    policy_file = Path(config_path)
+    loaded_policy: dict[str, Any] | None = None
     if policy_file.exists():
         try:
-            policy = load_policy(policy_file)
-            errors = validate_policy(policy)
-            checks.append(("policy_load", True, str(policy_file)))
+            loaded_policy = load_policy(policy_file)
+            errors = validate_policy(loaded_policy)
+            checks.append(("config_found", True, str(policy_file), True))
+            checks.append(
+                (
+                    "config_validate",
+                    len(errors) == 0,
+                    "OK" if not errors else "; ".join(errors[:2]),
+                    True,
+                )
+            )
             checks.append(
                 (
                     "policy_validate",
                     len(errors) == 0,
                     "OK" if not errors else "; ".join(errors[:2]),
+                    True,
                 )
             )
         except Exception as error:  # noqa: BLE001
-            checks.append(("policy_load", False, str(error)))
-            checks.append(("policy_validate", False, "invalid policy"))
+            checks.append(("config_found", True, str(policy_file), True))
+            checks.append(("config_validate", False, str(error), True))
+            checks.append(("policy_validate", False, str(error), True))
     else:
-        checks.append(("policy_load", False, f"missing: {policy_file}"))
-        checks.append(("policy_validate", False, "policy file not found"))
+        checks.append(("config_found", False, f"missing: {policy_file}", True))
+        checks.append(("config_validate", False, "policy file not found", True))
+        checks.append(("policy_validate", False, "policy file not found", True))
 
     template_ok = all(
         (Path(__file__).resolve().parent / "templates" / f"{name}.yaml").exists()
         for name in TEMPLATE_NAMES
     )
-    checks.append(("templates", template_ok, ", ".join(TEMPLATE_NAMES)))
+    checks.append(("templates", template_ok, ", ".join(TEMPLATE_NAMES), True))
 
     runtime_dir = Path(".orchesis")
     runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -355,16 +433,55 @@ def doctor(policy_path: str) -> None:
     try:
         writable_probe.write_text("ok", encoding="utf-8")
         writable_probe.unlink()
-        checks.append(("runtime_writable", True, str(runtime_dir)))
+        checks.append(("runtime_writable", True, str(runtime_dir), True))
     except OSError as error:
-        checks.append(("runtime_writable", False, str(error)))
+        checks.append(("runtime_writable", False, str(error), True))
 
+    # Optional diagnostics: network and ecosystem readiness.
+    upstream_url = ""
+    if isinstance(loaded_policy, dict):
+        upstream_cfg = loaded_policy.get("upstream")
+        if isinstance(upstream_cfg, dict):
+            url_value = upstream_cfg.get("url")
+            if isinstance(url_value, str):
+                upstream_url = url_value
+    if not upstream_url:
+        upstream_url = "https://api.openai.com"
+    try:
+        req = UrlRequest(upstream_url, method="GET")
+        with urlopen(req, timeout=2) as resp:
+            checks.append(("upstream_reachable", True, f"{upstream_url} ({int(resp.status)})", False))
+    except Exception as error:  # noqa: BLE001
+        checks.append(("upstream_reachable", False, f"{upstream_url} ({error.__class__.__name__})", False))
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 8080))
+        checks.append(("dashboard_port_8080", True, "available", True))
+    except OSError as error:
+        checks.append(("dashboard_port_8080", False, str(error), True))
+    finally:
+        sock.close()
+
+    checks.append(("OPENAI_API_KEY", bool(os.environ.get("OPENAI_API_KEY")), "set" if os.environ.get("OPENAI_API_KEY") else "not set", False))
+    checks.append(("ANTHROPIC_API_KEY", bool(os.environ.get("ANTHROPIC_API_KEY")), "set" if os.environ.get("ANTHROPIC_API_KEY") else "not set", False))
+
+    hooks_status = ClaudeCodeHooks().status()
+    hooks_installed = bool(hooks_status.get("installed", False))
+    checks.append(("claude_hooks", hooks_installed, "installed" if hooks_installed else "not installed", False))
+
+    click.echo(f"Orchesis Doctor v{__version__}")
+    click.echo("=====================")
     click.echo("Doctor checks:")
     all_ok = True
-    for name, ok, detail in checks:
+    for name, ok, detail, required in checks:
         marker = "[OK]" if ok else "[FAIL]"
         click.echo(f"  {marker} {name}: {detail}")
-        all_ok = all_ok and ok
+        if required:
+            all_ok = all_ok and ok
+    if all_ok:
+        click.echo("")
+        click.echo(f"Ready to start: orchesis proxy --config {config_path}")
     raise SystemExit(0 if all_ok else 1)
 
 

@@ -2,7 +2,7 @@
 
 **AI Agent Control Plane — transparent HTTP proxy for security, cost optimization, and reliability.**
 
-[![Tests](https://img.shields.io/badge/tests-2637%20passing-brightgreen)]()
+[![Tests](https://github.com/poushwell/orchesis/actions/workflows/test.yml/badge.svg)](https://github.com/poushwell/orchesis/actions/workflows/test.yml)
 [![Python](https://img.shields.io/badge/python-3.12+-blue)]()
 [![License](https://img.shields.io/badge/license-MIT-green)]()
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-orange)]()

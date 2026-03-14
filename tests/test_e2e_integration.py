@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import shlex
 import sys
 import time
@@ -12,6 +13,11 @@ from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from orchesis.replay import read_events_from_jsonl
+
+pytestmark = pytest.mark.skipif(
+    shutil.which("orchesis") is None,
+    reason="requires orchesis CLI installed",
+)
 
 
 def _write_policy(path: Path, *, max_requests: int = 10, daily_budget: float = 5.0) -> None:
