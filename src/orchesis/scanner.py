@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -16,6 +17,50 @@ from orchesis.contrib.ioc_database import IoCMatcher
 from orchesis.contrib.secret_scanner import SecretScanner
 
 SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
+VULNERABLE_PACKAGES = {
+    "mcp-remote": {"fixed": "0.1.16", "cvss": 9.6, "cve": "CVE-2025-6514"},
+    "@modelcontextprotocol/server-filesystem": {"fixed": "0.6.3", "cvss": 7.5, "cve": "CVE-2025-5589"},
+    "framelink-figma-mcp": {"fixed": "0.6.3", "cvss": 8.1, "cve": "CVE-2025-5891"},
+    "gemini-mcp-tool": {"fixed": None, "cvss": 9.8, "cve": "CVE-2025-6001"},
+    "@anthropic/mcp-server-git": {"fixed": "1.0.1", "cvss": 7.2, "cve": "CVE-2025-5234"},
+}
+
+MALICIOUS_PACKAGES = [
+    "mcp-server-free",
+    "mcp-tool-helper",
+    "claude-mcp-utils",
+    "mcp-assistant-pro",
+    "openai-mcp-bridge",
+]
+
+KNOWN_GOOD_PACKAGES = [
+    "mcp-server-filesystem",
+    "mcp-server-brave-search",
+    "mcp-server-fetch",
+    "mcp-server-github",
+    "mcp-server-git",
+    "mcp-server-postgres",
+    "mcp-server-sqlite",
+    "mcp-server-slack",
+    "mcp-server-puppeteer",
+    "mcp-server-memory",
+    "@modelcontextprotocol/server-filesystem",
+    "@modelcontextprotocol/server-github",
+    "@modelcontextprotocol/server-postgres",
+]
+
+EXTENDED_SECRET_PATTERNS = [
+    (r"\bAKIA[0-9A-Z]{16}\b", "AWS Access Key", "critical"),
+    (r"\bghp_[A-Za-z0-9]{36}\b", "GitHub PAT", "critical"),
+    (r"\bsk-ant-[A-Za-z0-9\-]{40,}\b", "Anthropic API Key", "critical"),
+    (r"\bsk-proj-[A-Za-z0-9\-]{40,}\b", "OpenAI Project Key", "critical"),
+    (r"\bstripe_[a-zA-Z]+_[A-Za-z0-9]{24,}\b", "Stripe Key", "high"),
+    (r"\bey[A-Za-z0-9\-_]{20,}\.[A-Za-z0-9\-_]{20,}\.[A-Za-z0-9\-_]{20,}", "JWT Token", "high"),
+]
+
+SENSITIVE_MOUNTS = ["~/.ssh", "~/.aws", "~/.kube", "/etc", "~/.gnupg", "~/.config"]
+DANGEROUS_CAPS = ["SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "DAC_OVERRIDE"]
 
 
 @dataclass
@@ -509,6 +554,9 @@ class McpConfigScanner:
                         )
                     )
 
+            self._check_supply_chain(name, server, findings)
+            self._check_docker_security(name, server, findings)
+
         return ScanReport(
             target=str(source),
             target_type="mcp_config",
@@ -517,6 +565,415 @@ class McpConfigScanner:
             summary=_build_summary(findings),
             scanned_at=_now_iso(),
         )
+
+    def _check_supply_chain(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        args = self._extract_args(server)
+        command = str(server.get("command", "") or "")
+        tokens = self._command_tokens(command, args)
+        package_tokens = [token for token in tokens if self._is_package_like(token)]
+
+        for package in package_tokens:
+            pkg_name, version = self._split_package_and_version(package)
+            if pkg_name in VULNERABLE_PACKAGES:
+                meta = VULNERABLE_PACKAGES[pkg_name]
+                fixed = meta.get("fixed")
+                if fixed is None:
+                    findings.append(
+                        ScanFinding(
+                            severity="critical",
+                            category="supply_chain_cve",
+                            description=(
+                                f"Known vulnerable package '{pkg_name}' ({meta['cve']}, CVSS {meta['cvss']}) "
+                                "has no safe version available"
+                            ),
+                            location=f"$.mcpServers.{name}.args",
+                            evidence=package,
+                        )
+                    )
+                elif version is None:
+                    findings.append(
+                        ScanFinding(
+                            severity="high",
+                            category="supply_chain_cve",
+                            description=(
+                                f"Known vulnerable package '{pkg_name}' present without pinned version "
+                                f"(fixed in {fixed}, {meta['cve']})"
+                            ),
+                            location=f"$.mcpServers.{name}.args",
+                            evidence=package,
+                        )
+                    )
+                elif self._semver_lt(version, str(fixed)):
+                    findings.append(
+                        ScanFinding(
+                            severity="critical",
+                            category="supply_chain_cve",
+                            description=(
+                                f"Package '{pkg_name}@{version}' is below fixed version {fixed} "
+                                f"({meta['cve']}, CVSS {meta['cvss']})"
+                            ),
+                            location=f"$.mcpServers.{name}.args",
+                            evidence=package,
+                        )
+                    )
+
+            if pkg_name in MALICIOUS_PACKAGES:
+                findings.append(
+                    ScanFinding(
+                        severity="critical",
+                        category="malicious_package",
+                        description=f"Known malicious package '{pkg_name}' detected",
+                        location=f"$.mcpServers.{name}.args",
+                        evidence=package,
+                    )
+                )
+
+            if pkg_name and pkg_name not in KNOWN_GOOD_PACKAGES:
+                near = self._nearest_package(pkg_name, KNOWN_GOOD_PACKAGES)
+                if near is not None:
+                    candidate, distance = near
+                    if 1 <= distance <= 2:
+                        findings.append(
+                            ScanFinding(
+                                severity="high",
+                                category="typosquatting",
+                                description=f"Potential typosquatting: '{pkg_name}' is similar to '{candidate}'",
+                                location=f"$.mcpServers.{name}.args",
+                                evidence=package,
+                            )
+                        )
+
+        if command.lower().strip() == "npx":
+            has_yes = any(str(arg).strip() == "-y" for arg in args)
+            has_pinned_pkg = any(self._split_package_and_version(token)[1] is not None for token in package_tokens)
+            if has_yes and not has_pinned_pkg:
+                findings.append(
+                    ScanFinding(
+                        severity="high",
+                        category="supply_chain",
+                        description="npx -y installs latest version without confirmation",
+                        location=f"$.mcpServers.{name}.args",
+                        evidence=" ".join([command] + [str(item) for item in args]),
+                    )
+                )
+
+        for arg in args:
+            if not isinstance(arg, str):
+                continue
+            text = arg.strip()
+            if not text:
+                continue
+            if self._looks_like_secret_candidate(text) and self._shannon_entropy(text) > 4.5 and len(text) >= 20:
+                findings.append(
+                    ScanFinding(
+                        severity="high",
+                        category="secret_leak",
+                        description="High-entropy string in args (possible secret)",
+                        location=f"$.mcpServers.{name}.args",
+                        evidence=text[:64],
+                    )
+                )
+
+        env = server.get("env")
+        if isinstance(env, dict):
+            env_values = [f"{k}={v}" for k, v in env.items() if isinstance(v, str)]
+        else:
+            env_values = []
+        for text in [str(item) for item in args if isinstance(item, str)] + env_values:
+            for pattern, label, severity in EXTENDED_SECRET_PATTERNS:
+                match = re.search(pattern, text)
+                if match:
+                    findings.append(
+                        ScanFinding(
+                            severity=severity,
+                            category="secret_leak",
+                            description=f"{label} detected",
+                            location=f"$.mcpServers.{name}",
+                            evidence=match.group(0),
+                        )
+                    )
+
+    def _check_docker_security(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        args = self._extract_args(server)
+        args_text = " ".join(str(item) for item in args)
+        command = str(server.get("command", "")).strip().lower()
+        docker_cfg = server.get("docker")
+        if not isinstance(docker_cfg, dict):
+            docker_cfg = {}
+        container_cfg = server.get("container")
+        if not isinstance(container_cfg, dict):
+            container_cfg = {}
+
+        has_docker_context = bool(
+            docker_cfg
+            or container_cfg
+            or str(server.get("image", "")).strip()
+            or "docker" in args_text
+            or command == "docker"
+        )
+        if not has_docker_context:
+            return
+
+        if "--privileged" in args:
+            findings.append(
+                ScanFinding(
+                    severity="critical",
+                    category="docker_security",
+                    description="Container runs in privileged mode",
+                    location=f"$.mcpServers.{name}.args",
+                    evidence="--privileged",
+                )
+            )
+
+        if "/var/run/docker.sock" in args_text:
+            findings.append(
+                ScanFinding(
+                    severity="critical",
+                    category="docker_security",
+                    description="Docker socket mount detected",
+                    location=f"$.mcpServers.{name}.args",
+                    evidence="/var/run/docker.sock",
+                )
+            )
+
+        for mount in self._extract_mount_specs(args):
+            src = mount["source"]
+            full = mount["raw"]
+            if any(path in src for path in SENSITIVE_MOUNTS):
+                findings.append(
+                    ScanFinding(
+                        severity="critical",
+                        category="docker_security",
+                        description="Sensitive host path mount detected",
+                        location=f"$.mcpServers.{name}.args",
+                        evidence=full,
+                    )
+                )
+                if not mount["read_only"]:
+                    findings.append(
+                        ScanFinding(
+                            severity="high",
+                            category="docker_security",
+                            description="Sensitive host mount without read-only flag (:ro)",
+                            location=f"$.mcpServers.{name}.args",
+                            evidence=full,
+                        )
+                    )
+
+        if "--network=host" in args or "--net=host" in args:
+            findings.append(
+                ScanFinding(
+                    severity="high",
+                    category="docker_security",
+                    description="Container uses host network mode",
+                    location=f"$.mcpServers.{name}.args",
+                    evidence="--network=host",
+                )
+            )
+
+        has_user = "--user" in args or bool(docker_cfg.get("user")) or bool(container_cfg.get("user"))
+        if not has_user:
+            findings.append(
+                ScanFinding(
+                    severity="medium",
+                    category="docker_security",
+                    description="Container likely runs as root",
+                    location=f"$.mcpServers.{name}",
+                    evidence="missing --user and docker.user",
+                )
+            )
+
+        has_limits = any(
+            str(arg).startswith("--memory") or str(arg).startswith("--cpus") or str(arg).startswith("--pids-limit")
+            for arg in args
+        )
+        if not has_limits:
+            findings.append(
+                ScanFinding(
+                    severity="medium",
+                    category="docker_security",
+                    description="Container has no resource limits (--memory/--cpus/--pids-limit)",
+                    location=f"$.mcpServers.{name}.args",
+                    evidence=args_text or "no args",
+                )
+            )
+
+        if "seccomp=unconfined" in args_text or "apparmor=unconfined" in args_text:
+            findings.append(
+                ScanFinding(
+                    severity="high",
+                    category="docker_security",
+                    description="Security profile disabled (seccomp/apparmor unconfined)",
+                    location=f"$.mcpServers.{name}.args",
+                    evidence=args_text,
+                )
+            )
+
+        image = str(server.get("image", "") or "")
+        if image and "@sha256:" not in image and ":" not in image:
+            findings.append(
+                ScanFinding(
+                    severity="medium",
+                    category="docker_security",
+                    description="Docker image not pinned to digest or tag",
+                    location=f"$.mcpServers.{name}.image",
+                    evidence=image,
+                )
+            )
+
+        for idx, arg in enumerate(args):
+            if str(arg) == "--cap-add":
+                next_arg = str(args[idx + 1]) if idx + 1 < len(args) else ""
+                if next_arg.upper() in DANGEROUS_CAPS:
+                    findings.append(
+                        ScanFinding(
+                            severity="high",
+                            category="docker_security",
+                            description=f"Dangerous Linux capability added: {next_arg}",
+                            location=f"$.mcpServers.{name}.args",
+                            evidence=f"--cap-add {next_arg}",
+                        )
+                    )
+
+    @staticmethod
+    def _extract_args(server: dict[str, Any]) -> list[str]:
+        args = server.get("args")
+        if not isinstance(args, list):
+            return []
+        return [str(item) for item in args]
+
+    @staticmethod
+    def _command_tokens(command: str, args: list[str]) -> list[str]:
+        tokens: list[str] = []
+        if command:
+            tokens.extend(part for part in re.split(r"\s+", command.strip()) if part)
+        for arg in args:
+            tokens.extend(part for part in re.split(r"\s+", arg.strip()) if part)
+        return tokens
+
+    @staticmethod
+    def _is_package_like(token: str) -> bool:
+        if not token or token.startswith("-"):
+            return False
+        if "/" in token and not token.startswith("@"):
+            # keep scoped npm packages, ignore plain paths
+            return token.count("/") == 1 and token.startswith("@")
+        if token.endswith((".js", ".mjs", ".cjs", ".py", ".sh", ".json")):
+            return False
+        if token.startswith(("http://", "https://", "ws://", "wss://", "/")):
+            return False
+        return bool(re.search(r"[a-zA-Z]", token))
+
+    @staticmethod
+    def _split_package_and_version(token: str) -> tuple[str, str | None]:
+        normalized = token.strip().strip("\"'`,")
+        if not normalized:
+            return "", None
+        if normalized.startswith("@"):
+            # scoped package, version appears after second '@'
+            at_pos = normalized.rfind("@")
+            if at_pos > 0 and "/" in normalized[:at_pos]:
+                version = normalized[at_pos + 1 :]
+                if re.fullmatch(r"\d+(?:\.\d+){0,2}", version):
+                    return normalized[:at_pos], version
+                return normalized, None
+            return normalized, None
+        if "@" in normalized:
+            name, version = normalized.rsplit("@", 1)
+            if re.fullmatch(r"\d+(?:\.\d+){0,2}", version):
+                return name, version
+        return normalized, None
+
+    @staticmethod
+    def _semver_lt(left: str, right: str) -> bool:
+        def _parts(value: str) -> list[int]:
+            pieces = [int(p) for p in re.findall(r"\d+", value)[:3]]
+            while len(pieces) < 3:
+                pieces.append(0)
+            return pieces
+
+        a = _parts(left)
+        b = _parts(right)
+        return tuple(a) < tuple(b)
+
+    @staticmethod
+    def _levenshtein(a: str, b: str) -> int:
+        if a == b:
+            return 0
+        if not a:
+            return len(b)
+        if not b:
+            return len(a)
+        prev = list(range(len(b) + 1))
+        for i, ca in enumerate(a, start=1):
+            curr = [i]
+            for j, cb in enumerate(b, start=1):
+                cost = 0 if ca == cb else 1
+                curr.append(min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost))
+            prev = curr
+        return prev[-1]
+
+    def _nearest_package(self, candidate: str, known: list[str]) -> tuple[str, int] | None:
+        best_name = ""
+        best_dist = 10**9
+        for target in known:
+            dist = self._levenshtein(candidate, target)
+            if dist < best_dist:
+                best_dist = dist
+                best_name = target
+        if not best_name:
+            return None
+        return best_name, best_dist
+
+    @staticmethod
+    def _shannon_entropy(value: str) -> float:
+        if not value:
+            return 0.0
+        counts: dict[str, int] = {}
+        for ch in value:
+            counts[ch] = counts.get(ch, 0) + 1
+        length = float(len(value))
+        entropy = 0.0
+        for count in counts.values():
+            p = count / length
+            entropy -= p * math.log2(p)
+        return entropy
+
+    @staticmethod
+    def _looks_like_secret_candidate(value: str) -> bool:
+        if value.startswith("-"):
+            return False
+        if "/" in value or "\\" in value:
+            return False
+        if value.lower().startswith(("http://", "https://", "ws://", "wss://")):
+            return False
+        return bool(re.search(r"[A-Za-z]", value) and re.search(r"\d", value))
+
+    @staticmethod
+    def _extract_mount_specs(args: list[str]) -> list[dict[str, Any]]:
+        mounts: list[dict[str, Any]] = []
+        idx = 0
+        while idx < len(args):
+            arg = str(args[idx])
+            spec = ""
+            if arg in {"-v", "--volume"} and idx + 1 < len(args):
+                spec = str(args[idx + 1])
+                idx += 2
+            elif arg.startswith("-v") and len(arg) > 2:
+                spec = arg[2:]
+                idx += 1
+            elif arg.startswith("--volume="):
+                spec = arg.split("=", 1)[1]
+                idx += 1
+            else:
+                idx += 1
+            if not spec:
+                continue
+            parts = spec.split(":")
+            source = parts[0] if parts else spec
+            read_only = any(part == "ro" for part in parts[2:]) or (len(parts) == 3 and parts[-1] == "ro")
+            mounts.append({"raw": spec, "source": source, "read_only": read_only})
+        return mounts
 
 
 class PolicyScanner:
