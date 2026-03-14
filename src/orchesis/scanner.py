@@ -61,6 +61,37 @@ EXTENDED_SECRET_PATTERNS = [
 
 SENSITIVE_MOUNTS = ["~/.ssh", "~/.aws", "~/.kube", "/etc", "~/.gnupg", "~/.config"]
 DANGEROUS_CAPS = ["SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "DAC_OVERRIDE"]
+SHELL_SERVER_PATTERNS = [
+    r"\bshell\b",
+    r"\bterminal\b",
+    r"\bexec\b",
+    r"\bbash\b",
+    r"\bzsh\b",
+    r"\bpowershell\b",
+    r"\bcmd\b",
+    r"\brun\b",
+]
+ADMIN_TOKEN_PATTERNS = [
+    r"\bADMIN[_\-]?TOKEN\b",
+    r"\bROOT[_\-]?KEY\b",
+    r"\bSUPERUSER[_\-]?\w*\b",
+    r"\bMASTER[_\-]?KEY\b",
+    r"\bGOD[_\-]?MODE\b",
+    r"\bFULL[_\-]?ACCESS\b",
+]
+SENSITIVE_ARG_PATHS = [
+    r"~/\.ssh",
+    r"~/\.gnupg",
+    r"~/\.config",
+    r"~/Library/Keychains",
+    r"AppData[/\\]Roaming",
+    r"\.sqlite$",
+    r"\.db$",
+    r"wallet\.dat",
+    r"keystore",
+    r"/proc/\d+",
+]
+BROAD_PATHS = ["/", "~", "$HOME", "/home", "/users", "C:\\", "C:/"]
 
 
 @dataclass
@@ -390,7 +421,8 @@ class McpConfigScanner:
                 scanned_at=_now_iso(),
             )
 
-        for name, server in self._iter_servers(payload):
+        servers = self._iter_servers(payload)
+        for name, server in servers:
             prefix = f"$.mcpServers.{name}"
             host = str(server.get("host", "")).strip()
             url = str(server.get("url", "")).strip()
@@ -555,7 +587,11 @@ class McpConfigScanner:
                     )
 
             self._check_supply_chain(name, server, findings)
+            self._check_permissions(name, server, findings)
+            self._check_network_and_config(name, server, findings)
             self._check_docker_security(name, server, findings)
+
+        self._check_cross_server(servers, findings)
 
         return ScanReport(
             target=str(source),
@@ -569,10 +605,13 @@ class McpConfigScanner:
     def _check_supply_chain(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
         args = self._extract_args(server)
         command = str(server.get("command", "") or "")
+        command_norm = command.strip().lower()
         tokens = self._command_tokens(command, args)
         package_tokens = [token for token in tokens if self._is_package_like(token)]
 
         for package in package_tokens:
+            if package.strip().lower() == command_norm:
+                continue
             pkg_name, version = self._split_package_and_version(package)
             if pkg_name in VULNERABLE_PACKAGES:
                 meta = VULNERABLE_PACKAGES[pkg_name]
@@ -643,6 +682,36 @@ class McpConfigScanner:
                             )
                         )
 
+            if (
+                pkg_name
+                and pkg_name not in MALICIOUS_PACKAGES
+                and pkg_name not in VULNERABLE_PACKAGES
+                and self._is_unpinned_package_token(command_norm, package)
+            ):
+                findings.append(
+                    ScanFinding(
+                        severity="medium",
+                        category="version_pinning",
+                        description="Package not pinned to explicit version — may pull breaking or malicious updates",
+                        location=f"$.mcpServers.{name}.args",
+                        evidence=package,
+                    )
+                )
+
+        for arg in args:
+            arg_lower = str(arg).lower()
+            if "@latest" in arg_lower:
+                findings.append(
+                    ScanFinding(
+                        severity="medium",
+                        category="version_pinning",
+                        description="Package not pinned to explicit version — may pull breaking or malicious updates",
+                        location=f"$.mcpServers.{name}.args",
+                        evidence=str(arg),
+                    )
+                )
+                break
+
         if command.lower().strip() == "npx":
             has_yes = any(str(arg).strip() == "-y" for arg in args)
             has_pinned_pkg = any(self._split_package_and_version(token)[1] is not None for token in package_tokens)
@@ -674,6 +743,55 @@ class McpConfigScanner:
                     )
                 )
 
+        for arg in args:
+            value = str(arg)
+            lower = value.lower()
+            if (
+                lower.startswith("http://")
+                or lower.startswith("https://")
+                or lower.startswith("git+https://")
+                or lower.startswith("git+ssh://")
+                or bool(re.search(r"github\.com/.*/archive/", lower))
+            ):
+                findings.append(
+                    ScanFinding(
+                        severity="high",
+                        category="supply_chain",
+                        description="Package installed from URL — bypasses registry security checks",
+                        location=f"$.mcpServers.{name}.args",
+                        evidence=value,
+                    )
+                )
+
+        for arg in args:
+            value = str(arg)
+            for pattern in SENSITIVE_ARG_PATHS:
+                if re.search(pattern, value, flags=re.IGNORECASE):
+                    findings.append(
+                        ScanFinding(
+                            severity="high",
+                            category="file_access",
+                            description="Sensitive path detected in command arguments",
+                            location=f"$.mcpServers.{name}.args",
+                            evidence=value,
+                        )
+                    )
+                    break
+
+        for arg in args:
+            value = str(arg).strip()
+            path_candidate = value.split(":", 1)[0] if ":" in value and not value.startswith(("http://", "https://")) else value
+            if path_candidate in BROAD_PATHS:
+                findings.append(
+                    ScanFinding(
+                        severity="high",
+                        category="file_access",
+                        description="Filesystem access granted to root/home directory — overly broad scope",
+                        location=f"$.mcpServers.{name}.args",
+                        evidence=value,
+                    )
+                )
+
         env = server.get("env")
         if isinstance(env, dict):
             env_values = [f"{k}={v}" for k, v in env.items() if isinstance(v, str)]
@@ -692,6 +810,211 @@ class McpConfigScanner:
                             evidence=match.group(0),
                         )
                     )
+
+    def _check_permissions(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        auto_approve = server.get("autoApprove")
+        if auto_approve is True:
+            findings.append(
+                ScanFinding(
+                    severity="high",
+                    category="permissions",
+                    description="autoApprove wildcard grants unrestricted tool execution without human confirmation",
+                    location=f"$.mcpServers.{name}.autoApprove",
+                    evidence="true",
+                )
+            )
+        elif isinstance(auto_approve, list):
+            normalized = [str(item).strip() for item in auto_approve]
+            if "*" in normalized:
+                findings.append(
+                    ScanFinding(
+                        severity="high",
+                        category="permissions",
+                        description="autoApprove wildcard grants unrestricted tool execution without human confirmation",
+                        location=f"$.mcpServers.{name}.autoApprove",
+                        evidence="*",
+                    )
+                )
+            elif len(normalized) > 5:
+                findings.append(
+                    ScanFinding(
+                        severity="high",
+                        category="permissions",
+                        description="autoApprove includes too many entries and weakens approval controls",
+                        location=f"$.mcpServers.{name}.autoApprove",
+                        evidence=str(len(normalized)),
+                    )
+                )
+
+        env = server.get("env")
+        if isinstance(env, dict):
+            for key in env:
+                key_text = str(key)
+                for pattern in ADMIN_TOKEN_PATTERNS:
+                    if re.search(pattern, key_text, flags=re.IGNORECASE):
+                        findings.append(
+                            ScanFinding(
+                                severity="high",
+                                category="permissions",
+                                description="Admin-level token name in env suggests elevated privilege credential",
+                                location=f"$.mcpServers.{name}.env.{key_text}",
+                                evidence=key_text,
+                            )
+                        )
+                        break
+
+    def _check_network_and_config(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        args = self._extract_args(server)
+        command = str(server.get("command", "") or "")
+        command_lower = command.lower()
+        server_name_lower = name.lower()
+        url = str(server.get("url", "") or "").strip()
+        transport = str(server.get("transport", "") or "").strip().lower()
+        parsed = urlparse(url) if url else None
+        host = (parsed.hostname or "").lower() if parsed else ""
+        remote_http = bool(parsed and parsed.scheme in {"http", "https"} and host not in {"localhost", "127.0.0.1"})
+
+        if transport == "sse" and parsed and parsed.scheme == "http" and host not in {"localhost", "127.0.0.1"}:
+            findings.append(
+                ScanFinding(
+                    severity="high",
+                    category="transport_security",
+                    description="SSE transport over unencrypted HTTP exposes agent traffic",
+                    location=f"$.mcpServers.{name}.url",
+                    evidence=url,
+                )
+            )
+
+        if any(re.search(pattern, server_name_lower) for pattern in SHELL_SERVER_PATTERNS) or any(
+            re.search(pattern, command_lower) for pattern in SHELL_SERVER_PATTERNS
+        ):
+            findings.append(
+                ScanFinding(
+                    severity="high",
+                    category="shell_execution",
+                    description="Server enables shell/command execution — high privilege risk",
+                    location=f"$.mcpServers.{name}",
+                    evidence=f"name={name}; command={command}",
+                )
+            )
+
+        token_stream = [command_lower] + [str(arg).lower() for arg in args]
+        if any("sudo" in token or "doas" in token for token in token_stream):
+            findings.append(
+                ScanFinding(
+                    severity="critical",
+                    category="privilege_escalation",
+                    description="sudo/doas in command grants root-level execution",
+                    location=f"$.mcpServers.{name}.args",
+                    evidence=" ".join([command] + args),
+                )
+            )
+
+        for arg in args:
+            value = str(arg)
+            if "../" in value or "..\\" in value:
+                findings.append(
+                    ScanFinding(
+                        severity="high",
+                        category="path_traversal",
+                        description="Path traversal sequence in args — potential directory escape",
+                        location=f"$.mcpServers.{name}.args",
+                        evidence=value,
+                    )
+                )
+            if ("/" in value or "\\" in value) and any(token in value for token in ("*", "**", "?")):
+                findings.append(
+                    ScanFinding(
+                        severity="medium",
+                        category="file_access",
+                        description="Wildcard glob in path argument — overly broad file access",
+                        location=f"$.mcpServers.{name}.args",
+                        evidence=value,
+                    )
+                )
+
+        cors_cfg = server.get("cors")
+        allowed_origins = server.get("allowedOrigins") or server.get("allowed_origins") or server.get("corsOrigins")
+        has_origin_validation = bool(cors_cfg) or bool(allowed_origins)
+        if remote_http and not has_origin_validation:
+            findings.append(
+                ScanFinding(
+                    severity="medium",
+                    category="cors_missing",
+                    description="Remote HTTP server without explicit CORS configuration",
+                    location=f"$.mcpServers.{name}",
+                    evidence=url,
+                )
+            )
+
+    def _check_cross_server(self, servers: list[tuple[str, dict[str, Any]]], findings: list[ScanFinding]) -> None:
+        has_filesystem = False
+        has_network = False
+        server_count = len(servers)
+        shared_values: dict[str, set[str]] = {}
+
+        for name, server in servers:
+            command = str(server.get("command", "") or "").lower()
+            transport = str(server.get("transport", "") or "").lower()
+            if "filesystem" in command or "files" in command:
+                has_filesystem = True
+            if "fetch" in command or "http" in command or transport == "sse":
+                has_network = True
+
+            env = server.get("env")
+            if isinstance(env, dict):
+                for value in env.values():
+                    if not isinstance(value, str):
+                        continue
+                    secret = value.strip()
+                    if not self._looks_like_shared_secret(secret):
+                        continue
+                    shared_values.setdefault(secret, set()).add(name)
+
+        if has_filesystem and has_network:
+            findings.append(
+                ScanFinding(
+                    severity="medium",
+                    category="exfiltration_risk",
+                    description="Config combines filesystem + network access — potential exfiltration path",
+                    location="$.mcpServers (combined)",
+                    evidence="filesystem + network/fetch/sse servers present",
+                )
+            )
+
+        if server_count > 10:
+            findings.append(
+                ScanFinding(
+                    severity="medium",
+                    category="attack_surface",
+                    description=f"Config defines {server_count} MCP servers — large attack surface",
+                    location="$.mcpServers",
+                    evidence=str(server_count),
+                )
+            )
+
+        for value, names in shared_values.items():
+            if len(names) >= 2:
+                findings.append(
+                    ScanFinding(
+                        severity="high",
+                        category="credential_sharing",
+                        description=(
+                            "Same credential value shared across multiple servers — single point of compromise"
+                        ),
+                        location="$.mcpServers",
+                        evidence=f"value={value[:8]}... used by {', '.join(sorted(names))}",
+                    )
+                )
+
+    @staticmethod
+    def _looks_like_shared_secret(value: str) -> bool:
+        if len(value) < 16:
+            return False
+        low = value.lower()
+        if low in {"password", "secret", "token", "apikey", "api_key", "changeme", "default"}:
+            return False
+        return bool(re.search(r"[a-zA-Z]", value) and re.search(r"\d", value))
 
     def _check_docker_security(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
         args = self._extract_args(server)
@@ -863,6 +1186,28 @@ class McpConfigScanner:
         if token.startswith(("http://", "https://", "ws://", "wss://", "/")):
             return False
         return bool(re.search(r"[a-zA-Z]", token))
+
+    @staticmethod
+    def _is_unpinned_package_token(command_norm: str, token: str) -> bool:
+        clean = token.strip().strip("\"'`,")
+        if not clean:
+            return False
+        if clean.startswith("-"):
+            return False
+        if "@latest" in clean.lower():
+            return True
+        if command_norm == "uvx":
+            if "==" in clean:
+                return False
+            if clean.startswith(("http://", "https://", "git+https://", "git+ssh://")):
+                return False
+            return bool(re.search(r"[A-Za-z]", clean))
+        if command_norm == "npx":
+            name, version = McpConfigScanner._split_package_and_version(clean)
+            if not name:
+                return False
+            return version is None
+        return False
 
     @staticmethod
     def _split_package_and_version(token: str) -> tuple[str, str | None]:
