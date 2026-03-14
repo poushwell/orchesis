@@ -2,9 +2,75 @@
 
 from __future__ import annotations
 
+import re
+import os
+from pathlib import Path
+
+
+def _dashboard_dist_dir() -> Path:
+    return Path(__file__).resolve().parents[2] / "dashboard" / "dist"
+
+
+def _inline_dist_assets(index_html: str, dist_dir: Path) -> str:
+    """Inline built Vite assets so /dashboard works without extra routes."""
+
+    def _read_asset(asset_path: str) -> str | None:
+        normalized = asset_path.lstrip("/")
+        if normalized.startswith("dashboard/"):
+            normalized = normalized[len("dashboard/") :]
+        candidate = (dist_dir / normalized).resolve()
+        if not str(candidate).startswith(str(dist_dir.resolve())):
+            return None
+        if not candidate.exists() or not candidate.is_file():
+            return None
+        return candidate.read_text(encoding="utf-8")
+
+    html = index_html
+    html = re.sub(r'<script[^>]*type="module"[^>]*src="([^"]+)"[^>]*>\s*</script>', "", html)
+    html = re.sub(r'<link[^>]*rel="modulepreload"[^>]*>', "", html)
+
+    css_chunks: list[str] = []
+    for match in re.finditer(r'<link[^>]*rel="stylesheet"[^>]*href="([^"]+)"[^>]*>', html):
+        css_text = _read_asset(match.group(1))
+        if css_text is not None:
+            css_chunks.append(css_text)
+    html = re.sub(r'<link[^>]*rel="stylesheet"[^>]*href="([^"]+)"[^>]*>', "", html)
+
+    js_chunks: list[str] = []
+    for match in re.finditer(r'<script[^>]*src="([^"]+)"[^>]*>\s*</script>', index_html):
+        js_text = _read_asset(match.group(1))
+        if js_text is not None:
+            js_chunks.append(js_text)
+
+    if css_chunks:
+        html = html.replace("</head>", "<style>\n" + "\n".join(css_chunks) + "\n</style>\n</head>")
+    if js_chunks:
+        html = html.replace("</body>", "<script>\n" + "\n".join(js_chunks) + "\n</script>\n</body>")
+    return html
+
+
+def register_dashboard_static_routes(app) -> None:
+    """Optional Flask-style static route registration for /dashboard/* assets."""
+    try:
+        from flask import send_from_directory
+    except Exception:
+        return
+
+    dist_dir = _dashboard_dist_dir()
+
+    @app.route("/dashboard/<path:path>")
+    def serve_dashboard(path):  # type: ignore[unused-ignore]
+        return send_from_directory(str(dist_dir), path)
+
 
 def get_dashboard_html(demo_mode: bool = False) -> str:
     """Return a fully self-contained dashboard HTML page."""
+    dist_dir = _dashboard_dist_dir()
+    dist_index = dist_dir / "index.html"
+    if dist_index.exists() and "PYTEST_CURRENT_TEST" not in os.environ:
+        built = dist_index.read_text(encoding="utf-8")
+        return _inline_dist_assets(built, dist_dir)
+
     html = """<!doctype html>
 <html lang="en">
 <head>
