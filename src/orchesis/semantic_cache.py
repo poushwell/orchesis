@@ -58,6 +58,285 @@ class CacheLookupResult:
     cost_saved_usd: float = 0.0
 
 
+@dataclass
+class HierarchicalCacheConfig:
+    l1_max_entries: int = 200
+    l1_ttl_seconds: float = 60.0
+    l2_max_entries: int = 2000
+    l2_ttl_seconds: float = 600.0
+    l3_max_entries: int = 10000
+    l3_ttl_seconds: float = 86400.0
+    l3_min_tokens: int = 500
+    simhash_threshold: int = 8
+    jaccard_threshold: float = 0.6
+    min_content_length: int = 20
+    max_content_length: int = 50000
+    enabled: bool = True
+
+
+class HierarchicalSemanticCache:
+    """Three-tier cache: L1 exact, L2 semantic, L3 long-term exact."""
+
+    def __init__(self, config: Optional[HierarchicalCacheConfig] = None) -> None:
+        self._config = config or HierarchicalCacheConfig()
+        self._l1: OrderedDict[str, CacheEntry] = OrderedDict()
+        self._l3: OrderedDict[str, CacheEntry] = OrderedDict()
+        self._l2 = SemanticCache(
+            SemanticCacheConfig(
+                enabled=self._config.enabled,
+                max_entries=int(self._config.l2_max_entries),
+                ttl_seconds=float(self._config.l2_ttl_seconds),
+                simhash_threshold=int(self._config.simhash_threshold),
+                jaccard_threshold=float(self._config.jaccard_threshold),
+                min_content_length=int(self._config.min_content_length),
+                max_content_length=int(self._config.max_content_length),
+            )
+        )
+        self._lock = threading.Lock()
+        self._l1_hits = 0
+        self._l2_hits = 0
+        self._l3_hits = 0
+        self._misses = 0
+        self._promotions = 0
+        self._total_tokens_saved = 0
+        self._total_cost_saved = 0.0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self._config.enabled)
+
+    def lookup(
+        self,
+        messages: list[dict[str, Any]],
+        model: str = "",
+        tools: list[str] | None = None,
+    ) -> CacheLookupResult:
+        if not self._config.enabled:
+            return CacheLookupResult(hit=False)
+        content = SemanticCache._extract_content(messages)
+        if len(content) < self._config.min_content_length:
+            return CacheLookupResult(hit=False)
+        if len(content) > self._config.max_content_length:
+            return CacheLookupResult(hit=False)
+        structural_key = SemanticCache._compute_structural_key(model, messages, tools)
+        exact_hash = SemanticCache._exact_hash(content, structural_key)
+
+        with self._lock:
+            l1_entry = self._l1_lookup(exact_hash)
+            if l1_entry is not None:
+                self._l1_hits += 1
+                self._total_tokens_saved += int(l1_entry.tokens_saved)
+                self._total_cost_saved += float(l1_entry.cost_saved_usd)
+                return CacheLookupResult(
+                    hit=True,
+                    response_body=l1_entry.response_body,
+                    match_type="l1_exact",
+                    similarity=1.0,
+                    hamming_distance=0,
+                    cache_key=exact_hash,
+                    tokens_saved=int(l1_entry.tokens_saved),
+                    cost_saved_usd=float(l1_entry.cost_saved_usd),
+                )
+
+        l2_result = self._l2.lookup(messages, model=model, tools=tools)
+        if l2_result.hit:
+            promoted = CacheEntry(
+                exact_hash=exact_hash,
+                simhash=SemanticCache._compute_simhash(content),
+                trigrams=SemanticCache._compute_trigrams(content),
+                structural_key=structural_key,
+                response_body=l2_result.response_body,
+                created_at=time.time(),
+                tokens_saved=int(l2_result.tokens_saved),
+                cost_saved_usd=float(l2_result.cost_saved_usd),
+            )
+            with self._lock:
+                self._l2_hits += 1
+                self._promotions += 1
+                self._total_tokens_saved += int(l2_result.tokens_saved)
+                self._total_cost_saved += float(l2_result.cost_saved_usd)
+                self._l1_store(exact_hash, promoted)
+            return CacheLookupResult(
+                hit=True,
+                response_body=l2_result.response_body,
+                match_type="l2_semantic",
+                similarity=float(l2_result.similarity),
+                hamming_distance=int(l2_result.hamming_distance),
+                cache_key=str(l2_result.cache_key or exact_hash),
+                tokens_saved=int(l2_result.tokens_saved),
+                cost_saved_usd=float(l2_result.cost_saved_usd),
+            )
+
+        with self._lock:
+            l3_entry = self._l3_lookup(exact_hash)
+            if l3_entry is not None:
+                self._l3_hits += 1
+                self._promotions += 1
+                self._total_tokens_saved += int(l3_entry.tokens_saved)
+                self._total_cost_saved += float(l3_entry.cost_saved_usd)
+                promoted = CacheEntry(
+                    exact_hash=exact_hash,
+                    simhash=l3_entry.simhash,
+                    trigrams=l3_entry.trigrams,
+                    structural_key=l3_entry.structural_key,
+                    response_body=l3_entry.response_body,
+                    created_at=time.time(),
+                    tokens_saved=int(l3_entry.tokens_saved),
+                    cost_saved_usd=float(l3_entry.cost_saved_usd),
+                )
+                self._l1_store(exact_hash, promoted)
+                return CacheLookupResult(
+                    hit=True,
+                    response_body=l3_entry.response_body,
+                    match_type="l3_exact",
+                    similarity=1.0,
+                    hamming_distance=0,
+                    cache_key=exact_hash,
+                    tokens_saved=int(l3_entry.tokens_saved),
+                    cost_saved_usd=float(l3_entry.cost_saved_usd),
+                )
+            self._misses += 1
+        return CacheLookupResult(hit=False)
+
+    def store(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+        tools: list[str] | None,
+        response_body: bytes,
+        tokens: int = 0,
+        cost_usd: float = 0.0,
+    ) -> bool:
+        if not self._config.enabled:
+            return False
+        content = SemanticCache._extract_content(messages)
+        if len(content) < self._config.min_content_length:
+            return False
+        if len(content) > self._config.max_content_length:
+            return False
+
+        ok_l2 = self._l2.store(
+            messages=messages,
+            model=model,
+            tools=tools,
+            response_body=response_body,
+            tokens=tokens,
+            cost_usd=cost_usd,
+        )
+        if not ok_l2:
+            return False
+
+        structural_key = SemanticCache._compute_structural_key(model, messages, tools)
+        exact_hash = SemanticCache._exact_hash(content, structural_key)
+        entry = CacheEntry(
+            exact_hash=exact_hash,
+            simhash=SemanticCache._compute_simhash(content),
+            trigrams=SemanticCache._compute_trigrams(content),
+            structural_key=structural_key,
+            response_body=response_body,
+            created_at=time.time(),
+            tokens_saved=int(tokens),
+            cost_saved_usd=float(cost_usd),
+        )
+        with self._lock:
+            self._l1_store(exact_hash, entry)
+            if int(tokens) >= int(self._config.l3_min_tokens):
+                self._l3_store(exact_hash, entry)
+        return True
+
+    def get_stats(self) -> dict[str, Any]:
+        with self._lock:
+            total_lookups = self._l1_hits + self._l2_hits + self._l3_hits + self._misses
+            total_hits = self._l1_hits + self._l2_hits + self._l3_hits
+            hit_rate = (float(total_hits) / float(total_lookups) * 100.0) if total_lookups > 0 else 0.0
+            l1_entries = len(self._l1)
+            l3_entries = len(self._l3)
+            tokens_saved = int(self._total_tokens_saved)
+            cost_saved = float(self._total_cost_saved)
+        l2_stats = self._l2.get_stats()
+        return {
+            "enabled": self._config.enabled,
+            "l1_hits": int(self._l1_hits),
+            "l2_hits": int(self._l2_hits),
+            "l3_hits": int(self._l3_hits),
+            "misses": int(self._misses),
+            "promotions": int(self._promotions),
+            "l1_entries": l1_entries,
+            "l2_entries": int(l2_stats.get("entries", 0)),
+            "l3_entries": l3_entries,
+            "hit_rate_percent": round(hit_rate, 2),
+            "total_tokens_saved": tokens_saved,
+            "total_cost_saved_usd": round(cost_saved, 4),
+            "l2_stats": l2_stats,
+        }
+
+    def clear(self) -> None:
+        with self._lock:
+            self._l1.clear()
+            self._l3.clear()
+        self._l2.clear()
+
+    def invalidate(self, exact_hash: str) -> bool:
+        key = str(exact_hash or "")
+        removed = False
+        with self._lock:
+            if key in self._l1:
+                self._l1.pop(key, None)
+                removed = True
+            if key in self._l3:
+                self._l3.pop(key, None)
+                removed = True
+        if self._l2.invalidate(key):
+            removed = True
+        return removed
+
+    def _l1_lookup(self, exact_hash: str) -> CacheEntry | None:
+        self._evict_expired_tier(self._l1, self._config.l1_ttl_seconds)
+        entry = self._l1.get(exact_hash)
+        if entry is None:
+            return None
+        entry.hit_count += 1
+        entry.last_hit = time.time()
+        self._l1.move_to_end(exact_hash)
+        return entry
+
+    def _l3_lookup(self, exact_hash: str) -> CacheEntry | None:
+        self._evict_expired_tier(self._l3, self._config.l3_ttl_seconds)
+        entry = self._l3.get(exact_hash)
+        if entry is None:
+            return None
+        entry.hit_count += 1
+        entry.last_hit = time.time()
+        self._l3.move_to_end(exact_hash)
+        return entry
+
+    def _l1_store(self, exact_hash: str, entry: CacheEntry) -> None:
+        self._evict_expired_tier(self._l1, self._config.l1_ttl_seconds)
+        self._l1[exact_hash] = entry
+        self._l1.move_to_end(exact_hash)
+        while len(self._l1) > int(self._config.l1_max_entries):
+            self._l1.popitem(last=False)
+
+    def _l3_store(self, exact_hash: str, entry: CacheEntry) -> None:
+        self._evict_expired_tier(self._l3, self._config.l3_ttl_seconds)
+        self._l3[exact_hash] = entry
+        self._l3.move_to_end(exact_hash)
+        while len(self._l3) > int(self._config.l3_max_entries):
+            self._l3.popitem(last=False)
+
+    @staticmethod
+    def _evict_expired_tier(tier_dict: OrderedDict[str, CacheEntry], ttl: float) -> int:
+        if ttl <= 0:
+            count = len(tier_dict)
+            tier_dict.clear()
+            return count
+        now = time.time()
+        expired = [key for key, item in tier_dict.items() if (now - float(item.created_at)) > float(ttl)]
+        for key in expired:
+            tier_dict.pop(key, None)
+        return len(expired)
+
+
 class SemanticCache:
     """
     Fuzzy response cache using SimHash + trigram Jaccard similarity.
