@@ -41,10 +41,12 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       gap: 16px;
     }
     .topbar {
-      background: var(--panel);
+      background: linear-gradient(90deg, rgba(24,32,58,0.9), rgba(10,10,18,0.9));
       border: 1px solid var(--border);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
       border-radius: var(--radius);
       backdrop-filter: blur(12px);
+      box-shadow: 0 1px 0 rgba(0,229,160,0.05);
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -57,7 +59,10 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       font-weight: 700;
       letter-spacing: 0.2px;
     }
-    .brand .logo { font-size: 19px; }
+    .brand .logo {
+      font-size: 19px;
+      filter: drop-shadow(0 0 8px rgba(0,229,160,0.4));
+    }
     .badges { display: flex; gap: 10px; align-items: center; }
     .badge {
       border: 1px solid var(--border);
@@ -94,9 +99,14 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       font-weight: 600;
     }
     .tab-btn.active {
-      border-color: rgba(0,229,160,0.45);
-      box-shadow: inset 0 0 0 1px rgba(0,229,160,0.2);
+      background: linear-gradient(135deg, rgba(0,229,160,0.12), rgba(0,229,160,0.06));
+      border-color: rgba(0,229,160,0.4);
       color: var(--ok);
+      box-shadow: 0 0 16px rgba(0,229,160,0.1), inset 0 1px 0 rgba(0,229,160,0.15);
+    }
+    .tab-btn:hover:not(.active) {
+      background: rgba(255,255,255,0.04);
+      border-color: rgba(255,255,255,0.12);
     }
     .screen { display: none; gap: 12px; }
     .screen.active { display: grid; animation: fadeIn 0.25s ease; }
@@ -112,11 +122,27 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       grid-template-columns: repeat(3, minmax(220px, 1fr));
     }
     .hero-card {
+      --hero-accent: var(--info);
       border-radius: var(--radius);
       padding: 20px;
-      border: 1px solid var(--border);
+      border: 1px solid color-mix(in srgb, var(--hero-accent) 25%, transparent);
       text-align: center;
-      background: var(--panel);
+      background: linear-gradient(135deg, color-mix(in srgb, var(--hero-accent) 6%, transparent), color-mix(in srgb, var(--hero-accent) 2%, transparent));
+      box-shadow: 0 0 30px color-mix(in srgb, var(--hero-accent) 8%, transparent), inset 0 1px 0 rgba(255,255,255,0.04);
+      position: relative;
+      overflow: hidden;
+    }
+    .hero-card::before {
+      content: "";
+      position: absolute;
+      inset: -1px;
+      border-radius: inherit;
+      padding: 1px;
+      background: linear-gradient(135deg, color-mix(in srgb, var(--hero-accent) 65%, transparent), color-mix(in srgb, #ffffff 18%, transparent), color-mix(in srgb, var(--hero-accent) 55%, transparent));
+      -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+      -webkit-mask-composite: xor;
+      mask-composite: exclude;
+      pointer-events: none;
     }
     .hero-number {
       font-size: clamp(48px, 6vw, 72px);
@@ -126,16 +152,19 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     }
     .hero-label { margin-top: 8px; color: var(--text-secondary); font-weight: 650; }
     .hero-blocked .hero-number { color: var(--danger); }
+    .hero-blocked { --hero-accent: rgba(255,59,92,0.95); }
     .hero-saved .hero-number {
       background: linear-gradient(90deg, var(--ok), #5AA8FF);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
+    .hero-saved { --hero-accent: rgba(0,229,160,0.95); }
     .hero-health .hero-number {
       background: linear-gradient(90deg, #34d399, #5AA8FF);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
+    .hero-health { --hero-accent: rgba(90,168,255,0.95); }
     .panel {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -147,6 +176,21 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     .panel:hover {
       border-color: rgba(0,229,160,0.15);
       box-shadow: 0 0 20px rgba(0,229,160,0.05);
+    }
+    .panel-primary {
+      background: linear-gradient(180deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.02) 100%);
+      border-color: rgba(255,255,255,0.1);
+      box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+    }
+    .section-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      margin-bottom: 10px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
     }
     .hero { display: grid; grid-template-columns: auto 1fr; gap: 14px; align-items: center; }
     .pulse {
@@ -192,6 +236,14 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       gap: 8px;
       align-items: center;
     }
+    .event[data-severity="critical"],
+    .event:has(.sev.critical) { border-left: 3px solid var(--danger); }
+    .event[data-severity="high"],
+    .event:has(.sev.high) { border-left: 3px solid var(--warn); }
+    .event[data-severity="medium"],
+    .event:has(.sev.medium) { border-left: 3px solid #FFB800; }
+    .event[data-severity="low"],
+    .event:has(.sev.low) { border-left: 3px solid var(--info); }
     .event-item { animation: fadeSlideIn 0.3s ease; }
     @keyframes fadeSlideIn {
       from { opacity: 0; transform: translateY(-8px); }
@@ -222,6 +274,19 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       overflow: hidden;
     }
     .progress > div { height: 100%; background: var(--ok); }
+    .progress-bar-wrap {
+      height: 6px;
+      background: rgba(255,255,255,0.06);
+      border-radius: 999px;
+      overflow: hidden;
+      margin-top: 6px;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--ok), #5AA8FF);
+      transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+    }
     .table { width: 100%; border-collapse: collapse; font-size: 13px; }
     .table th, .table td {
       border-bottom: 1px solid var(--border);
@@ -457,7 +522,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         </div>
       </div>
       <div class="grid-4">
-        <div class="panel">
+        <div class="panel panel-primary">
           <div class="subtle">📥 Total Requests</div>
           <div id="m-requests" class="metric-value" data-raw="0">0</div>
           <svg id="spark-requests" class="sparkline" viewBox="0 0 60 20" preserveAspectRatio="none"></svg>
@@ -479,7 +544,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         </div>
       </div>
       <div class="grid-2">
-        <div class="panel">
+        <div class="panel panel-primary">
           <div><strong>Cost Timeline</strong></div>
           <div class="chart-wrap"><svg id="cost-chart" width="100%" height="220" viewBox="0 0 900 220"></svg></div>
           <div id="cost-tooltip" class="chart-tooltip"></div>
@@ -502,7 +567,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         </div>
       </div>
       <div class="panel">
-        <div><strong>Recent Events</strong></div>
+        <div class="section-title"><strong>Recent Events</strong></div>
         <div id="events" class="event-feed"></div>
       </div>
       <div class="grid-4" style="margin-top: 12px;">
@@ -544,12 +609,12 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         <div class="panel"><div class="subtle">Tracked Sessions</div><div id="exp-sessions" class="metric-value">0</div></div>
       </div>
       <div id="exp-cards"></div>
-      <div class="panel">
-        <strong>Task Correlations & Insights</strong>
+      <div class="panel panel-primary">
+        <div class="section-title"><strong>Task Correlations & Insights</strong></div>
         <div id="exp-correlations" class="event-feed"></div>
       </div>
       <div class="panel">
-        <strong>Outcome Distribution</strong>
+        <div class="section-title"><strong>Outcome Distribution</strong></div>
         <div id="exp-outcome-bar" class="outcome-bar"></div>
         <div id="exp-outcomes" class="grid-4"></div>
       </div>
@@ -562,8 +627,8 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         <div class="panel"><div class="subtle">Matches</div><div id="th-matches" class="metric-value">0</div></div>
         <div class="panel"><div class="subtle">Blocks</div><div id="th-blocks" class="metric-value">0</div></div>
       </div>
-      <div class="panel">
-        <strong>Top Threats</strong>
+      <div class="panel panel-primary">
+        <div class="section-title"><strong>Top Threats</strong></div>
         <div id="th-top"></div>
       </div>
       <div class="grid-2">
@@ -592,19 +657,19 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         <div class="panel"><div class="subtle">Cost Saved</div><div id="c-cost" class="metric-value">$0.00</div></div>
         <div class="panel"><div class="subtle">Entries</div><div id="c-entries" class="metric-value">0/0</div></div>
       </div>
-      <div class="panel">
-        <strong>Semantic Cache</strong>
+      <div class="panel panel-primary">
+        <div class="section-title"><strong>Semantic Cache</strong></div>
         <div id="c-semantic-breakdown"></div>
       </div>
       <div class="panel">
-        <strong>Context Engine</strong>
+        <div class="section-title"><strong>Context Engine</strong></div>
         <div id="c-context"></div>
       </div>
     </section>
 
     <section id="agents" class="screen">
-      <div class="panel">
-        <div><strong>Agent DNA</strong></div>
+      <div class="panel panel-primary">
+        <div class="section-title"><strong>Agent DNA</strong></div>
         <div id="agents-empty" class="empty" style="display:none;">No agent sessions recorded yet.</div>
         <table id="agents-table" class="table">
           <thead><tr><th>Agent ID</th><th>Requests</th><th>Avg Tokens</th><th>Anomaly</th><th>Tools</th><th>Last Seen</th></tr></thead>
@@ -614,8 +679,8 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     </section>
 
     <section id="sessions" class="screen">
-      <div class="panel">
-        <div><strong>Time Machine Sessions</strong></div>
+      <div class="panel panel-primary">
+        <div class="section-title"><strong>Time Machine Sessions</strong></div>
         <div id="sessions-empty" class="empty" style="display:none;">No sessions recorded yet.</div>
         <table id="sessions-table" class="table">
           <thead><tr><th>Session</th><th>Start</th><th>Duration</th><th>Requests</th><th>Cost</th><th>Errors</th><th>Status</th><th>Export</th></tr></thead>
@@ -625,9 +690,9 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     </section>
 
     <section id="flow" class="screen">
-      <div class="panel">
+      <div class="panel panel-primary">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-          <strong>Flow X-Ray</strong>
+          <strong class="section-title" style="margin:0;padding:0;border:0;">Flow X-Ray</strong>
           <select id="flow-session-select" class="tab-btn" style="padding:6px 10px;"></select>
         </div>
       </div>
@@ -662,49 +727,49 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
 
     <section id="compliance" class="screen">
       <div class="grid-2">
-        <div class="panel">
+        <div class="panel panel-primary">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-            <strong>Compliance Coverage Overview</strong>
+            <strong class="section-title" style="margin:0;padding:0;border:0;">Compliance Coverage Overview</strong>
             <button id="export-compliance-btn" class="tab-btn" style="padding:6px 10px;">Export Report JSON</button>
           </div>
           <div class="grid-2" style="margin-top:10px;">
             <div class="panel">
               <div class="subtle">OWASP LLM Top 10</div>
               <div id="cmp-owasp-percent" class="metric-value">0%</div>
-              <div class="progress"><div id="cmp-owasp-bar" style="width:0%"></div></div>
+              <div class="progress-bar-wrap"><div id="cmp-owasp-bar" class="progress-bar-fill" style="width:0%"></div></div>
             </div>
             <div class="panel">
               <div class="subtle">NIST AI RMF</div>
               <div id="cmp-nist-percent" class="metric-value">0%</div>
-              <div class="progress"><div id="cmp-nist-bar" style="width:0%"></div></div>
+              <div class="progress-bar-wrap"><div id="cmp-nist-bar" class="progress-bar-fill" style="width:0%"></div></div>
             </div>
           </div>
         </div>
         <div class="panel">
-          <strong>Recent Compliance Findings</strong>
+          <div class="section-title"><strong>Recent Compliance Findings</strong></div>
           <div id="cmp-findings" class="event-feed"></div>
         </div>
       </div>
       <div class="panel">
-        <strong>OWASP Top 10 Coverage</strong>
+        <div class="section-title"><strong>OWASP Top 10 Coverage</strong></div>
         <table id="cmp-owasp-table" class="table">
           <thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Modules</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
       <div class="panel">
-        <strong>Compliance Overview</strong>
+        <div class="section-title"><strong>Compliance Overview</strong></div>
         <div id="cmp-overview-text" class="subtle" style="margin-top:8px;"></div>
       </div>
     </section>
 
     <section id="approvals" class="screen">
-      <div class="panel">
-        <strong>PENDING APPROVALS (<span id="ap-pending-count">0</span>)</strong>
+      <div class="panel panel-primary">
+        <div class="section-title"><strong>PENDING APPROVALS (<span id="ap-pending-count">0</span>)</strong></div>
         <div id="approvals-pending" style="margin-top:10px;"></div>
       </div>
       <div class="panel">
-        <strong>HISTORY</strong>
+        <div class="section-title"><strong>HISTORY</strong></div>
         <div id="approvals-history" style="margin-top:10px;"></div>
       </div>
     </section>

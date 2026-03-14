@@ -1,183 +1,95 @@
-# Orchesis
+<div align="center">
+  <img src="docs/banner.svg" alt="Orchesis" />
+</div>
 
-**AI Agent Control Plane — transparent HTTP proxy for security, cost optimization, and reliability.**
+<div align="center">
 
-[![Tests](https://github.com/poushwell/orchesis/actions/workflows/test.yml/badge.svg)](https://github.com/poushwell/orchesis/actions/workflows/test.yml)
-[![Python](https://img.shields.io/badge/python-3.12+-blue)]()
-[![License](https://img.shields.io/badge/license-MIT-green)]()
-[![Dependencies](https://img.shields.io/badge/dependencies-zero-orange)]()
+[![PyPI](https://img.shields.io/pypi/v/orchesis?color=purple&label=PyPI)](https://pypi.org/project/orchesis/)
+[![Tests](https://img.shields.io/badge/tests-2738%20passing-brightgreen)](https://github.com/poushwell/orchesis)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/poushwell/orchesis?style=social)](https://github.com/poushwell/orchesis)
+[![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](https://github.com/poushwell/orchesis)
 
-One line between your AI agents and their LLM APIs. No code changes. No SDK. No vendor lock-in.
+</div>
+
+**Orchesis** is a transparent HTTP proxy between AI agents
+and LLM APIs. Every request passes through a 17-phase
+detection pipeline. Zero dependencies. MIT license.
+AI Agent -> [Orchesis: 17 phases] -> LLM Provider (OpenAI, Anthropic...)
+
+<div align="center">
+
+[![Get Started](https://img.shields.io/badge/Get%20Started-8B5CF6?style=for-the-badge)](https://orchesis.io/docs)
+[![MCP Scanner](https://img.shields.io/badge/MCP%20Scanner-Free-00FF41?style=for-the-badge)](https://orchesis.io/scan)
+[![Website](https://img.shields.io/badge/Website-orchesis.io-white?style=for-the-badge)](https://orchesis.io)
+
+</div>
+
+## Installation
+```bash
+pip install orchesis
+orchesis quickstart --preset openclaw
+```
+
+**One line change:**
+```python
+# Before:
+client = OpenAI(base_url="https://api.openai.com/v1")
+
+# After:
+client = OpenAI(base_url="http://localhost:8080/v1")
+# ↑ 17 security phases now active
+```
+
+## How it works
+```mermaid
+graph LR
+    A[AI Agent<br/>OpenClaw/CrewAI/LangChain] -->|HTTP request| B
+    B[Orchesis Proxy<br/>17-phase pipeline<br/>localhost:8080] -->|filtered request| C
+    C[LLM Provider<br/>OpenAI/Anthropic/Google]
+    B --> D[Dashboard<br/>Metrics & Alerts]
+```
+
+## What Orchesis does
+
+| | Security | Cost | Reliability | Observability |
+|---|---|---|---|---|
+| | 17-phase detection. Prompt injection, credential leaks, tool abuse. 25 signatures. | Context compression 80-90%. Semantic cache. Thompson Sampling routing. | Auto-healing. Circuit breakers. Loop detection. 6 recovery actions. | Real-time dashboard. Flow X-Ray. Agent Reliability Score. |
+
+## By the numbers
+
+| Metric | Value |
+|--------|-------|
+| Pipeline phases | 17 |
+| Threat signatures | 25 across 10 categories |
+| Token savings | 80-90% |
+| MAST coverage | 78.6% |
+| OWASP coverage | 80% |
+| Auto-heal actions | 6 |
+| Tests passing | 2,738 |
+| Dependencies | **0** (stdlib only) |
+
+## Free MCP Security Scanner
+
+Check your MCP configuration for security issues:
+
+**[→ orchesis.io/scan](https://orchesis.io/scan)**
+
+Or via CLI:
+```bash
+orchesis audit-openclaw
+```
 
 ---
 
-## What it does
+<div align="center">
 
-Orchesis sits between AI agents (OpenClaw, CrewAI, LangChain, any HTTP client) and LLM providers (OpenAI, Anthropic, Google). Every request passes through a 17-phase pipeline:
+**[Website](https://orchesis.io)** ·
+**[Documentation](https://orchesis.io/docs)** ·
+**[MCP Scanner](https://orchesis.io/scan)** ·
+**[Blog](https://orchesis.io/blog)**
 
-**Security:** Prompt injection detection, credential leak prevention, tool abuse blocking, threat intelligence (25 signatures across 10 categories)
+MIT License · Built with ❤️ and zero dependencies
 
-**Cost:** Context compression (80-90% token reduction), semantic caching, intelligent model routing (Thompson Sampling), budget enforcement
-
-**Reliability:** Loop detection, auto-healing (6 recovery actions), circuit breakers, agent behavioral analysis (MAST compliance)
-
-**Observability:** Real-time dashboard, Flow X-Ray request tracing, Agent Reliability Score, session recording + replay
-
-## Quick Start
-
-### Try the demo (no setup needed)
-
-```bash
-pip install orchesis
-orchesis demo
-# Open http://localhost:8080/dashboard
-```
-
-### Run with Docker
-
-```bash
-git clone https://github.com/poushwell/orchesis
-cd orchesis
-docker-compose up
-# Configure your agent: set LLM base URL to http://localhost:8080
-```
-
-### Install from PyPI
-
-```bash
-pip install orchesis
-orchesis proxy --config orchesis.yaml
-```
-
-### Minimal config (`orchesis.yaml`)
-
-```yaml
-proxy:
-  host: "0.0.0.0"
-  port: 8080
-upstream:
-  url: "https://api.openai.com"
-security:
-  enabled: true
-budget:
-  daily_limit_usd: 10.0
-dashboard:
-  enabled: true
-```
-
-One config change in your agent — set the base URL to `http://localhost:8080` — and everything routes through Orchesis. Zero code changes.
-
-## Dashboard
-
-[SCREENSHOT PLACEHOLDER - will add actual screenshot]
-
-Three numbers at a glance: **Threats Blocked** | **Money Saved** | **Fleet Health**
-
-Tabs: Security | Cost | Agents | Flow X-Ray | Compliance | Approvals
-
-### Demo mode
-
-```bash
-orchesis demo --port 8080
-```
-
-Launches dashboard with realistic sample data. No API keys needed. Try it before you commit.
-
-## Why not [alternative]?
-
-| | Orchesis | Galileo Agent Control ($68M) | DashClaw | Helicone |
-|---|---------|-----|----------|---------|
-| Approach | Transparent proxy | Decorator (code changes) | SDK (code changes) | Logging proxy |
-| Security | 17-phase adaptive detection | Basic guardrails | Policy rules | None |
-| Cost optimization | Context compression + routing | None | Token tracking | Logging only |
-| Dependencies | Zero (Python stdlib) | Multiple | Next.js + Postgres | Cloud service |
-| Self-hosted | Yes | Partial | Yes | No (acquired) |
-| Price | Free (MIT) | Enterprise pricing | Free (MIT) | Was free, now Mintlify |
-
-## Architecture
-
-Agent -> Orchesis Proxy -> LLM Provider  
-|  
-17-phase pipeline:  
-parse -> experiment -> flow_xray -> cascade -> circuit_breaker ->  
-loop_detection -> behavioral -> mast_request -> auto_healing ->  
-budget -> policy -> threat_intel -> model_router -> secrets ->  
-context -> upstream(+semantic_cache) -> post_upstream -> send  
-|  
-Dashboard (localhost:8080/dashboard)
-
-## Key metrics
-
-- **2,637** tests passing
-- **17** pipeline phases
-- **25** threat signatures across 10 categories
-- **8/14** MAST failure modes covered
-- **8/10** OWASP Agentic AI risks covered
-- **6** auto-healing actions
-- **0** external dependencies
-
-## Security coverage
-
-**OWASP Agentic AI Top 10:** ASI-01 through ASI-08 covered (80%)  
-**MAST (UC Berkeley):** 11/14 failure modes detected (78.6%)  
-**EU AI Act:** Audit trail + incident reporting ready  
-**NIST AI RMF:** Govern + Measure covered
-
-## OpenClaw preset
-
-Optimized configuration for OpenClaw users:
-
-```bash
-orchesis proxy --config config/orchesis_openclaw.yaml
-```
-
-Includes: cron context detection, system prompt deduplication, tool call loop detection, MCP security scanning patterns.
-
-## API
-
-```
-GET  /stats                          # Proxy statistics
-GET  /api/dashboard/overview         # Dashboard metrics
-GET  /api/v1/agents                  # Discovered agents
-GET  /api/v1/agents/{id}             # Agent details
-GET  /api/v1/agents/summary          # Fleet summary
-GET  /api/v1/tools                   # Tool policies
-GET  /api/v1/approvals               # Pending approvals
-POST /api/v1/approvals/{id}/approve  # Approve action
-POST /api/v1/approvals/{id}/deny     # Deny action
-GET  /sessions                       # Recorded sessions
-GET  /sessions/{id}                  # Session details
-```
-
-## Configuration
-
-Full reference: [docs/configuration.md](docs/configuration.md)
-
-Key sections:
-- `proxy` — host, port, max_workers, connection pool
-- `upstream` — LLM provider URL, API key passthrough
-- `security` — threat detection, secrets filtering, MAST compliance
-- `budget` — daily/monthly limits, per-model limits, alerts
-- `cascade` — model routing rules, fallback chains
-- `recording` — session capture, storage, retention
-- `dashboard` — enable/disable, auth
-
-## Contributing
-
-PRs welcome. Please:
-1. Fork the repo
-2. Create a feature branch
-3. Write tests (we have 2,637, keep the bar high)
-4. Run `python -m pytest tests/ -x -q`
-5. Open a PR
-
-## License
-
-MIT
-
----
-
-Security: [SECURITY.md](SECURITY.md) | Privacy: [PRIVACY.md](PRIVACY.md)
-
-Built by [Pavel](https://github.com/poushwell) | [orchesis.io](https://orchesis.io)
+</div>
 
