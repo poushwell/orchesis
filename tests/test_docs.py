@@ -32,11 +32,11 @@ def test_all_doc_files_exist() -> None:
 def test_readme_has_required_sections() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
     for section in (
-        "## What it does",
-        "## Quick Start",
-        "## Dashboard",
-        "## Architecture",
-        "## License",
+        "## Installation",
+        "## How it works",
+        "## What Orchesis does",
+        "## By the numbers",
+        "## Free MCP Security Scanner",
     ):
         assert section in text
 
@@ -48,17 +48,17 @@ def test_readme_has_install_command() -> None:
 
 def test_readme_has_quick_start() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
-    assert "## Quick Start" in text
+    assert "Get Started" in text
 
 
 def test_readme_has_badge_tests() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
-    assert "github.com/poushwell/orchesis/actions/workflows/test.yml/badge.svg" in text
+    assert "img.shields.io/badge/tests-2738%20passing-brightgreen" in text
 
 
 def test_readme_has_license_badge() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
-    assert "img.shields.io/badge/license-MIT-green" in text
+    assert "img.shields.io/badge/license-MIT-blue" in text
 
 
 def test_quick_start_exists() -> None:

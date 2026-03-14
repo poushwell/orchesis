@@ -23,6 +23,7 @@ from yaml import YAMLError
 from orchesis.auth import AgentAuthenticator, CredentialStore
 from orchesis.audit import AuditEngine, AuditQuery
 from orchesis.compliance import ComplianceEngine, FRAMEWORK_CHECKS, FrameworkCrossReference
+from orchesis.ari import AgentReadinessIndex
 from orchesis.contrib.ioc_database import IoCMatcher
 from orchesis.contrib.network_scanner import NetworkExposureScanner
 from orchesis.contrib.remote_scanner import RemoteSkillScanner
@@ -995,15 +996,24 @@ def demo_command(port: int) -> None:
 @click.option("--format", "output_format", type=click.Choice(["text", "json", "markdown"]), default="text")
 def audit_openclaw_command(config_path: str, output_format: str) -> None:
     """Audit OpenClaw deployment config and print report."""
+    from orchesis.audit_grade import calculate_grade, format_badge_embed, format_grade_box, format_tweet
     from orchesis.openclaw_auditor import OpenClawAuditor
 
     cfg_path = Path(config_path).expanduser()
     auditor = OpenClawAuditor()
     result = auditor.audit_config(str(cfg_path))
+    findings = list(result.findings)
+    grade = calculate_grade(findings)
     if output_format == "json":
         click.echo(json.dumps(asdict(result), indent=2, ensure_ascii=False))
         return
     click.echo(auditor.generate_report(result, format=output_format))
+    click.echo("")
+    click.echo(format_grade_box(grade, findings))
+    click.echo("Add to your README:")
+    click.echo(format_badge_embed(grade))
+    click.echo("Share your grade:")
+    click.echo(format_tweet(grade, findings))
 
 
 def _post_proxy_control(port: int, path: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2695,6 +2705,73 @@ def reliability_report(output_format: str) -> None:
         click.echo(generator.to_json(report))
         return
     click.echo(generator.to_markdown(report))
+
+
+@main.command("readiness")
+@click.option("--agent", "agent_id", required=True)
+@click.option("--config", "config_path", default="orchesis.yaml")
+def readiness_command(agent_id: str, config_path: str) -> None:
+    """Compute Agent Readiness Index (ARI) for an agent."""
+    policy: dict[str, Any] = {}
+    config_exists = Path(config_path).exists()
+    if config_exists:
+        try:
+            policy = load_policy(config_path)
+        except Exception:
+            policy = {}
+
+    readiness_cfg = policy.get("agent_readiness", {}) if isinstance(policy, dict) else {}
+    weights = readiness_cfg.get("weights") if isinstance(readiness_cfg, dict) else None
+    thresholds = readiness_cfg.get("thresholds") if isinstance(readiness_cfg, dict) else None
+
+    metrics: dict[str, Any] = {}
+    metrics_store = readiness_cfg.get("metrics", {}) if isinstance(readiness_cfg, dict) else {}
+    if isinstance(metrics_store, dict):
+        selected = metrics_store.get(agent_id, {})
+        if isinstance(selected, dict):
+            metrics = selected
+
+    ari = AgentReadinessIndex(weights=weights, thresholds=thresholds)
+    result = ari.evaluate(agent_id=agent_id, metrics=metrics)
+
+    green = "\033[92m"
+    yellow = "\033[93m"
+    red = "\033[91m"
+    reset = "\033[0m"
+    pass_mark = "✅"
+    warn_mark = "⚠️"
+    fail_mark = "❌"
+
+    click.echo(f"Agent Readiness Index: {agent_id}")
+    click.echo("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    click.echo(f"Verdict:  {result.verdict}")
+    click.echo(f"Index:    {result.index} / 100")
+    click.echo("")
+    click.echo("Dimensions:")
+    for dim in result.dimensions:
+        if dim.status == "pass":
+            color = green
+            mark = pass_mark
+            label = "PASS"
+        elif dim.status == "warn":
+            color = yellow
+            mark = warn_mark
+            label = "WARN"
+        else:
+            color = red
+            mark = fail_mark
+            label = "FAIL"
+        click.echo(f"  {color}{mark}{reset} {dim.name:<20} {dim.score:>5.1f}  {color}{label}{reset}")
+
+    if result.recommendations:
+        click.echo("")
+        click.echo("Recommendations:")
+        for recommendation in result.recommendations:
+            click.echo(f"  -> {recommendation}")
+
+    if not config_exists:
+        click.echo("")
+        click.echo(f"Note: config not found at {config_path}; evaluated using defaults.")
 
 
 @main.command("compliance")

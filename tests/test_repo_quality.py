@@ -51,19 +51,20 @@ def test_ci_tests_python_312_only() -> None:
 
 def test_readme_has_badges() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert content.startswith("# ")
+    assert '<img src="docs/banner.svg" alt="Orchesis" />' in content
+    assert "img.shields.io/pypi/v/orchesis" in content
+    assert "img.shields.io/badge/tests-2738%20passing-brightgreen" in content
 
 
 def test_readme_has_docker_section() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
-    # README public-launch format uses Quick Start and Docker snippets.
-    assert "## Quick Start" in content
-    assert "docker-compose up" in content
-    assert "orchesis proxy --config orchesis.yaml" in content
+    assert "## Installation" in content
+    assert "pip install orchesis" in content
+    assert "orchesis quickstart --preset openclaw" in content
 
 
 def test_readme_has_project_status() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "## Key metrics" in content
-    assert "2,637" in content
-    assert "## Security coverage" in content
+    assert "## By the numbers" in content
+    assert "2,738" in content
+    assert "## What Orchesis does" in content
