@@ -10,7 +10,25 @@ readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.12"
 authors = [{name = "Pavel", email = "contact@orchesis.io"}]
-keywords = ["ai", "agents", "security", "proxy", "llm", "openai", "anthropic", "mcp"]
+keywords = [
+    "ai",
+    "agents",
+    "security",
+    "proxy",
+    "llm",
+    "openai",
+    "anthropic",
+    "mcp",
+    "ai-security",
+    "llm-proxy",
+    "agent-security",
+    "prompt-injection",
+    "cost-optimization",
+    "openai-proxy",
+    "anthropic-proxy",
+    "ai-agent",
+    "mcp-security",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

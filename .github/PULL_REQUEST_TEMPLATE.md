@@ -1,21 +1,11 @@
-## What
+## Summary
 
-Brief description of changes.
-
-## Why
-
-What problem does this solve?
-
-## Testing
-
-- [ ] All existing tests pass (`pytest`)
-- [ ] New tests added for new functionality
-- [ ] Linter passes (`ruff check .`)
-- [ ] Invariants pass (`orchesis invariants`)
-- [ ] Fuzzer shows no new bypasses
+Describe what this PR changes and why.
 
 ## Checklist
 
+- [ ] Tests added/updated
+- [ ] All tests pass (`python -m pytest tests/ -x -q`)
+- [ ] Zero external dependencies
 - [ ] Backward compatible
-- [ ] Documentation updated
-- [ ] CHANGELOG updated
+

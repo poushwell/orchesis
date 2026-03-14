@@ -15,7 +15,9 @@ from orchesis import __version__
 def test_all_doc_files_exist() -> None:
     required = [
         Path("README.md"),
+        Path("QUICK_START.md"),
         Path("docs/QUICKSTART.md"),
+        Path("docs/configuration.md"),
         Path("docs/POLICY_REFERENCE.md"),
         Path("docs/TRUST_TIERS.md"),
         Path("docs/API_REFERENCE.md"),
@@ -30,14 +32,46 @@ def test_all_doc_files_exist() -> None:
 def test_readme_has_required_sections() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
     for section in (
-        "## The Problem",
+        "## What it does",
         "## Quick Start",
-        "## What It Does",
+        "## Dashboard",
         "## Architecture",
-        "## Integrations",
         "## License",
     ):
         assert section in text
+
+
+def test_readme_has_install_command() -> None:
+    text = Path("README.md").read_text(encoding="utf-8")
+    assert "pip install orchesis" in text
+
+
+def test_readme_has_quick_start() -> None:
+    text = Path("README.md").read_text(encoding="utf-8")
+    assert "## Quick Start" in text
+
+
+def test_readme_has_badge_tests() -> None:
+    text = Path("README.md").read_text(encoding="utf-8")
+    assert "img.shields.io/badge/tests-2637%20passing-brightgreen" in text
+
+
+def test_readme_has_license_badge() -> None:
+    text = Path("README.md").read_text(encoding="utf-8")
+    assert "img.shields.io/badge/license-MIT-green" in text
+
+
+def test_quick_start_exists() -> None:
+    assert Path("QUICK_START.md").exists()
+
+
+def test_issue_templates_exist() -> None:
+    assert Path(".github/ISSUE_TEMPLATE/bug_report.yml").exists()
+    assert Path(".github/ISSUE_TEMPLATE/feature_request.yml").exists()
+
+
+def test_pr_template_exists() -> None:
+    assert Path(".github/PULL_REQUEST_TEMPLATE.md").exists()
 
 
 def test_policy_reference_covers_all_rules() -> None:

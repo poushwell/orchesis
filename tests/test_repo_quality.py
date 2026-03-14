@@ -55,13 +55,14 @@ def test_readme_has_badges() -> None:
 
 def test_readme_has_docker_section() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
-    # README v3 uses "Quick Start" and proxy run command.
+    # README public-launch format uses Quick Start and Docker snippets.
     assert "## Quick Start" in content
-    assert "orchesis proxy --target https://api.openai.com" in content
+    assert "docker-compose up" in content
+    assert "orchesis proxy --config orchesis.yaml" in content
 
 
 def test_readme_has_project_status() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "## Key Numbers" in content
-    assert "1900+ tests" in content
-    assert "## Integrations" in content
+    assert "## Key metrics" in content
+    assert "2,637" in content
+    assert "## Security coverage" in content
