@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import random
 import re
+import threading
 from typing import Any
 
 
@@ -54,6 +56,63 @@ HIGH_COMPLEXITY_KEYWORDS = [
 ]
 
 
+class ThompsonSampler:
+    """Beta-distribution bandit for adaptive model selection."""
+
+    def __init__(self) -> None:
+        self._state: dict[str, dict[str, float]] = {}
+        self._lock = threading.Lock()
+
+    def register_model(self, model: str) -> None:
+        name = str(model or "").strip()
+        if not name:
+            return
+        with self._lock:
+            self._state.setdefault(name, {"alpha": 1.0, "beta": 1.0})
+
+    def sample(self, models: list[str]) -> str:
+        cleaned = [str(item).strip() for item in models if str(item).strip()]
+        if not cleaned:
+            return ""
+        best_model = cleaned[0]
+        best_score = -1.0
+        with self._lock:
+            for name in cleaned:
+                self._state.setdefault(name, {"alpha": 1.0, "beta": 1.0})
+            for name in cleaned:
+                priors = self._state[name]
+                score = random.betavariate(float(priors["alpha"]), float(priors["beta"]))
+                if score > best_score:
+                    best_score = score
+                    best_model = name
+        return best_model
+
+    def update(self, model: str, success: bool) -> None:
+        name = str(model or "").strip()
+        if not name:
+            return
+        with self._lock:
+            bucket = self._state.setdefault(name, {"alpha": 1.0, "beta": 1.0})
+            if bool(success):
+                bucket["alpha"] = float(bucket["alpha"]) + 1.0
+            else:
+                bucket["beta"] = float(bucket["beta"]) + 1.0
+
+    def get_stats(self) -> dict[str, dict[str, float]]:
+        with self._lock:
+            out: dict[str, dict[str, float]] = {}
+            for name, values in self._state.items():
+                alpha = float(values.get("alpha", 1.0))
+                beta = float(values.get("beta", 1.0))
+                denom = alpha + beta
+                out[name] = {
+                    "alpha": alpha,
+                    "beta": beta,
+                    "estimated_success_rate": (alpha / denom) if denom > 0 else 0.5,
+                }
+            return out
+
+
 class ModelRouter:
     """Routes LLM requests to an optimal model based on complexity."""
 
@@ -71,6 +130,12 @@ class ModelRouter:
         self._high_keywords = set(self._config.get("high_keywords", HIGH_COMPLEXITY_KEYWORDS))
         self._routing_log: list[dict[str, Any]] = []
         self._last_reason = "Default complexity"
+        self._sampler = ThompsonSampler()
+        self._sampler.register_model(self._default_model)
+        for item in self._rules:
+            if not isinstance(item, dict):
+                continue
+            self._sampler.register_model(str(item.get("model", "")).strip())
 
     def _classify(self, prompt: str, tool_name: str | None = None) -> str:
         prompt_lower = prompt.lower() if isinstance(prompt, str) else ""
@@ -113,10 +178,24 @@ class ModelRouter:
 
         complexity = self._classify(prompt or "", tool_name=tool_name)
         model = self._default_model
+        candidates: list[str] = []
         for rule in self._rules:
             if isinstance(rule, dict) and str(rule.get("complexity")) == complexity:
-                model = str(rule.get("model", model))
-                break
+                candidate = str(rule.get("model", "")).strip()
+                if candidate:
+                    candidates.append(candidate)
+        # Preserve existing behavior when only one model matches this tier.
+        unique_candidates = list(dict.fromkeys(candidates))
+        sampler_used = False
+        if len(unique_candidates) == 1:
+            model = unique_candidates[0]
+        elif len(unique_candidates) >= 2:
+            sampled = self._sampler.sample(unique_candidates)
+            model = sampled if sampled else unique_candidates[0]
+            sampler_used = True
+        elif complexity in {"low", "medium", "high"}:
+            # No explicit tier rule -> keep default model.
+            model = self._default_model
 
         default_rates = MODEL_COSTS.get(self._default_model, MODEL_COSTS["default"])
         selected_rates = MODEL_COSTS.get(model, MODEL_COSTS["default"])
@@ -129,9 +208,16 @@ class ModelRouter:
             "complexity": complexity,
             "reason": self._last_reason,
             "cost_ratio": round(ratio, 4),
+            "sampler_used": sampler_used,
         }
         self._routing_log.append(dict(result))
         return result
+
+    def record_outcome(self, model: str, success: bool) -> None:
+        self._sampler.update(model, bool(success))
+
+    def get_sampler_stats(self) -> dict[str, dict[str, float]]:
+        return self._sampler.get_stats()
 
     def get_savings_estimate(self) -> dict[str, Any]:
         total_calls = len(self._routing_log)
