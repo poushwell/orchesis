@@ -74,6 +74,36 @@ def test_pr_template_exists() -> None:
     assert Path(".github/PULL_REQUEST_TEMPLATE.md").exists()
 
 
+def test_security_md_exists() -> None:
+    assert Path("SECURITY.md").exists()
+
+
+def test_security_md_has_email() -> None:
+    text = Path("SECURITY.md").read_text(encoding="utf-8")
+    assert "security@orchesis.io" in text
+
+
+def test_security_md_has_response_timeline() -> None:
+    text = Path("SECURITY.md").read_text(encoding="utf-8")
+    assert "## Reporting a Vulnerability" in text
+    assert "### Response Timeline" in text
+    assert "within 48 hours" in text
+
+
+def test_privacy_md_exists() -> None:
+    assert Path("PRIVACY.md").exists()
+
+
+def test_privacy_md_states_no_telemetry() -> None:
+    text = Path("PRIVACY.md").read_text(encoding="utf-8")
+    assert "Does not include telemetry" in text
+
+
+def test_privacy_md_states_self_hosted() -> None:
+    text = Path("PRIVACY.md").read_text(encoding="utf-8")
+    assert "self-hosted" in text.lower()
+
+
 def test_policy_reference_covers_all_rules() -> None:
     text = Path("docs/POLICY_REFERENCE.md").read_text(encoding="utf-8")
     for rule_name in (

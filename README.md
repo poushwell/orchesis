@@ -177,5 +177,7 @@ MIT
 
 ---
 
+Security: [SECURITY.md](SECURITY.md) | Privacy: [PRIVACY.md](PRIVACY.md)
+
 Built by [Pavel](https://github.com/poushwell) | [orchesis.io](https://orchesis.io)
 

@@ -161,7 +161,7 @@ class QuickstartWizard:
 
     @staticmethod
     def _print_next_steps(config_path: Path, preset: str) -> None:
-        print(f"✓ Config written to {config_path}")
+        print(f"[OK] Config written to {config_path}")
         print("")
         print("Next steps:")
         print(f"  1. Start proxy:  orchesis proxy --config {config_path}")
