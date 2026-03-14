@@ -1,0 +1,79 @@
+name: 'Orchesis MCP Security Scan'
+description: 'Scan MCP configuration files for security vulnerabilities'
+author: 'Orchesis'
+
+inputs:
+  config-path:
+    description: 'Path to MCP config file'
+    required: false
+    default: ''
+  min-severity:
+    description: 'Minimum severity to report (critical/high/medium/low)'
+    required: false
+    default: 'low'
+  fail-on:
+    description: 'Fail the action if findings at this severity or above exist'
+    required: false
+    default: 'high'
+  output-format:
+    description: 'Output format: text or sarif'
+    required: false
+    default: 'text'
+  python-version:
+    description: 'Python version to use'
+    required: false
+    default: '3.12'
+
+outputs:
+  risk-score:
+    description: 'Overall risk score 0-100'
+  findings-count:
+    description: 'Total number of findings'
+  critical-count:
+    description: 'Number of critical findings'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install Orchesis
+      shell: bash
+      run: pip install orchesis
+
+    - name: Run MCP Security Scan
+      shell: bash
+      id: scan
+      run: |
+        if [ -n "${{ inputs.config-path }}" ]; then
+          python -m orchesis scan --format json "${{ inputs.config-path }}" > scan_result.json
+        else
+          python -m orchesis scan --format json --auto-discover > scan_result.json
+        fi
+        echo "risk-score=$(cat scan_result.json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get(\"risk_score\", 0))')" >> $GITHUB_OUTPUT
+        echo "findings-count=$(cat scan_result.json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d.get(\"findings\", [])))')" >> $GITHUB_OUTPUT
+        echo "critical-count=$(cat scan_result.json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(sum(1 for f in d.get(\"findings\",[]) if f[\"severity\"]==\"critical\"))')" >> $GITHUB_OUTPUT
+
+    - name: Print scan results
+      shell: bash
+      run: python -m orchesis scan --min-severity ${{ inputs.min-severity }} ${{ inputs.config-path || '--auto-discover' }}
+
+    - name: Fail on threshold
+      shell: bash
+      run: |
+        python3 -c "
+        import json, sys
+        with open('scan_result.json') as f:
+            data = json.load(f)
+        threshold = '${{ inputs.fail-on }}'
+        order = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1}
+        t = order.get(threshold, 3)
+        violations = [f for f in data.get('findings', []) if order.get(f['severity'], 0) >= t]
+        if violations:
+            print(f'FAILED: {len(violations)} findings at or above {threshold} severity')
+            sys.exit(1)
+        print('PASSED: No findings at or above threshold')
+        "
