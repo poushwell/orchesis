@@ -11,6 +11,8 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 import uuid
 
+from orchesis.policy_engine import PolicyEngine
+
 
 @dataclass
 class ToolDecision:
@@ -151,7 +153,7 @@ class ApprovalQueue:
 class ToolPolicyEngine:
     """Per-tool policy evaluation engine."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, policy_engine: PolicyEngine | None = None):
         cfg = config if isinstance(config, dict) else {}
         self.default_action = str(cfg.get("default_action", "deny") or "deny").strip().lower()
         if self.default_action not in {"allow", "block", "deny", "approve", "warn"}:
@@ -166,6 +168,7 @@ class ToolPolicyEngine:
         self._tool_stats: dict[str, dict[str, Any]] = {}
         self._blocked_attempts: list[dict[str, Any]] = []
         self.approval_queue = ApprovalQueue(max_pending=int(cfg.get("max_pending_approvals", 100)))
+        self._policy_engine = policy_engine
 
     @staticmethod
     def _normalize_action(value: str) -> str:
@@ -247,6 +250,75 @@ class ToolPolicyEngine:
                 tool,
                 {"usage_count": 0, "block_count": 0, "approve_count": 0, "warn_count": 0, "allow_count": 0, "top_users": {}},
             )
+            session_usage = self._usage_by_session.get(session, {})
+            current_session_calls = int(session_usage.get(tool, 0))
+            agent_usage = self._usage_by_agent.get(agent, {})
+            current_agent_calls = int(agent_usage.get(tool, 0))
+        if self._policy_engine is not None:
+            eval_result = self._policy_engine.evaluate(
+                tool_name=tool,
+                agent_id=agent,
+                session_calls=current_session_calls,
+                agent_calls=current_agent_calls,
+                token_count=0,
+                extra={"tool_args": args, "session_id": session},
+            )
+            if eval_result.matched:
+                action = self._normalize_action(eval_result.action)
+                if action == "block":
+                    with self._lock:
+                        self._tool_stats[tool]["block_count"] += 1
+                    self._record_blocked(tool, agent, session, eval_result.reason)
+                    return ToolDecision(
+                        tool_name=tool,
+                        action="block",
+                        reason=eval_result.reason,
+                        rule_source="policy_engine",
+                    )
+                if action == "approve":
+                    if provided_approval_id and self.approval_queue.consume_approved(provided_approval_id):
+                        with self._lock:
+                            self._tool_stats[tool]["allow_count"] += 1
+                        return ToolDecision(
+                            tool_name=tool,
+                            action="allow",
+                            reason=f"approval '{provided_approval_id}' consumed",
+                            rule_source="approval_queue",
+                            approval_id=provided_approval_id,
+                        )
+                    with self._lock:
+                        self._tool_stats[tool]["approve_count"] += 1
+                    approval = self.approval_queue.add(
+                        request_id=str(request_id or ""),
+                        agent_id=agent,
+                        tool_name=tool,
+                        tool_args=args,
+                        reason=eval_result.reason,
+                    )
+                    return ToolDecision(
+                        tool_name=tool,
+                        action="approve",
+                        reason=eval_result.reason,
+                        rule_source="policy_engine",
+                        approval_id=approval,
+                    )
+                if action == "warn":
+                    with self._lock:
+                        self._tool_stats[tool]["warn_count"] += 1
+                    return ToolDecision(
+                        tool_name=tool,
+                        action="warn",
+                        reason=eval_result.reason,
+                        rule_source="policy_engine",
+                    )
+                with self._lock:
+                    self._tool_stats[tool]["allow_count"] += 1
+                return ToolDecision(
+                    tool_name=tool,
+                    action="allow",
+                    reason=eval_result.reason,
+                    rule_source="policy_engine",
+                )
         rule = self._rules.get(tool)
         if isinstance(rule, str):
             action = self._normalize_action(rule)
