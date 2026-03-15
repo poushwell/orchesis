@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from click.testing import CliRunner
+from tests.cli_test_utils import CliRunner
 
 from orchesis.cli import main
 from orchesis.integrity import IntegrityMonitor, build_integrity_alert_callback

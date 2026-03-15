@@ -3,10 +3,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-
-import httpx
+from urllib.error import URLError
 
 from orchesis.telemetry import DecisionEvent
+from orchesis import webhooks as webhooks_module
 from orchesis.webhooks import WebhookConfig, WebhookEmitter
 
 
@@ -32,17 +32,24 @@ def _event(decision: str = "DENY") -> DecisionEvent:
 def test_webhook_filters_deny_only(monkeypatch) -> None:
     sent: list[dict] = []
 
-    def _fake_post(url: str, json: dict, headers: dict, timeout: float):  # noqa: A002
-        _ = (url, headers, timeout)
-        sent.append(json)
+    def _fake_urlopen(request, timeout: float):  # noqa: ANN001
+        _ = timeout
+        payload = json.loads(request.data.decode("utf-8"))
+        sent.append(payload)
 
         class _Resp:
-            def raise_for_status(self) -> None:
-                return None
+            status = 200
+
+            def __enter__(self):  # noqa: ANN001
+                return self
+
+            def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+                _ = (exc_type, exc, tb)
+                return False
 
         return _Resp()
 
-    monkeypatch.setattr(httpx, "post", _fake_post)
+    monkeypatch.setattr(webhooks_module, "urlopen", _fake_urlopen)
     emitter = WebhookEmitter(WebhookConfig(url="https://example.com/hook", events=["DENY"]))
     emitter.emit(_event("ALLOW"))
     emitter.emit(_event("DENY"))
@@ -74,11 +81,11 @@ def test_webhook_hmac_signature() -> None:
 
 
 def test_webhook_timeout_doesnt_crash(monkeypatch) -> None:
-    def _timeout(url: str, json: dict, headers: dict, timeout: float):  # noqa: A002
-        _ = (url, json, headers, timeout)
-        raise httpx.TimeoutException("timeout")
+    def _timeout(request, timeout: float):  # noqa: ANN001
+        _ = (request, timeout)
+        raise URLError("timeout")
 
-    monkeypatch.setattr(httpx, "post", _timeout)
+    monkeypatch.setattr(webhooks_module, "urlopen", _timeout)
     emitter = WebhookEmitter(WebhookConfig(url="https://example.com/hook", retry_count=0))
     emitter.emit(_event("DENY"))
     assert len(emitter.failed_deliveries) == 1

@@ -6,7 +6,7 @@ import os
 import time
 from pathlib import Path
 
-from click.testing import CliRunner
+from tests.cli_test_utils import CliRunner
 
 from orchesis.auth import AgentAuthenticator, CredentialStore
 from orchesis.cli import main

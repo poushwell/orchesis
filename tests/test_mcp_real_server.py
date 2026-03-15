@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import shlex
 import sys
 from contextlib import asynccontextmanager
@@ -10,6 +11,11 @@ from pathlib import Path
 import pytest
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+
+pytestmark = pytest.mark.skipif(
+    shutil.which("orchesis") is None,
+    reason="requires orchesis CLI installed",
+)
 
 
 def _sqlite_server_command() -> tuple[str, list[str]]:

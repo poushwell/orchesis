@@ -5,7 +5,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from click.testing import CliRunner
+from tests.cli_test_utils import CliRunner
 
 from orchesis.api import create_api_app
 from orchesis.cli import main

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from click.testing import CliRunner
+from tests.cli_test_utils import CliRunner
 
 from orchesis.cli import main
 from orchesis.contrib import network_scanner as ns_module

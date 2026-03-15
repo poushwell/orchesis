@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from click.testing import CliRunner
+from tests.cli_test_utils import CliRunner
 
 from orchesis.cli import main
 from orchesis.compliance import ComplianceEngine

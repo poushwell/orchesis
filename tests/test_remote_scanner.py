@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from click.testing import CliRunner
+from tests.cli_test_utils import CliRunner
 
 from orchesis.cli import main
 from orchesis.contrib.remote_scanner import RemoteSkillScanner

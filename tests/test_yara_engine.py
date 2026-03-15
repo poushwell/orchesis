@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from click.testing import CliRunner
+from tests.cli_test_utils import CliRunner
 
 from orchesis.cli import main
 from orchesis.yara_engine import ConditionEvaluator, YaraParser, load_yara_rules, scan_with_yara

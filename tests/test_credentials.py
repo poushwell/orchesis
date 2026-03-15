@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 import pytest
-from click.testing import CliRunner
+from tests.cli_test_utils import CliRunner
 from fastapi.testclient import TestClient
 
 from orchesis.cli import main
