@@ -17,6 +17,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 import yaml
+from orchesis.config import _RATE_LIMIT_WINDOW_SECONDS, _TOOL_RATE_LIMIT_PATTERN
 from orchesis.cost_tracker import CostTracker, DEFAULT_TOOL_COSTS
 from orchesis.contrib.pii_detector import PiiDetector
 from orchesis.contrib.secret_scanner import SecretScanner
@@ -48,8 +49,6 @@ _daily_token_usage_day: date = date.today()
 _daily_token_usage_lock = threading.Lock()
 _SECRET_SCANNER = SecretScanner()
 _PII_DETECTOR = PiiDetector()
-_TOOL_RATE_LIMIT_PATTERN = re.compile(r"^\s*(\d+)\s*/\s*(second|minute|hour)\s*$", re.IGNORECASE)
-_RATE_LIMIT_WINDOW_SECONDS = {"second": 1, "minute": 60, "hour": 3600}
 _COST_TRACKER = CostTracker()
 _LOOP_DETECTORS: dict[str, LoopDetector] = {}
 _LOOP_DETECTOR_LOCK = threading.Lock()
@@ -796,6 +795,28 @@ def _reset_daily_tokens(now: datetime) -> None:
             _daily_token_usage_day = current_day
 
 
+def _get_daily_token_usage(agent_id: str, current_day: date | None = None) -> int:
+    """Read per-agent daily token usage with day rollover protection."""
+    global _daily_token_usage_day
+    with _daily_token_usage_lock:
+        day = current_day or date.today()
+        if _daily_token_usage_day != day:
+            _daily_token_usage.clear()
+            _daily_token_usage_day = day
+        return int(_daily_token_usage.get(agent_id, 0))
+
+
+def _set_daily_token_usage(agent_id: str, value: int, current_day: date | None = None) -> None:
+    """Write per-agent daily token usage with day rollover protection."""
+    global _daily_token_usage_day
+    with _daily_token_usage_lock:
+        day = current_day or date.today()
+        if _daily_token_usage_day != day:
+            _daily_token_usage.clear()
+            _daily_token_usage_day = day
+        _daily_token_usage[agent_id] = int(max(0, value))
+
+
 def _check_token_limits(
     *,
     policy: dict[str, Any] | None,
@@ -845,16 +866,15 @@ def _check_token_limits(
     max_per_day = token_limits.get("max_tokens_per_day")
     if isinstance(max_per_day, int | float):
         _reset_daily_tokens(now)
-        with _daily_token_usage_lock:
-            used = _daily_token_usage.get(agent_id, 0)
-            projected = used + estimated
-            if projected > int(max_per_day):
-                reasons.append(
-                    f"token_budget: daily token budget exhausted for agent '{agent_id}' ({projected} > {int(max_per_day)})"
-                )
-                return reasons, checked
-            _daily_token_usage[agent_id] = projected
-            _ = token_limits.get("warn_at_percentage", 80)
+        used = _get_daily_token_usage(agent_id, now.date())
+        projected = used + estimated
+        if projected > int(max_per_day):
+            reasons.append(
+                f"token_budget: daily token budget exhausted for agent '{agent_id}' ({projected} > {int(max_per_day)})"
+            )
+            return reasons, checked
+        _set_daily_token_usage(agent_id, projected, now.date())
+        _ = token_limits.get("warn_at_percentage", 80)
 
     return reasons, checked
 
