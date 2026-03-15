@@ -914,9 +914,9 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     <section id="agents" class="screen">
       <div class="panel panel-primary">
         <div class="section-title"><strong>Agent DNA</strong></div>
-        <div id="agents-empty" class="empty" style="display:none;">No agent sessions recorded yet.</div>
+        <div id="agents-empty" class="empty" style="display:none;">No agents detected yet.</div>
         <table id="agents-table" class="table">
-          <thead><tr><th>Agent ID</th><th>Requests</th><th>Avg Tokens</th><th>Anomaly</th><th>Tools</th><th>Last Seen</th></tr></thead>
+          <thead><tr><th>Agent ID</th><th>Status</th><th>Requests</th><th>Cost</th><th>ARS Score</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -925,9 +925,9 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     <section id="sessions" class="screen">
       <div class="panel panel-primary">
         <div class="section-title"><strong>Time Machine Sessions</strong></div>
-        <div id="sessions-empty" class="empty" style="display:none;">No sessions recorded yet.</div>
+        <div id="sessions-empty" class="empty" style="display:none;">No sessions recorded.</div>
         <table id="sessions-table" class="table">
-          <thead><tr><th>Session</th><th>Start</th><th>Duration</th><th>Requests</th><th>Cost</th><th>Errors</th><th>Status</th><th>Export</th></tr></thead>
+          <thead><tr><th>Session ID</th><th>Agent</th><th>Requests</th><th>Duration</th><th>Cost</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -964,7 +964,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       </div>
       <div class="panel">
         <div><strong>Detected Patterns</strong></div>
-        <div id="patterns-empty" class="empty" style="display:none;">No patterns detected.</div>
+        <div id="patterns-empty" class="empty" style="display:none;">No data yet.</div>
         <div id="patterns"></div>
       </div>
     </section>
@@ -1466,17 +1466,18 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       empty.style.display = "none";
       document.getElementById("agents-table").style.display = "table";
       agents.forEach((a)=>{
-        const score = Number(a.anomaly_score || 0);
-        const pct = Math.max(0, Math.min(100, score*100));
-        const color = pct > 70 ? "var(--danger)" : (pct > 35 ? "var(--warn)" : "var(--ok)");
+        const score = Number(a.ars_score ?? a.anomaly_score ?? 0);
+        const status = String(a.status || a.state || "active");
+        const reqs = Number(a.total_requests || a.requests_today || 0);
+        const cost = Number(a.total_cost_usd || a.cost_day_usd || 0);
+        const grade = String(a.ars_grade || "").toUpperCase();
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td><strong>${a.agent_id || "unknown"}</strong><div class="subtle">${a.state || ""}</div></td>
-          <td>${fmtNum(a.total_requests)}</td>
-          <td>${fmtNum(a.avg_tokens)}</td>
-          <td><div class="progress"><div style="width:${pct.toFixed(1)}%;background:${color};"></div></div><div class="subtle">${score.toFixed(3)}</div></td>
-          <td>${(a.tools_used || []).slice(0,4).join(", ") || "-"}</td>
-          <td>${a.last_seen || "-"}</td>
+          <td><strong>${a.agent_id || "unknown"}</strong></td>
+          <td>${status}</td>
+          <td>${fmtNum(reqs)}</td>
+          <td>${fmtMoney(cost)}</td>
+          <td>${grade ? `${grade} (${score.toFixed(1)})` : score.toFixed(3)}</td>
         `;
         table.appendChild(tr);
       });
@@ -1495,27 +1496,19 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       empty.style.display = "none";
       document.getElementById("sessions-table").style.display = "table";
       sessions.forEach((s)=>{
-        const status = Number(s.error_count || 0) > 0 ? "issues" : "ok";
         const sid = String(s.session_id || "");
+        const durationSec = Math.max(0, Number(s.duration_seconds || ((Number(s.end_time || 0) - Number(s.start_time || 0)))));
+        const reqCount = Number(s.request_count || s.requests || 0);
+        const agentId = String(s.agent_id || s.agent || s.user || "unknown");
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td><strong>${sid.slice(0,12)}</strong></td>
-          <td>${fmtTs(s.start_time)}</td>
-          <td>${fmtDuration((Number(s.end_time||0)-Number(s.start_time||0)))}</td>
-          <td>${fmtNum(s.request_count)}</td>
-          <td>${fmtMoney(s.total_cost || 0)}</td>
-          <td>${fmtNum(s.error_count)}</td>
-          <td><span class="cb-pill ${status==='ok'?'closed':'open'}">${status}</span></td>
-          <td><button class="tab-btn export-air-btn" data-session-id="${sid}" style="padding:5px 9px;">Export .air</button></td>
+          <td>${agentId}</td>
+          <td>${fmtNum(reqCount)}</td>
+          <td>${fmtDuration(durationSec)}</td>
+          <td>${fmtMoney(s.total_cost || s.cost_usd || 0)}</td>
         `;
         table.appendChild(tr);
-      });
-      document.querySelectorAll(".export-air-btn").forEach((btn)=>{
-        btn.addEventListener("click", ()=>{
-          const sid = String(btn.getAttribute("data-session-id") || "");
-          if(!sid){ return; }
-          window.open(`/api/sessions/${encodeURIComponent(sid)}/export?download=true&content_level=full`, "_blank");
-        });
       });
     }
 
@@ -1523,6 +1516,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       if(!analysis){
         document.getElementById("patterns").innerHTML = "";
         document.getElementById("patterns-empty").style.display = "block";
+        document.getElementById("patterns-empty").textContent = "Select a session above";
         renderFlowGraph(null);
         return;
       }
@@ -1537,8 +1531,20 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       const patterns = Array.isArray(analysis.patterns) ? analysis.patterns : [];
       const box = document.getElementById("patterns");
       box.innerHTML = "";
+      const phaseKeys = [
+        "parse","experiment","flow_xray","cascade","circuit_breaker","loop_detection","behavioral",
+        "mast_request","auto_healing","budget","policy","threat_intel","model_router","secrets",
+        "context","upstream","post_upstream","send",
+      ];
+      const blocked = Number((analysis.summary && analysis.summary.blocked_count) || 0);
+      const warned = Number((analysis.summary && analysis.summary.warning_count) || 0);
+      const phaseState = blocked > 0 ? "block" : (warned > 0 ? "warn" : "pass");
+      const phaseStateClass = phaseState === "block" ? "high" : (phaseState === "warn" ? "medium" : "low");
+      const phaseRows = phaseKeys.map((p)=> `<div class="event event-item"><span class="sev ${phaseStateClass}">${phaseState.toUpperCase()}</span><span>${p}</span></div>`).join("");
+      box.innerHTML = `<div class="panel" style="margin-bottom:10px;"><strong>Pipeline Phases</strong><div style="margin-top:8px;">${phaseRows}</div></div>`;
       if(patterns.length === 0){
         document.getElementById("patterns-empty").style.display = "block";
+        document.getElementById("patterns-empty").textContent = "No data yet";
       }else{
         document.getElementById("patterns-empty").style.display = "none";
         patterns.forEach((p)=>{
@@ -1662,25 +1668,21 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       const cards = document.getElementById("exp-cards");
       cards.innerHTML = "";
       const exps = (experiments && Array.isArray(experiments.experiments)) ? experiments.experiments : [];
-      const running = exps.filter((e)=> String(e.status || "").toLowerCase() === "running");
+      const running = exps.filter((e)=> String(e.status || "").toLowerCase() === "running" || !e.status);
       if(running.length === 0){
-        cards.innerHTML = `<div class="panel empty">Not configured or no active experiments.</div>`;
+        cards.innerHTML = `<div class="panel empty">No experiments running.</div>`;
       }else{
-        running.forEach((exp)=>{
-          const card = document.createElement("div");
-          card.className = "panel";
-          card.innerHTML = `<strong>${exp.name || "Experiment"}</strong> <span class="cb-pill closed">RUNNING</span>`;
-          const expId = String(exp.experiment_id || exp.id || "");
-          if(expId){
-            fetchData(`/api/experiments/${encodeURIComponent(expId)}/live`).then((live)=>{
-              if(live){
-                const requests = Number(live.total_requests || 0);
-                card.innerHTML += `<div class="subtle">Live requests: ${fmtNum(requests)}</div>`;
-              }
-            });
-          }
-          cards.appendChild(card);
-        });
+        const rows = running.map((exp)=>{
+          const reqs = Number(exp.total_requests || exp.requests || 0);
+          const pValue = Number(exp.p_value || exp.pvalue || 0);
+          return `<tr>
+            <td>${exp.name || exp.experiment_id || "Experiment"}</td>
+            <td>${exp.variant || exp.assigned_variant || "-"}</td>
+            <td>${fmtNum(reqs)}</td>
+            <td>${pValue ? pValue.toFixed(4) : "-"}</td>
+          </tr>`;
+        }).join("");
+        cards.innerHTML = `<div class="panel"><table class="table"><thead><tr><th>Experiment</th><th>Variant</th><th>Requests</th><th>P-value</th></tr></thead><tbody>${rows}</tbody></table></div>`;
       }
 
       const corrEl = document.getElementById("exp-correlations");
@@ -1765,11 +1767,16 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         ? `${fmtNum(totalEntries)}/${fmtNum(maxEntries)}`
         : `${fmtNum(totalEntries)}`;
       document.getElementById("c-entries").textContent = entriesLabel;
+      const hitRateEl = document.getElementById("c-hit-rate");
+      if(hitRateEl){
+        const pct = Math.max(semanticRate, cascadeRate);
+        hitRateEl.innerHTML = `${pct.toFixed(1)}%<div class="progress" style="margin-top:6px;"><div style="width:${Math.max(0, Math.min(100, pct)).toFixed(1)}%;background:var(--ok);"></div></div>`;
+      }
 
       const semEl = document.getElementById("c-semantic-breakdown");
       if(!sc.enabled){
         semEl.innerHTML = `
-          <div class="empty">Semantic cache not configured.</div>
+          <div class="empty">Semantic cache disabled.</div>
           <div style="margin-top:8px;">Cascade cache hit rate: ${cascadeRate.toFixed(1)}% | Entries: ${fmtNum(cascadeEntries)}</div>
         `;
       }else{
@@ -1833,7 +1840,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       findingsEl.innerHTML = "";
       const list = (findings && Array.isArray(findings.findings)) ? findings.findings.slice(0, 10) : [];
       if(list.length === 0){
-        findingsEl.innerHTML = `<div class="empty">No compliance findings.</div>`;
+        findingsEl.innerHTML = `<div class="empty">No data yet.</div>`;
       }else{
         list.forEach((f)=>{
           const sev = String(f.severity || "info").toLowerCase();

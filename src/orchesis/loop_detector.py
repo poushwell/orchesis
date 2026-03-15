@@ -34,8 +34,8 @@ class LoopDetector:
 
     def __init__(
         self,
-        warn_threshold: int = 5,
-        block_threshold: int = 10,
+        warn_threshold: int = 3,
+        block_threshold: int = 5,
         window_seconds: float = 300.0,
         similarity_check: bool = True,
         config: dict[str, Any] | None = None,

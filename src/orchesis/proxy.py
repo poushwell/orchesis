@@ -3358,17 +3358,25 @@ class LLMHTTPProxy:
             if isinstance(last_msg, dict) and str(last_msg.get("role", "")).lower() == "user":
                 content = last_msg.get("content", "")
                 if isinstance(content, str) and len(content) > 10:
-                    session_id = (
+                    session_scope = (
                         ctx.handler.headers.get("x-openclaw-session")
                         or ctx.handler.headers.get("x-session-id")
-                        or ctx.proc_result.get("session_id", "default")
+                        or ctx.handler.headers.get("x-orchesis-agent")
+                        or ctx.handler.headers.get("x-agent-id")
+                        or ctx.behavior_agent_id
+                        or ctx.handler.headers.get("user-agent")
+                        or "default"
                     )
-                    result = self._content_loop_detector.check(content, str(session_id))
+                    result = self._content_loop_detector.check(content, str(session_scope))
                     ctx.content_loop_count = int(result.get("count", 0))
                     if result.get("action") == "block":
                         self._loop_trigger_hits += 1
                         self._inc("blocked")
                         retry_after = int(result.get("retry_after", 300))
+                        _HTTP_PROXY_LOGGER.warning(
+                            "Loop detected: %s identical requests",
+                            int(result.get("count", 0)),
+                        )
                         self._cost_tracker.record_loop_prevented_savings(self._estimated_avg_request_cost_usd)
                         self._send_json(
                             ctx.handler,
@@ -3389,7 +3397,7 @@ class LLMHTTPProxy:
                             },
                         )
                         if self._alert_manager:
-                            self._alert_manager.alert(AlertEvent(severity=AlertSeverity.CRITICAL, event_type="loop_detected", title="Content loop blocked", details=f"{result.get('count', 0)} identical messages in {result.get('window_seconds', 0)}s", session_id=str(session_id)))
+                            self._alert_manager.alert(AlertEvent(severity=AlertSeverity.CRITICAL, event_type="loop_detected", title="Content loop blocked", details=f"{result.get('count', 0)} identical messages in {result.get('window_seconds', 0)}s", session_id=str(session_scope)))
                         return False
         return True
 

@@ -29,7 +29,7 @@ MODEL = "gpt-4o-mini"
 ITERATIONS = 10
 TEMPERATURE = 0
 OPENAI_BASE_URL = "https://api.openai.com/v1"
-PROXY_BASE_URL = "http://localhost:8080/v1"
+PROXY_BASE_URL = "http://127.0.0.1:8080/v1"
 
 
 def _cost_usd(prompt_tokens: int, completion_tokens: int) -> float:
@@ -200,7 +200,7 @@ def main() -> int:
             print("Running Path B (proxy)...")
             path_b = _run_path(path_name="B", base_url=PROXY_BASE_URL, iterations=ITERATIONS, api_key=api_key)
         else:
-            print("Warning: Orchesis proxy is not reachable at http://localhost:8080. Skipping Path B.")
+            print("Warning: Orchesis proxy is not reachable at http://127.0.0.1:8080. Skipping Path B.")
 
     summary = _print_summary(path_a, path_b)
     today = date.today()

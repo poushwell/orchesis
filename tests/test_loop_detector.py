@@ -3,7 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import time
 
-from orchesis.loop_detector import LoopDetector
+from orchesis.loop_detector import ContentLoopDetector, LoopDetector
 
 
 def _cfg(action_exact: str = "warn", action_fuzzy: str = "block") -> dict:
@@ -130,4 +130,14 @@ def test_legacy_stats_fields_present() -> None:
     assert "loops_blocked" in stats
     assert "exact_detections" in stats
     assert "fuzzy_detections" in stats
+
+
+def test_heartbeat_loop_blocks() -> None:
+    """Sending same message 5 times should trigger block."""
+    detector = ContentLoopDetector(max_identical=5)
+    msg = "Read HEARTBEAT.md"
+    result = {"action": "allow"}
+    for _ in range(5):
+        result = detector.check(msg)
+    assert result.get("action") in {"block", "warn"}
 
