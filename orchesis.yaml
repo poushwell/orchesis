@@ -1,94 +1,23 @@
-default_trust_tier: assistant
-default_action: deny
-
-budgets:
-  daily: 50.0
-
-rules:
-  - type: rate_limit
-    requests_per_minute: 60
-  - type: budget_limit
-    daily_budget_usd: 5.0
-  - name: default_deny
-    denied_paths: ["/etc", "/root", "~/.ssh", "~/.aws"]
-
+rules: []
 proxy:
   host: "0.0.0.0"
   port: 8080
-  upstream:
-    openai: "https://api.openai.com"
-    anthropic: "https://api.anthropic.com"
-  secret_scanning:
-    enabled: true
-  pii_scanning:
-    enabled: true
-
-loop_detection:
+  timeout: 300
+upstream:
+  url: "https://api.openai.com"
+dashboard:
   enabled: true
-  exact:
-    threshold: 5
-    window_seconds: 60
-    action: warn
-  fuzzy:
-    threshold: 10
-    window_seconds: 60
-    action: block
-
-cascade:
-  enabled: true
-  levels:
-    trivial:
-      model: gpt-4o-mini
-      max_tokens: 1000
-    simple:
-      model: gpt-4o-mini
-      max_tokens: 2000
-    medium:
-      model: gpt-4o
-      max_tokens: 4000
-    complex:
-      model: gpt-4o
-      max_tokens: 8000
-
-context_engine:
-  enabled: true
-  strategies:
-    - dedup
-    - trim_tool_results
-    - trim_system_dups
-  max_tool_result_tokens: 2000
-
+budgets:
+  daily: 10.00
+recording:
+  enabled: false
 threat_intel:
   enabled: true
-  severity_actions:
-    critical: block
-    high: warn
-    medium: log
-
+adaptive_detection:
+  enabled: true
+loop_detection:
+  enabled: true
+cost_optimizer:
+  enabled: true
 semantic_cache:
-  enabled: true
-  max_entries: 500
-  ttl_seconds: 300
-  simhash_threshold: 8
-  jaccard_threshold: 0.6
-
-experiments:
-  enabled: true
-  max_experiments: 5
-
-task_tracking:
-  enabled: true
-  max_tracked_sessions: 1000
-
-recording:
-  enabled: true
-  storage_path: ".orchesis/sessions"
-
-behavioral_fingerprint:
-  enabled: true
-
-flow_xray:
-  enabled: true
-
-logging:
   enabled: true
