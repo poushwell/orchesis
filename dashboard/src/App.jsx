@@ -21,13 +21,34 @@ function buildHistory(prev, key, value, max = 20) {
   return series;
 }
 
-function StatusBadge({ status }) {
-  const normalized = String(status || "clear").toLowerCase();
-  const label = normalized === "alert" ? "ALERT" : normalized === "monitoring" ? "MONITORING" : "ALL CLEAR";
+function RadarIndicator({ alert }) {
   return (
-    <div className={`status-pill ${normalized}`}>
-      <span className="pulse-dot" />
-      {label}
+    <div className={`radar ${alert ? "alert" : ""}`}>
+      <span className="ring r1" />
+      <span className="ring r2" />
+      <span className="ring r3" />
+      <span className="sweep" />
+      <span className="core" />
+    </div>
+  );
+}
+
+function StatusHero({ status, threats }) {
+  const normalized = String(status || "clear").toLowerCase();
+  const alert = normalized === "alert";
+  const label = alert ? "ALERT" : "ALL CLEAR";
+  const color = alert ? "var(--red)" : "var(--green)";
+  return (
+    <div className={`status-hero ${alert ? "alert" : "clear"}`}>
+      <RadarIndicator alert={alert} />
+      <div>
+        <div className="status-main" style={{ color }}>
+          {label}
+        </div>
+        <div className="status-sub mono">
+          17-PHASE PIPELINE · {Number(threats || 0)} THREATS DETECTED · MONITORING ACTIVE
+        </div>
+      </div>
     </div>
   );
 }
@@ -92,30 +113,41 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <TabBar activeTab={tab} onTabChange={setTab} connected={connected} />
+      <TabBar
+        activeTab={tab}
+        onTabChange={setTab}
+        connected={connected}
+        uptimeSeconds={overview.uptime_seconds || stats.uptime_seconds || 0}
+      />
 
       {tab === "Shield" && (
         <main className="tab-screen">
-          <section className="hero card">
-            <div>
-              <div className="hero-title">Shield Status</div>
-              <StatusBadge status={overview.status} />
-            </div>
-            <div className="hero-right">
-              <div className="hero-kpi">
-                <span>Safety Ratio</span>
-                <strong>{safetyRatio.toFixed(1)}%</strong>
-              </div>
-              <div className="hero-kpi">
-                <span>Theme</span>
-                <strong>{theme.toUpperCase()}</strong>
-              </div>
-            </div>
-          </section>
+          <StatusHero status={overview.status} threats={threatStats.total_matches} />
 
           <section className="grid metrics-grid">
             {metrics.map((metric) => (
-              <MetricCard key={metric.title} title={metric.title} value={metric.value} points={metric.points} />
+              <MetricCard
+                key={metric.title}
+                title={metric.title}
+                value={metric.value}
+                points={metric.points}
+                tone={
+                  metric.title === "Blocked" && Number(overview.blocked_requests || 0) > 0
+                    ? "red"
+                    : metric.title === "Blocked"
+                      ? "green"
+                      : "purple"
+                }
+                accent={
+                  metric.title === "Blocked" && Number(overview.blocked_requests || 0) > 0
+                    ? "var(--red)"
+                    : metric.title === "Blocked"
+                      ? "var(--green)"
+                      : metric.title === "Active Agents"
+                        ? "var(--purple)"
+                        : "var(--text)"
+                }
+              />
             ))}
           </section>
 
@@ -123,23 +155,41 @@ export default function App() {
             <CostTimeline points={overview.cost_timeline || []} />
             <section className="card savings">
               <h3>Cost Savings</h3>
+              <div className="saving-total mono">{money(overview.money_saved_usd)}</div>
               <div className="saving-row">
-                <span>Total</span>
-                <strong>{money(overview.money_saved_usd)}</strong>
+                <span>Semantic Cache</span>
+                <strong className="mono">{money((stats.semantic_cache || {}).total_cost_saved_usd)}</strong>
               </div>
               <div className="saving-row">
-                <span>Cache</span>
-                <strong>{money((stats.semantic_cache || {}).total_cost_saved_usd)}</strong>
+                <span>Cascade Routing</span>
+                <strong className="mono">
+                  {money(Number(stats.cascade_savings_today_usd || (stats.cascade || {}).cost_saved_usd || 0))}
+                </strong>
               </div>
               <div className="saving-row">
-                <span>Context</span>
-                <strong>{number((stats.context_engine || {}).total_tokens_saved)} tokens</strong>
+                <span>Loop Prevention</span>
+                <strong className="mono">
+                  {money(Number((stats.loop_detection || {}).total_cost_saved_usd || 0))}
+                </strong>
               </div>
               <div className="saving-row">
-                <span>Velocity / h</span>
-                <strong>{money((overview.cost_velocity || {}).current_rate_per_hour || 0)}</strong>
+                <span>Context Trim</span>
+                <strong className="mono">
+                  {money(Number((stats.context_engine || {}).total_tokens_saved || 0) * 0.000003)}
+                </strong>
               </div>
             </section>
+          </section>
+
+          <section className="card shield-meta">
+            <div className="meta-item">
+              <span className="mono">SAFETY RATIO</span>
+              <strong>{safetyRatio.toFixed(1)}%</strong>
+            </div>
+            <div className="meta-item">
+              <span className="mono">THEME</span>
+              <strong>{theme.toUpperCase()}</strong>
+            </div>
           </section>
         </main>
       )}
@@ -162,7 +212,7 @@ export default function App() {
 
       {tab === "Compliance" && (
         <main className="tab-screen">
-          <section className="card">
+          <section className="card compliance-card">
             <h3>Compliance Coverage</h3>
             {[
               ["MAST", (overview.compliance_overview || {}).mast?.score || 0],
@@ -173,10 +223,21 @@ export default function App() {
               <div key={label} className="progress-row">
                 <div className="progress-head">
                   <span>{label}</span>
-                  <span>{Number(value).toFixed(1)}%</span>
+                  <span className="progress-big mono">{Number(value).toFixed(1)}%</span>
                 </div>
-                <div className="progress-bar">
-                  <div className="progress-fill" style={{ width: `${Math.max(0, Math.min(100, Number(value)))}%` }} />
+                <div className="progress-track">
+                  <div
+                    className="progress-fill"
+                    style={{
+                      width: `${Math.max(0, Math.min(100, Number(value)))}%`,
+                      background:
+                        Number(value) >= 90
+                          ? "var(--green)"
+                          : Number(value) >= 70
+                            ? "var(--purple)"
+                            : "var(--orange)"
+                    }}
+                  />
                 </div>
               </div>
             ))}
