@@ -64,6 +64,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 orchesis = ["*.html", "*.yaml", "*.json", "marketplace/packs/*.yaml", "yara_rules/*.yar"]
+"*" = ["dashboard/dist/**/*", "dashboard/dist/*"]
 
 [tool.ruff]
 line-length = 100

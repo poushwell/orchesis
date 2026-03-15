@@ -11,6 +11,10 @@ def _dashboard_dist_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "dashboard" / "dist"
 
 
+def _packaged_dashboard_dist_dir() -> Path:
+    return Path(__file__).resolve().parent / "dashboard_dist"
+
+
 def _inline_dist_assets(index_html: str, dist_dir: Path) -> str:
     """Inline built Vite assets so /dashboard works without extra routes."""
 
@@ -65,11 +69,14 @@ def register_dashboard_static_routes(app) -> None:
 
 def get_dashboard_html(demo_mode: bool = False) -> str:
     """Return a fully self-contained dashboard HTML page."""
-    dist_dir = _dashboard_dist_dir()
-    dist_index = dist_dir / "index.html"
-    if dist_index.exists() and "PYTEST_CURRENT_TEST" not in os.environ:
-        built = dist_index.read_text(encoding="utf-8")
-        return _inline_dist_assets(built, dist_dir)
+    packaged_dist_dir = _packaged_dashboard_dist_dir()
+    dev_dist_dir = _dashboard_dist_dir()
+    dist_candidates = [packaged_dist_dir / "index.html", dev_dist_dir / "index.html"]
+    if "PYTEST_CURRENT_TEST" not in os.environ:
+        for dist_index in dist_candidates:
+            if dist_index.exists():
+                built = dist_index.read_text(encoding="utf-8")
+                return _inline_dist_assets(built, dist_index.parent)
 
     html = """<!doctype html>
 <html lang="en">
