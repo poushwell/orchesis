@@ -8,6 +8,8 @@ import sys
 import threading
 from typing import Any
 
+from orchesis import __version__
+
 logger = logging.getLogger("orchesis.mcp")
 
 MCP_VERSION = "2024-11-05"
@@ -87,7 +89,7 @@ class MCPServer:
             {
                 "protocolVersion": MCP_VERSION,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "orchesis", "version": "0.1.0"},
+                "serverInfo": {"name": "orchesis", "version": __version__},
             },
         )
 

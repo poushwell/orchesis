@@ -1661,7 +1661,7 @@ def create_proxy_app(
                         total_decisions += value
         return {
             "status": "healthy",
-            "version": "0.1.0",
+            "version": ORCHESIS_VERSION,
             "policy_version": current_policy_hash,
             "uptime_seconds": int(max(0.0, time.perf_counter() - app_started_at)),
             "total_decisions": total_decisions,

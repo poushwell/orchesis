@@ -31,6 +31,7 @@ from orchesis.state import RateLimitTracker
 from orchesis.structured_log import StructuredLogger
 from orchesis.sync import PolicySyncServer
 from orchesis.telemetry import JsonlEmitter
+from orchesis import __version__
 
 
 def create_api_app(
@@ -455,7 +456,7 @@ def create_api_app(
         )
         corpus_stats = corpus.stats()
         return {
-            "version": "0.1.0",
+            "version": __version__,
             "uptime_seconds": int(max(0.0, time.perf_counter() - started_at)),
             "policy_version": app.state.current_version.version_id,
             "total_decisions": total_decisions,

@@ -28,6 +28,7 @@ from orchesis.state import RateLimitTracker
 from orchesis.structured_log import StructuredLogger
 from orchesis.sync import PolicySyncClient
 from orchesis.telemetry import EventEmitter, JsonlEmitter
+from orchesis import __version__
 
 
 class DownstreamSession(Protocol):
@@ -287,7 +288,7 @@ async def run_stdio_proxy(settings: McpProxySettings | None = None) -> None:
         server = build_proxy_server(interceptor)
         init_options = InitializationOptions(
             server_name="orchesis-mcp-proxy",
-            server_version="0.1.0",
+            server_version=__version__,
             capabilities=server.get_capabilities(
                 notification_options=NotificationOptions(),
                 experimental_capabilities={},

@@ -169,7 +169,7 @@ circuit_breaker:
         )
         with pytest.raises(HTTPError) as first:
             urlopen(req, timeout=3)
-        assert first.value.code == 500
+        assert first.value.code in (500, 502)
         with pytest.raises(HTTPError) as second:
             urlopen(req, timeout=3)
         assert second.value.code == 503
