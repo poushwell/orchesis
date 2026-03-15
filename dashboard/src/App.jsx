@@ -55,7 +55,7 @@ function StatusHero({ status, threats }) {
 
 export default function App() {
   const [tab, setTab] = useState("Shield");
-  const [theme, setTheme] = useState("default");
+  const [, setTheme] = useState("default");
   const [sparkData, setSparkData] = useState({});
   const { data, connected } = useApiPolling(tab);
 
@@ -106,10 +106,6 @@ export default function App() {
     ],
     [overview, sparkData]
   );
-
-  const safetyRatio = Number(overview.total_requests || 0) > 0
-    ? 100 - (Number(overview.blocked_requests || 0) / Number(overview.total_requests || 1)) * 100
-    : 100;
 
   return (
     <div className="app-shell">
@@ -181,16 +177,6 @@ export default function App() {
             </section>
           </section>
 
-          <section className="card shield-meta">
-            <div className="meta-item">
-              <span className="mono">SAFETY RATIO</span>
-              <strong>{safetyRatio.toFixed(1)}%</strong>
-            </div>
-            <div className="meta-item">
-              <span className="mono">THEME</span>
-              <strong>{theme.toUpperCase()}</strong>
-            </div>
-          </section>
         </main>
       )}
 
