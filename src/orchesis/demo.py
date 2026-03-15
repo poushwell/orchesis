@@ -23,7 +23,7 @@ DEMO_STATS: dict[str, Any] = {
     "cache_hit_rate": 0.081,
     "active_sessions": 7,
     "agents_discovered": 12,
-    "fleet_health": "B+",
+    "overwatch_health": "B+",
     "cost_velocity": {"current_rate_per_hour": 1.24, "projection_24h": 29.76, "is_anomalous": False},
     "threat_intel": {
         "signatures_loaded": 25,
@@ -158,7 +158,7 @@ class DemoServer:
             "blocked_requests": stats["blocked"],
             "total_cost_usd": stats["cost_today"],
             "active_agents": int(DEMO_STATS["agents_discovered"]),
-            "fleet_health": str(DEMO_STATS["fleet_health"]),
+            "overwatch_health": str(DEMO_STATS["overwatch_health"]),
             "money_saved_usd": float(DEMO_STATS["money_saved_usd"]),
             "cost_velocity": dict(stats["cost_velocity"]),
             "compliance_overview": {

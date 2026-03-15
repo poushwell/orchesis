@@ -549,10 +549,180 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     }
     .approval-actions { display: flex; gap: 8px; margin-bottom: 6px; }
     .approval-actions .tab-btn { padding: 6px 10px; }
+    .ow-wrap { display: grid; gap: 12px; }
+    .ow-summary {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, rgba(168,85,247,0.14), rgba(168,85,247,0.04));
+      color: #d8b4fe;
+      padding: 10px 12px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+    }
+    .ow-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .ow-switch { display: flex; gap: 8px; }
+    .ow-view-btn {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: rgba(255,255,255,0.02);
+      color: var(--text);
+      padding: 8px 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .ow-view-btn.active {
+      border-color: rgba(168,85,247,0.55);
+      color: #e9d5ff;
+      background: rgba(168,85,247,0.16);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 0 16px rgba(168,85,247,0.12);
+    }
+    .ow-cards {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(240px, 1fr));
+      gap: 12px;
+    }
+    .ow-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--panel);
+      padding: 12px;
+      display: grid;
+      gap: 9px;
+    }
+    .ow-card.threat { border-color: rgba(239,68,68,0.75); box-shadow: 0 0 0 1px rgba(239,68,68,0.25) inset; }
+    .ow-card.pending { border-color: rgba(249,115,22,0.8); box-shadow: 0 0 0 1px rgba(249,115,22,0.25) inset; }
+    .ow-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .ow-agent-id {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      font-weight: 700;
+    }
+    .ow-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ow-dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      display: inline-block;
+      box-shadow: 0 0 10px currentColor;
+      color: var(--green);
+      background: currentColor;
+      flex: 0 0 auto;
+    }
+    .ow-dot.idle { color: #9ca3af; }
+    .ow-dot.alert { color: var(--red); }
+    .ow-dot.warning { color: var(--orange); }
+    .ow-badge {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .ow-badge.grade-a { color: var(--green); border-color: rgba(0,255,65,0.4); }
+    .ow-badge.grade-b { color: #a3e635; border-color: rgba(163,230,53,0.35); }
+    .ow-badge.grade-c { color: #facc15; border-color: rgba(250,204,21,0.35); }
+    .ow-badge.grade-d, .ow-badge.grade-f { color: var(--red); border-color: rgba(239,68,68,0.45); }
+    .ow-task { color: var(--text-secondary); font-size: 13px; }
+    .ow-budget-line { display: grid; gap: 4px; }
+    .ow-budget-bar { height: 8px; border-radius: 999px; background: rgba(255,255,255,0.08); overflow: hidden; }
+    .ow-budget-bar > div { height: 100%; background: var(--green); border-radius: inherit; }
+    .ow-meta {
+      font-size: 12px;
+      color: var(--text-secondary);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+    .ow-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .ow-btn {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: rgba(255,255,255,0.02);
+      color: var(--text);
+      padding: 6px 9px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .ow-btn.review {
+      border-color: rgba(249,115,22,0.5);
+      color: #fdba74;
+      background: rgba(249,115,22,0.14);
+    }
+    .ow-empty {
+      border: 1px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 26px 18px;
+      text-align: center;
+      color: var(--text-secondary);
+      display: grid;
+      gap: 10px;
+    }
+    .ow-empty .icon { font-size: 26px; color: #c084fc; }
+    .ow-empty .cmd {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 8px 10px;
+      display: inline-block;
+      background: rgba(255,255,255,0.02);
+    }
+    .ow-radar-wrap { display: grid; gap: 10px; }
+    .ow-radar-box {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: rgba(255,255,255,0.01);
+      padding: 10px;
+      position: relative;
+      overflow: hidden;
+      min-height: 470px;
+    }
+    .ow-radar-svg { width: 100%; height: 460px; display: block; }
+    .ow-radar-tooltip {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 2;
+      background: rgba(10,10,18,0.94);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 8px 10px;
+      color: var(--text);
+      max-width: 320px;
+      display: none;
+      font-size: 12px;
+    }
+    .ow-radar-footer { display: flex; justify-content: flex-end; }
+    .ow-ap-section { display: grid; gap: 10px; }
+    .ow-ap-item {
+      border: 1px solid rgba(249,115,22,0.4);
+      border-radius: var(--radius-sm);
+      padding: 10px;
+      background: rgba(249,115,22,0.08);
+    }
+    .ow-ap-actions { margin-top: 8px; display: flex; gap: 8px; }
     @media (max-width: 1100px) {
       .grid-4 { grid-template-columns: repeat(2, minmax(160px, 1fr)); }
       .grid-2 { grid-template-columns: 1fr; }
       .score-gauge { grid-template-columns: 1fr; }
+      .ow-cards { grid-template-columns: repeat(2, minmax(220px, 1fr)); }
+    }
+    @media (max-width: 760px) {
+      .ow-cards { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -576,6 +746,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       <button class="tab-btn" data-tab="threats">🛡️ Threats</button>
       <button class="tab-btn" data-tab="cache">⚡ Cache</button>
       <button class="tab-btn" data-tab="compliance">📘 Compliance</button>
+      <button class="tab-btn" data-tab="overwatch">🛰️ Overwatch</button>
       <button class="tab-btn" data-tab="approvals">✅ Approvals</button>
     </div>
 
@@ -590,8 +761,8 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
           <div class="hero-label">Money Saved</div>
         </div>
         <div class="hero-card hero-health">
-          <div class="hero-number" id="fleet-health">A</div>
-          <div class="hero-label">Fleet Health</div>
+          <div class="hero-number" id="overwatch-health">A</div>
+          <div class="hero-label">Overwatch Health</div>
         </div>
       </div>
       <div class="grid-4">
@@ -836,6 +1007,39 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       </div>
     </section>
 
+    <section id="overwatch" class="screen">
+      <div class="ow-wrap">
+        <div id="ow-summary" class="ow-summary">0 active · $0.00/day · 0 blocked · 0 pending</div>
+        <div class="ow-toolbar">
+          <div class="section-title" style="margin:0;padding:0;border:0;">Fleet View</div>
+          <div class="ow-switch">
+            <button id="ow-view-cards" class="ow-view-btn active">Cards</button>
+            <button id="ow-view-radar" class="ow-view-btn">Radar</button>
+          </div>
+        </div>
+        <div id="ow-cards-view">
+          <div id="ow-cards" class="ow-cards"></div>
+          <div id="ow-empty" class="ow-empty" style="display:none;">
+            <div class="icon">◈</div>
+            <div style="font-size:18px;color:var(--text);font-weight:700;">No agents detected</div>
+            <div class="cmd">orchesis demo</div>
+            <div><button id="ow-load-demo" class="ow-btn">Load Demo Data</button></div>
+          </div>
+        </div>
+        <div id="ow-radar-view" class="ow-radar-wrap" style="display:none;">
+          <div class="ow-radar-box">
+            <div id="ow-radar-tooltip" class="ow-radar-tooltip"></div>
+            <svg id="ow-radar" class="ow-radar-svg" viewBox="0 0 620 460"></svg>
+          </div>
+          <div class="ow-radar-footer"><button id="ow-share" class="ow-btn">Share</button></div>
+        </div>
+        <div id="ow-approvals-section" class="ow-ap-section" style="display:none;">
+          <div class="section-title"><strong>Pending Approvals</strong></div>
+          <div id="ow-approvals-list"></div>
+        </div>
+      </div>
+    </section>
+
     <section id="approvals" class="screen">
       <div class="panel panel-primary">
         <div class="section-title"><strong>PENDING APPROVALS (<span id="ap-pending-count">0</span>)</strong></div>
@@ -853,6 +1057,9 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     let currentTab = "shield";
     let pollTimer = null;
     let lastOverview = null;
+    let overwatchView = "cards";
+    let overwatchUseDemo = false;
+    let overwatchSnapshot = null;
     const sparkHistory = {};
     const SPARK_MAX = 20;
 
@@ -872,6 +1079,68 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       if (h > 0) return `${h}h ${m}m ${s}s`;
       if (m > 0) return `${m}m ${s}s`;
       return `${s}s`;
+    }
+    function toRiskBadgeClass(grade){
+      const g = String(grade || "A").toUpperCase();
+      if (g.startsWith("A")) return "grade-a";
+      if (g.startsWith("B")) return "grade-b";
+      if (g.startsWith("C")) return "grade-c";
+      if (g.startsWith("D")) return "grade-d";
+      return "grade-f";
+    }
+    function formatGrade(grade){
+      const g = String(grade || "A").toUpperCase().trim();
+      return g || "A";
+    }
+    function copyText(text){
+      const done = () => {};
+      if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done).catch(done);
+        return;
+      }
+      const box = document.createElement("textarea");
+      box.value = text;
+      document.body.appendChild(box);
+      box.select();
+      try { document.execCommand("copy"); } catch (_err) {}
+      document.body.removeChild(box);
+    }
+    function mockOverwatchData(){
+      return {
+        summary: {
+          active_agents: 5,
+          total_cost_day_usd: 31.82,
+          threats_blocked: 14,
+          pending_approvals: 2,
+        },
+        agents: [
+          { agent_id: "planner-core", status: "active", security_grade: "A", current_task: "route intent graph", budget_used_usd: 4.2, budget_limit_usd: 12, cost_day_usd: 4.2, model: "gpt-4o", threats_today: 0, pending_approvals: 0, requests_today: 520 },
+          { agent_id: "ops-bot", status: "warning", security_grade: "B+", current_task: "deploy verification", budget_used_usd: 9.7, budget_limit_usd: 10, cost_day_usd: 9.7, model: "claude-sonnet-4-20250514", threats_today: 2, pending_approvals: 1, requests_today: 860 },
+          { agent_id: "support-qa", status: "idle", security_grade: "A+", current_task: "", budget_used_usd: 1.4, budget_limit_usd: 8, cost_day_usd: 1.4, model: "gpt-4o-mini", threats_today: 0, pending_approvals: 0, requests_today: 130 },
+          { agent_id: "research-scout", status: "alert", security_grade: "C", current_task: "crawl failed endpoint", budget_used_usd: 7.9, budget_limit_usd: 9, cost_day_usd: 7.9, model: "claude-haiku-4-5-20251001", threats_today: 5, pending_approvals: 0, requests_today: 1100 },
+          { agent_id: "invoice-guard", status: "active", security_grade: "B", current_task: "invoice anomaly checks", budget_used_usd: 8.62, budget_limit_usd: 12, cost_day_usd: 8.62, model: "gpt-4o", threats_today: 1, pending_approvals: 1, requests_today: 740 },
+        ],
+        approvals: [
+          { approval_id: "ow-demo-1", agent_id: "ops-bot", description: "system.run deployment command", risk: "high", reason: "destructive file operation suspected", timestamp: Date.now() / 1000 },
+          { approval_id: "ow-demo-2", agent_id: "invoice-guard", description: "web_fetch internal.corp.com", risk: "medium", reason: "blocked domain requires approval", timestamp: Date.now() / 1000 },
+        ],
+      };
+    }
+    function normalizeOverwatch(payload){
+      if (!payload || typeof payload !== "object") return { summary: null, agents: [], approvals: [] };
+      const summaryRaw = (payload.summary && typeof payload.summary === "object") ? payload.summary : payload;
+      const agents = Array.isArray(payload.agents) ? payload.agents : (Array.isArray(payload.items) ? payload.items : []);
+      const approvals = Array.isArray(payload.approvals) ? payload.approvals : (Array.isArray(payload.pending) ? payload.pending : []);
+      return {
+        summary: {
+          active_agents: Number(summaryRaw.active_agents ?? summaryRaw.active ?? agents.filter((a)=> String(a.status || "").toLowerCase() === "active").length ?? 0),
+          total_cost_day_usd: Number(summaryRaw.total_cost_day_usd ?? summaryRaw.cost_day_usd ?? summaryRaw.cost_per_day ?? 0),
+          threats_blocked: Number(summaryRaw.threats_blocked ?? summaryRaw.blocked ?? 0),
+          pending_approvals: Number(summaryRaw.pending_approvals ?? approvals.length ?? 0),
+        },
+        agents,
+        approvals,
+      };
     }
     function animateValue(el, start, end, duration, formatter) {
       if (!el) return;
@@ -1059,12 +1328,12 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       if (moneySavedHero) {
         moneySavedHero.textContent = fmtMoney(Number(data.money_saved_usd || 0));
       }
-      const fleetHero = document.getElementById("fleet-health");
-      if (fleetHero) {
-        const grade = String(data.fleet_health || "A").toUpperCase();
-        fleetHero.textContent = grade;
+      const overwatchHero = document.getElementById("overwatch-health");
+      if (overwatchHero) {
+        const grade = String(data.overwatch_health || "A").toUpperCase();
+        overwatchHero.textContent = grade;
         const colorMap = { A: "#22c55e", B: "#84cc16", C: "#facc15", D: "#f97316", F: "#ef4444" };
-        fleetHero.style.webkitTextFillColor = colorMap[grade] || "#22c55e";
+        overwatchHero.style.webkitTextFillColor = colorMap[grade] || "#22c55e";
       }
 
       const ti = (stats && stats.threat_intel) ? stats.threat_intel : {};
@@ -1641,6 +1910,178 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       }
     }
 
+    async function applyOverwatchApproval(id, action){
+      if(!id){ return; }
+      await fetch(`/api/v1/approvals/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+      await pollOverwatch();
+    }
+
+    function renderOverwatchCards(model){
+      const cardsEl = document.getElementById("ow-cards");
+      const emptyEl = document.getElementById("ow-empty");
+      if (!cardsEl || !emptyEl) return;
+      const agents = model.agents || [];
+      if (agents.length === 0) {
+        cardsEl.innerHTML = "";
+        emptyEl.style.display = "grid";
+        return;
+      }
+      emptyEl.style.display = "none";
+      cardsEl.innerHTML = agents.map((agent)=>{
+        const name = String(agent.agent_id || agent.name || "unknown-agent");
+        const status = String(agent.status || "active").toLowerCase();
+        const grade = formatGrade(agent.security_grade || agent.ars_grade || "A");
+        const task = String(agent.current_task || "").trim() || "Idle";
+        const threats = Number(agent.threats_today || 0);
+        const pending = Number(agent.pending_approvals || 0);
+        const modelName = String(agent.model || agent.primary_model || "-");
+        const costDay = Number(agent.cost_day_usd || agent.total_cost_usd || 0);
+        const reqs = Number(agent.requests_today || agent.total_requests || 0);
+        const budgetLimit = Number(agent.budget_limit_usd || 0);
+        const budgetUsed = Number(agent.budget_used_usd || costDay || 0);
+        const budgetRatio = budgetLimit > 0 ? Math.max(0, Math.min(100, (budgetUsed / budgetLimit) * 100)) : 0;
+        const budgetColor = budgetRatio > 90 ? "var(--red)" : (budgetRatio > 70 ? "var(--orange)" : "var(--green)");
+        const cardClass = pending > 0 ? "ow-card pending" : (threats > 0 ? "ow-card threat" : "ow-card");
+        return `<div class="${cardClass}">
+          <div class="ow-head">
+            <div class="ow-agent-id"><span class="ow-dot ${status === "idle" ? "idle" : (status === "alert" ? "alert" : (status === "warning" ? "warning" : ""))}"></span><span class="ow-name">${name}</span></div>
+            <span class="ow-badge ${toRiskBadgeClass(grade)}">${grade}</span>
+          </div>
+          <div class="ow-task">${task}</div>
+          <div class="ow-budget-line">
+            ${budgetLimit > 0 ? `<div class="ow-meta">${fmtMoney(budgetUsed)} / ${fmtMoney(budgetLimit)}</div><div class="ow-budget-bar"><div style="width:${budgetRatio.toFixed(1)}%;background:${budgetColor};"></div></div>` : `<div class="ow-meta">No budget limit</div>`}
+          </div>
+          <div class="ow-meta">${fmtMoney(costDay)}/day · ${modelName} · ${fmtNum(threats)} threats</div>
+          <div class="ow-actions">
+            <button class="ow-btn">Set Budget</button>
+            <button class="ow-btn">Threats</button>
+            <button class="ow-btn">Policy</button>
+            ${pending > 0 ? `<button class="ow-btn review">Review ${fmtNum(pending)}</button>` : ""}
+          </div>
+          <div class="ow-meta">requests today: ${fmtNum(reqs)}</div>
+        </div>`;
+      }).join("");
+    }
+
+    function renderOverwatchRadar(model){
+      const svg = document.getElementById("ow-radar");
+      const tooltip = document.getElementById("ow-radar-tooltip");
+      if(!svg){ return; }
+      const agents = model.agents || [];
+      const cx = 310;
+      const cy = 230;
+      const rings = [80, 155, 215];
+      const maxRequests = Math.max(1, ...agents.map((a)=> Number(a.requests_today || a.total_requests || 0)));
+      const sweepId = "ow-sweep-grad";
+      let html = `
+        <defs>
+          <radialGradient id="ow-ring-safe" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="rgba(0,255,65,0.12)"/><stop offset="100%" stop-color="rgba(0,255,65,0.02)"/>
+          </radialGradient>
+          <radialGradient id="ow-ring-warn" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="rgba(249,115,22,0.08)"/><stop offset="100%" stop-color="rgba(249,115,22,0.02)"/>
+          </radialGradient>
+          <radialGradient id="ow-ring-danger" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="rgba(239,68,68,0.06)"/><stop offset="100%" stop-color="rgba(239,68,68,0.01)"/>
+          </radialGradient>
+          <linearGradient id="${sweepId}" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stop-color="rgba(168,85,247,0.0)"/>
+            <stop offset="65%" stop-color="rgba(168,85,247,0.0)"/>
+            <stop offset="100%" stop-color="rgba(168,85,247,0.42)"/>
+          </linearGradient>
+        </defs>
+        <circle cx="${cx}" cy="${cy}" r="${rings[2]}" fill="url(#ow-ring-danger)" stroke="rgba(239,68,68,0.16)"/>
+        <circle cx="${cx}" cy="${cy}" r="${rings[1]}" fill="url(#ow-ring-warn)" stroke="rgba(249,115,22,0.20)"/>
+        <circle cx="${cx}" cy="${cy}" r="${rings[0]}" fill="url(#ow-ring-safe)" stroke="rgba(0,255,65,0.22)"/>
+        <circle cx="${cx}" cy="${cy}" r="8" fill="var(--purple)" stroke="#ffffff" stroke-opacity="0.25"/>
+        <text x="${cx}" y="${cy - 15}" fill="var(--text-secondary)" font-size="11" text-anchor="middle">orchestrator</text>
+        <g>
+          <line x1="${cx}" y1="${cy}" x2="${cx}" y2="${cy - rings[2]}" stroke="url(#${sweepId})" stroke-width="2.5" stroke-linecap="round">
+            <animateTransform attributeName="transform" attributeType="XML" type="rotate" from="0 ${cx} ${cy}" to="360 ${cx} ${cy}" dur="3s" repeatCount="indefinite"/>
+          </line>
+        </g>
+      `;
+      agents.forEach((agent, idx)=>{
+        const grade = formatGrade(agent.security_grade || agent.ars_grade || "A");
+        const score = grade.startsWith("A") ? 0 : (grade.startsWith("B") ? 1 : 2);
+        const rMin = score === 0 ? 26 : (score === 1 ? rings[0] + 10 : rings[1] + 10);
+        const rMax = score === 0 ? rings[0] - 10 : (score === 1 ? rings[1] - 10 : rings[2] - 10);
+        const rr = rMin + (idx % 5) * Math.max(8, (rMax - rMin) / 5);
+        const angle = (idx / Math.max(1, agents.length)) * (Math.PI * 2);
+        const x = cx + Math.cos(angle) * rr;
+        const y = cy + Math.sin(angle) * rr;
+        const requests = Number(agent.requests_today || agent.total_requests || 0);
+        const radius = 4 + ((requests / maxRequests) * 8);
+        const status = String(agent.status || "active").toLowerCase();
+        const color = status === "alert" ? "var(--red)" : (status === "warning" ? "var(--orange)" : (status === "idle" ? "#9ca3af" : "var(--green)"));
+        const id = `ow-point-${idx}`;
+        html += `<circle id="${id}" cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="${radius.toFixed(2)}" fill="${color}" fill-opacity="0.95" stroke="#ffffff" stroke-opacity="0.25"/>`;
+      });
+      svg.innerHTML = html;
+      if (tooltip) {
+        tooltip.style.display = "none";
+      }
+      agents.forEach((agent, idx)=>{
+        const el = document.getElementById(`ow-point-${idx}`);
+        if(!el) return;
+        el.addEventListener("click", ()=>{
+          if(!tooltip) return;
+          const threats = Number(agent.threats_today || 0);
+          tooltip.innerHTML = `<strong>${agent.agent_id || "unknown-agent"}</strong><div style="margin-top:4px;">${agent.current_task || "Idle"}</div><div class="subtle" style="margin-top:4px;">${fmtMoney(agent.cost_day_usd || 0)}/day · ${agent.model || "-"} · ${fmtNum(threats)} threats</div>`;
+          tooltip.style.display = "block";
+        });
+      });
+    }
+
+    function renderOverwatchApprovals(model){
+      const section = document.getElementById("ow-approvals-section");
+      const listEl = document.getElementById("ow-approvals-list");
+      if(!section || !listEl){ return; }
+      const pending = (model.approvals || []).filter((item)=> String(item.status || "pending").toLowerCase() === "pending");
+      if (pending.length === 0) {
+        section.style.display = "none";
+        listEl.innerHTML = "";
+        return;
+      }
+      section.style.display = "grid";
+      listEl.innerHTML = pending.map((item)=>{
+        const id = String(item.approval_id || item.id || "");
+        const actionText = item.description || item.action || item.tool_name || "approval requested";
+        return `<div class="ow-ap-item">
+          <div><strong>${item.agent_id || "unknown-agent"}</strong> · ${actionText}</div>
+          <div class="subtle" style="margin-top:4px;">${item.reason || "-"} · ${fmtTs(item.timestamp)}</div>
+          <div class="ow-ap-actions">
+            <button class="ow-btn" data-ow-approve="${id}">Approve</button>
+            <button class="ow-btn" data-ow-deny="${id}">Deny</button>
+          </div>
+        </div>`;
+      }).join("");
+      listEl.querySelectorAll("[data-ow-approve]").forEach((btn)=>{
+        btn.addEventListener("click", ()=> applyOverwatchApproval(String(btn.getAttribute("data-ow-approve") || ""), "approve"));
+      });
+      listEl.querySelectorAll("[data-ow-deny]").forEach((btn)=>{
+        btn.addEventListener("click", ()=> applyOverwatchApproval(String(btn.getAttribute("data-ow-deny") || ""), "deny"));
+      });
+    }
+
+    function renderOverwatch(payload){
+      const model = overwatchUseDemo ? normalizeOverwatch(mockOverwatchData()) : normalizeOverwatch(payload);
+      overwatchSnapshot = model;
+      const summaryEl = document.getElementById("ow-summary");
+      if (summaryEl) {
+        const s = model.summary || { active_agents: 0, total_cost_day_usd: 0, threats_blocked: 0, pending_approvals: 0 };
+        summaryEl.textContent = `${fmtNum(s.active_agents)} active · ${fmtMoney(s.total_cost_day_usd)}/day · ${fmtNum(s.threats_blocked)} blocked · ${fmtNum(s.pending_approvals)} pending`;
+      }
+      renderOverwatchCards(model);
+      renderOverwatchRadar(model);
+      renderOverwatchApprovals(model);
+    }
+
+    async function pollOverwatch(){
+      const data = await fetchData("/api/v1/overwatch");
+      renderOverwatch(data || {});
+    }
+
     async function pollShield(){
       const [data, stats, savings] = await Promise.all([
         fetchData("/api/dashboard/overview"),
@@ -1719,6 +2160,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       if(currentTab === "threats") return pollThreats();
       if(currentTab === "cache") return pollCache();
       if(currentTab === "compliance") return pollCompliance();
+      if(currentTab === "overwatch") return pollOverwatch();
       if(currentTab === "approvals") return pollApprovals();
     }
 
@@ -1734,7 +2176,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     }
 
     function bindUI(){
-      document.querySelectorAll(".tab-btn").forEach((btn)=>{
+      document.querySelectorAll(".tab-btn[data-tab]").forEach((btn)=>{
         btn.addEventListener("click", ()=> switchTab(btn.dataset.tab));
       });
       document.getElementById("flow-session-select").addEventListener("change", ()=> pollFlow());
@@ -1742,6 +2184,43 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       if(exportBtn){
         exportBtn.addEventListener("click", ()=>{
           window.open("/api/compliance/report?format=json", "_blank");
+        });
+      }
+      const owCards = document.getElementById("ow-view-cards");
+      const owRadar = document.getElementById("ow-view-radar");
+      const cardsView = document.getElementById("ow-cards-view");
+      const radarView = document.getElementById("ow-radar-view");
+      if (owCards && owRadar && cardsView && radarView) {
+        owCards.addEventListener("click", ()=>{
+          overwatchView = "cards";
+          owCards.classList.add("active");
+          owRadar.classList.remove("active");
+          cardsView.style.display = "";
+          radarView.style.display = "none";
+        });
+        owRadar.addEventListener("click", ()=>{
+          overwatchView = "radar";
+          owRadar.classList.add("active");
+          owCards.classList.remove("active");
+          radarView.style.display = "";
+          cardsView.style.display = "none";
+          if (overwatchSnapshot) renderOverwatchRadar(overwatchSnapshot);
+        });
+      }
+      const owLoadDemo = document.getElementById("ow-load-demo");
+      if (owLoadDemo) {
+        owLoadDemo.addEventListener("click", ()=>{
+          overwatchUseDemo = true;
+          renderOverwatch(mockOverwatchData());
+        });
+      }
+      const owShare = document.getElementById("ow-share");
+      if (owShare) {
+        owShare.addEventListener("click", ()=>{
+          const model = overwatchSnapshot || normalizeOverwatch(mockOverwatchData());
+          const s = model.summary || { active_agents: 0, total_cost_day_usd: 0, threats_blocked: 0 };
+          const text = `My AI fleet: ${fmtNum(s.active_agents)} agents · ${fmtMoney(s.total_cost_day_usd)}/day · ${fmtNum(s.threats_blocked)} threats blocked · orchesis.io`;
+          copyText(text);
         });
       }
     }

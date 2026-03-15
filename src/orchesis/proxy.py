@@ -2343,7 +2343,7 @@ class LLMHTTPProxy:
             "total_cost_usd": float(stats.get("cost_today", 0.0)),
             "active_agents": active_agents,
             "cost_velocity": self._cost_velocity.get_stats(),
-            "fleet_health": self._fleet_health_grade(),
+            "overwatch_health": self._overwatch_health_grade(),
             "money_saved_usd": self._estimate_money_saved(),
             "compliance_overview": self._build_compliance_overview(stats),
             "approvals_pending": (
@@ -2360,7 +2360,7 @@ class LLMHTTPProxy:
             "savings": self._build_savings_payload(),
         }
 
-    def _fleet_health_grade(self) -> str:
+    def _overwatch_health_grade(self) -> str:
         if self._agent_discovery is None or not self._agent_discovery.enabled:
             return "A"
         profiles = self._agent_discovery.get_all_agents()

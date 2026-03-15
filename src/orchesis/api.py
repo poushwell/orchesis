@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, Response
 
 from orchesis.auth import AgentAuthenticator, CredentialStore
 from orchesis.audit import AuditEngine, AuditQuery
+from orchesis.agent_store import AgentPolicyStore, build_agent_overwatch_snapshot
 from orchesis.config import load_policy, validate_policy, validate_policy_warnings
 from orchesis.corpus import RegressionCorpus
 from orchesis.engine import evaluate
@@ -27,10 +28,12 @@ from orchesis.policy_store import PolicyStore
 from orchesis.plugins import load_plugins_for_policy
 from orchesis.reliability import ReliabilityReportGenerator
 from orchesis.redaction import AuditRedactor
+from orchesis.replay import read_events_from_jsonl
 from orchesis.state import RateLimitTracker
 from orchesis.structured_log import StructuredLogger
 from orchesis.sync import PolicySyncServer
 from orchesis.telemetry import JsonlEmitter
+from orchesis.pipeline import check_budget
 from orchesis import __version__
 
 
@@ -78,6 +81,7 @@ def create_api_app(
     app.state.corpus = corpus
     app.state.policy_path = str(policy_file)
     app.state.decisions_log = decisions_log
+    app.state.agent_policy_store = AgentPolicyStore(policy_file.parent / ".orchesis" / "agent_policies.json")
     app.state.incidents_log = ".orchesis/incidents.jsonl"
     app.state.current_version = current_version
     app.state.plugin_modules = list(plugin_modules or [])
@@ -390,6 +394,74 @@ def create_api_app(
             },
         }
 
+    @app.get("/api/v1/overwatch")
+    def get_overwatch(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        snapshot = build_agent_overwatch_snapshot(
+            decisions_log_path=app.state.decisions_log,
+            policy_store=app.state.agent_policy_store,
+        )
+        return snapshot
+
+    @app.get("/api/v1/overwatch/{agent_id}/threats")
+    def get_overwatch_threats(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        source = Path(app.state.decisions_log)
+        if not source.exists():
+            return {"agent_id": agent_id, "threats": []}
+        rows: list[dict[str, Any]] = []
+        for event in read_events_from_jsonl(source):
+            if event.agent_id != agent_id or event.decision != "DENY":
+                continue
+            reason = event.reasons[0] if event.reasons else "blocked_by_policy"
+            rows.append(
+                {
+                    "timestamp": event.timestamp,
+                    "type": reason.split(":", 1)[0],
+                    "severity": _reason_to_severity(reason),
+                    "blocked": True,
+                    "rule_id": reason.split(":", 1)[0],
+                }
+            )
+        rows.sort(key=lambda item: str(item["timestamp"]), reverse=True)
+        return {"agent_id": agent_id, "threats": rows[:50]}
+
+    @app.post("/api/v1/overwatch/{agent_id}/budget")
+    def post_overwatch_budget(
+        agent_id: str,
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        daily_limit = body.get("daily_limit")
+        if not isinstance(daily_limit, int | float):
+            raise HTTPException(status_code=400, detail={"error": "daily_limit must be a number"})
+        policy = app.state.agent_policy_store.set_daily_limit(agent_id, float(daily_limit))
+        return {"agent_id": agent_id, "policy": policy}
+
+    @app.get("/api/v1/overwatch/{agent_id}/policy")
+    def get_overwatch_policy(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {"agent_id": agent_id, "policy": app.state.agent_policy_store.get_policy(agent_id)}
+
+    @app.post("/api/v1/overwatch/{agent_id}/policy")
+    def post_overwatch_policy(
+        agent_id: str,
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail={"error": "policy patch body is required"})
+        policy = app.state.agent_policy_store.update_policy(agent_id, body)
+        return {"agent_id": agent_id, "policy": policy}
+
     @app.put("/api/v1/agents/{agent_id}/tier")
     def update_agent_tier(
         agent_id: str,
@@ -631,6 +703,18 @@ def create_api_app(
         if verified_agent_id:
             body = dict(body)
             body["agent_id"] = verified_agent_id
+        effective_agent_id = (
+            str(body.get("agent_id", "")).strip()
+            if isinstance(body.get("agent_id"), str)
+            else "__global__"
+        ) or "__global__"
+        budget_allowed, budget_meta = check_budget(
+            effective_agent_id,
+            policy_store=app.state.agent_policy_store,
+            decisions_log_path=app.state.decisions_log,
+        )
+        if not budget_allowed:
+            raise HTTPException(status_code=429, detail=budget_meta)
         response = _evaluate_payload(body=body, trace=trace)
         request.state.orchesis_decision = "ALLOW" if response["allowed"] else "DENY"
         logger.debug(
@@ -666,6 +750,18 @@ def create_api_app(
                 if verified_agent_id:
                     item = dict(item)
                     item["agent_id"] = verified_agent_id
+                effective_agent_id = (
+                    str(item.get("agent_id", "")).strip()
+                    if isinstance(item.get("agent_id"), str)
+                    else "__global__"
+                ) or "__global__"
+                budget_allowed, budget_meta = check_budget(
+                    effective_agent_id,
+                    policy_store=app.state.agent_policy_store,
+                    decisions_log_path=app.state.decisions_log,
+                )
+                if not budget_allowed:
+                    raise HTTPException(status_code=429, detail=budget_meta)
                 results.append(_evaluate_payload(item, trace))
         denied_count = sum(1 for item in results if item.get("allowed") is False)
         request.state.orchesis_decision = "DENY" if denied_count > 0 else "ALLOW"
@@ -842,3 +938,8 @@ def _parse_reason(reason: str) -> tuple[str, str, str]:
     else:
         severity = "low"
     return text, rule, severity
+
+
+def _reason_to_severity(reason: str) -> str:
+    _, _, severity = _parse_reason(reason)
+    return severity
