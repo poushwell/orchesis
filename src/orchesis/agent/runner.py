@@ -2,25 +2,13 @@
 
 from __future__ import annotations
 
-import click
+import argparse
+import sys
 
 from orchesis.agent.harness import SimpleAgent
 
 
-@click.group()
-def main() -> None:
-    """Orchesis agent harness CLI."""
-
-
-@main.command("run")
-@click.argument("task")
-@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
-@click.option(
-    "--tasks", "tasks_path", type=click.Path(exists=True), default="examples/agent_tasks.yaml"
-)
-@click.option("--max-steps", type=int, default=10)
-@click.option("--log-path", type=click.Path(), default="decisions.jsonl")
-def run_task(task: str, policy_path: str, tasks_path: str, max_steps: int, log_path: str) -> None:
+def run_task(task: str, policy_path: str, tasks_path: str, max_steps: int, log_path: str) -> int:
     """Run deterministic agent loop for a given task name."""
     agent = SimpleAgent(
         policy_path=policy_path,
@@ -30,16 +18,43 @@ def run_task(task: str, policy_path: str, tasks_path: str, max_steps: int, log_p
     )
     state = agent.run(task, max_steps=max_steps)
 
-    click.echo(f"Task: {task}")
+    print(f"Task: {task}")
     for step in state.steps:
-        click.echo(
+        print(
             f"step={step['step']} tool={step['tool']} decision={step['decision']} "
             f"reasons={step['reasons']}"
         )
     executed = sum(1 for s in state.steps if s["decision"] == "ALLOW")
     blocked = sum(1 for s in state.steps if s["decision"] == "DENY")
-    click.echo(f"status={state.status} executed={executed} blocked={blocked}")
+    print(f"status={state.status} executed={executed} blocked={blocked}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="orchesis-agent", description="Orchesis agent harness CLI.")
+    subparsers = parser.add_subparsers(dest="command", metavar="command")
+    subparsers.required = True
+    run_parser = subparsers.add_parser("run")
+    run_parser.add_argument("task")
+    run_parser.add_argument("--policy", dest="policy_path", required=True)
+    run_parser.add_argument("--tasks", dest="tasks_path", default="examples/agent_tasks.yaml")
+    run_parser.add_argument("--max-steps", dest="max_steps", type=int, default=10)
+    run_parser.add_argument("--log-path", dest="log_path", default="decisions.jsonl")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.command == "run":
+        return run_task(
+            task=args.task,
+            policy_path=args.policy_path,
+            tasks_path=args.tasks_path,
+            max_steps=args.max_steps,
+            log_path=args.log_path,
+        )
+    return 2
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main(sys.argv[1:]))

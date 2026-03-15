@@ -10,6 +10,7 @@ import re
 import shutil
 import threading
 import time
+import warnings
 from typing import Any
 
 from orchesis.error_responses import ErrorResponseBuilder
@@ -74,6 +75,36 @@ def _coerce_dict(data: Any) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _safe_regex_match(pattern: str, text: str) -> bool:
+    """Match regex pattern against text. Returns False on invalid pattern."""
+    try:
+        return bool(re.search(pattern, text, flags=re.IGNORECASE))
+    except re.error as exc:
+        warnings.warn(
+            f"Invalid regex pattern in hook policy: {pattern!r} - {exc}. "
+            "Rule will be treated as non-matching (deny).",
+            UserWarning,
+            stacklevel=2,
+        )
+        return False
+
+
+def _validate_policy_patterns(rules: list) -> list[str]:
+    """Return list of invalid pattern strings found in rules."""
+    invalid: list[str] = []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        pattern = str(rule.get("pattern", "") or "")
+        if not pattern:
+            continue
+        try:
+            re.compile(pattern)
+        except re.error:
+            invalid.append(pattern)
+    return invalid
+
+
 def _parse_simple_policy(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8")
     rules: list[dict[str, Any]] = []
@@ -111,7 +142,20 @@ def _parse_simple_policy(path: Path) -> dict[str, Any]:
             log_format = line.split(":", 1)[1].strip().strip('"').strip("'")
     if current:
         rules.append(current)
-    return {"rules": rules, "max_tool_calls_per_minute": max_per_min, "log_file": log_file, "log_format": log_format}
+    invalid_patterns = _validate_policy_patterns(rules)
+    if invalid_patterns:
+        warnings.warn(
+            f"Invalid regex pattern(s) in hook policy: {', '.join(repr(item) for item in invalid_patterns)}",
+            UserWarning,
+            stacklevel=2,
+        )
+    return {
+        "rules": rules,
+        "max_tool_calls_per_minute": max_per_min,
+        "log_file": log_file,
+        "log_format": log_format,
+        "invalid_patterns": invalid_patterns,
+    }
 
 
 def _check_rate_limit(scope_key: str, max_per_minute: int) -> tuple[bool, int]:
@@ -131,6 +175,16 @@ def evaluate_hook_tool(tool_name: str, tool_input: str, config_path: str | None 
     if not path.exists():
         ensure_default_hook_policy(path)
     policy = _parse_simple_policy(path)
+    invalid_patterns = policy.get("invalid_patterns", [])
+    if isinstance(invalid_patterns, list) and invalid_patterns:
+        err = ErrorResponseBuilder.build(
+            "tool_blocked",
+            tool=tool_name,
+            agent="hook-agent",
+            allowed="see ~/.orchesis/policy.yaml",
+        )
+        err.reason = "Invalid regex pattern in hook policy"
+        return 1, ErrorResponseBuilder.to_hook_output(err)
     max_per_minute = int(policy.get("max_tool_calls_per_minute", 60) or 60)
     scope = f"{path.resolve()}::{tool_name}"
     allowed, current_count = _check_rate_limit(scope, max_per_minute)
@@ -155,7 +209,7 @@ def evaluate_hook_tool(tool_name: str, tool_input: str, config_path: str | None 
         action = str(rule.get("action", "allow") or "allow").strip().lower()
         if not pattern:
             continue
-        if re.search(pattern, payload, flags=re.IGNORECASE):
+        if _safe_regex_match(pattern, payload):
             message = str(rule.get("message", "Policy match"))
             if action == "deny":
                 err = ErrorResponseBuilder.build(

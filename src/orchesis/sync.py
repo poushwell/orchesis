@@ -10,8 +10,24 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-import httpx
-import yaml
+def _get_httpx():
+    try:
+        import httpx
+
+        return httpx
+    except ImportError:
+        raise ImportError(
+            "httpx is required for policy sync. "
+            "Install with: pip install orchesis[integrations]"
+        ) from None
+
+
+class _LazyHttpx:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(_get_httpx(), name)
+
+
+httpx = _LazyHttpx()
 
 
 def _now_iso() -> str:
@@ -82,6 +98,8 @@ class PolicySyncClient:
         yaml_content = payload.get("yaml_content")
         if not isinstance(yaml_content, str):
             return False, None
+        import yaml
+
         parsed = yaml.safe_load(yaml_content)
         policy = parsed if isinstance(parsed, dict) else {"rules": []}
         self._pending_version = remote_version

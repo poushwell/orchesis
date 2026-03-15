@@ -60,6 +60,26 @@ Orchesis is designed with security as a core principle:
 5. **Secrets never logged** — API keys and credentials are filtered from all logs and recordings
 6. **Python stdlib only** — no third-party packages means no dependency vulnerabilities
 
+## Credential Vault Security
+
+`FileVault` resolves encryption passphrase in this order:
+- Explicit `passphrase` argument
+- `ORCHESIS_VAULT_PASSPHRASE` environment variable
+- Per-install machine key at `~/.orchesis/.vault_key`
+
+If no explicit passphrase or env var is provided, Orchesis generates a random machine key
+and stores it in `~/.orchesis/.vault_key`. On POSIX systems, Orchesis attempts to set file
+permissions to `0600` (owner read/write only). If permissions are too open, Orchesis emits
+a security warning.
+
+### Key Rotation
+
+To rotate vault encryption key:
+1. Export and back up current credentials.
+2. Remove or archive `~/.orchesis/.vault_key`.
+3. Set `ORCHESIS_VAULT_PASSPHRASE` to a new value (recommended) or let Orchesis regenerate key.
+4. Re-save credentials so vault contents are re-encrypted with the new key.
+
 ## Disclosure Policy
 
 We follow coordinated disclosure. We ask that you:

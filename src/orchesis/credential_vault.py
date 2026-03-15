@@ -7,6 +7,9 @@ import hashlib
 import json
 import logging
 import os
+import secrets
+import sys
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,6 +17,10 @@ from typing import Any
 
 class CredentialNotFoundError(KeyError):
     """Raised when a credential alias cannot be resolved."""
+
+
+class SecurityWarning(UserWarning):
+    """Security posture warning for credential vault configuration."""
 
 
 class CredentialVault:
@@ -117,6 +124,7 @@ class FileVault(CredentialVault):
 
     def __post_init__(self) -> None:
         self._path = Path(self.vault_path)
+        self._passphrase = self._resolve_passphrase(self.passphrase)
         self._cache: dict[str, str] | None = None
         self._warn_if_permissions_too_open()
 
@@ -129,20 +137,51 @@ class FileVault(CredentialVault):
                 "Credential vault permissions are too open; recommended chmod 600"
             )
 
-    def _get_passphrase(self) -> str:
-        if isinstance(self.passphrase, str) and self.passphrase:
-            return self.passphrase
-        env_value = os.getenv("ORCHESIS_CREDENTIALS_PASSPHRASE")
-        if isinstance(env_value, str) and env_value:
+    def _resolve_passphrase(self, explicit: str | None) -> str:
+        if isinstance(explicit, str) and explicit.strip():
+            return explicit
+        env_value = os.getenv("ORCHESIS_VAULT_PASSPHRASE")
+        if isinstance(env_value, str) and env_value.strip():
             return env_value
-        return "orchesis-v1-local"
+        legacy_env = os.getenv("ORCHESIS_CREDENTIALS_PASSPHRASE")
+        if isinstance(legacy_env, str) and legacy_env.strip():
+            return legacy_env
+        return self._get_or_create_machine_key()
+
+    def _get_or_create_machine_key(self) -> str:
+        key_path = Path.home() / ".orchesis" / ".vault_key"
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        if key_path.exists():
+            try:
+                mode = key_path.stat().st_mode
+                if mode & 0o077:
+                    warnings.warn(
+                        f"Vault key file {key_path} has insecure permissions. "
+                        "Run: chmod 600 ~/.orchesis/.vault_key",
+                        SecurityWarning,
+                        stacklevel=3,
+                    )
+            except OSError:
+                pass
+            return key_path.read_text(encoding="utf-8").strip()
+        key = secrets.token_hex(32)
+        key_path.write_text(key, encoding="utf-8")
+        if os.name == "posix":
+            try:
+                key_path.chmod(0o600)
+            except OSError:
+                pass
+        print("[Orchesis] Vault key generated at ~/.orchesis/.vault_key", file=sys.stderr)
+        print("[Orchesis] Set ORCHESIS_VAULT_PASSPHRASE env var for explicit control.", file=sys.stderr)
+        print("[Orchesis] Keep this file secure - losing it means losing vault access.", file=sys.stderr)
+        return key
 
     @staticmethod
     def _xor_bytes(data: bytes, key: bytes) -> bytes:
         return bytes(data[idx] ^ key[idx % len(key)] for idx in range(len(data)))
 
     def _derive_key(self, salt: bytes) -> bytes:
-        return hashlib.pbkdf2_hmac("sha256", self._get_passphrase().encode("utf-8"), salt, 120_000, dklen=32)
+        return hashlib.pbkdf2_hmac("sha256", self._passphrase.encode("utf-8"), salt, 120_000, dklen=32)
 
     def _load(self) -> dict[str, str]:
         if self._cache is not None:

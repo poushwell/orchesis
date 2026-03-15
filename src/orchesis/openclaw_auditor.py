@@ -51,7 +51,11 @@ class OpenClawAuditor:
 
     _SEVERITY_PENALTY = {"critical": 25, "high": 10, "medium": 5, "low": 2}
     _SEVERITIES = ("critical", "high", "medium", "low")
-    _CVE_BASE = ["CVE-2026-25253", "CVE-2026-26322", "CVE-2026-26319"]
+    _CVE_BASE = [
+        "CVE-2026-25253",  # CVE-2026-25253 https://nvd.nist.gov/vuln/detail/CVE-2026-25253
+        "CVE-2026-26322",  # CVE-2026-26322 https://nvd.nist.gov/vuln/detail/CVE-2026-26322
+        "CVE-2026-26319",  # CVE-2026-26319 https://nvd.nist.gov/vuln/detail/CVE-2026-26319
+    ]
 
     def __init__(self) -> None:
         self._lock = threading.Lock()

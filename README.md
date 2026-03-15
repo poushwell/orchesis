@@ -27,7 +27,12 @@ AI Agent -> [Orchesis: 17 phases] -> LLM Provider (OpenAI, Anthropic...)
 
 ## Installation
 ```bash
+# Core (zero dependencies)
 pip install orchesis
+
+# With integrations (Slack, Telegram, webhooks)
+pip install orchesis[integrations]
+
 orchesis quickstart --preset openclaw
 ```
 

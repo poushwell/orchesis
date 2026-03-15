@@ -7,8 +7,8 @@ import hmac
 import json
 from dataclasses import dataclass, field
 from typing import Any
-
-import httpx
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from orchesis.telemetry import DecisionEvent, EventEmitter
 
@@ -76,13 +76,16 @@ class WebhookEmitter(EventEmitter):
         headers = dict(self._config.headers)
         if self._config.secret and "orchesis_signature" in payload:
             headers["X-Orchesis-Signature"] = str(payload["orchesis_signature"])
-        response = httpx.post(
-            self._config.url,
-            json=payload,
-            headers=headers,
-            timeout=self._config.timeout_seconds,
-        )
-        response.raise_for_status()
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req_headers = {"Content-Type": "application/json", **headers}
+        req = Request(self._config.url, data=body, headers=req_headers, method="POST")
+        try:
+            with urlopen(req, timeout=self._config.timeout_seconds) as response:
+                status = int(getattr(response, "status", 200))
+                if status >= 400:
+                    return False
+        except (HTTPError, URLError):
+            return False
         return True
 
     def flush(self) -> None:

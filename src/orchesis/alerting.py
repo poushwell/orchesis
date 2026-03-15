@@ -10,6 +10,13 @@ import threading
 import time
 from typing import Any
 import urllib.request
+import warnings
+
+warnings.warn(
+    "orchesis.alerting is deprecated. Use orchesis.integrations.alert_manager instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 class AlertSeverity(Enum):

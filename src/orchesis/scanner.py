@@ -45,11 +45,31 @@ REMEDIATION_GUIDE = {
 }
 
 VULNERABLE_PACKAGES = {
-    "mcp-remote": {"fixed": "0.1.16", "cvss": 9.6, "cve": "CVE-2025-6514"},
-    "@modelcontextprotocol/server-filesystem": {"fixed": "0.6.3", "cvss": 7.5, "cve": "CVE-2025-5589"},
-    "framelink-figma-mcp": {"fixed": "0.6.3", "cvss": 8.1, "cve": "CVE-2025-5891"},
-    "gemini-mcp-tool": {"fixed": None, "cvss": 9.8, "cve": "CVE-2025-6001"},
-    "@anthropic/mcp-server-git": {"fixed": "1.0.1", "cvss": 7.2, "cve": "CVE-2025-5234"},
+    "mcp-remote": {
+        "fixed": "0.1.16",
+        "cvss": 9.6,
+        "cve": "CVE-2025-6514",  # CVE-2025-6514 https://nvd.nist.gov/vuln/detail/CVE-2025-6514
+    },
+    "@modelcontextprotocol/server-filesystem": {
+        "fixed": "0.6.3",
+        "cvss": 7.5,
+        "cve": "CVE-2025-5589",  # CVE-2025-5589 https://nvd.nist.gov/vuln/detail/CVE-2025-5589
+    },
+    "framelink-figma-mcp": {
+        "fixed": "0.6.3",
+        "cvss": 8.1,
+        "cve": "CVE-2025-5891",  # CVE-2025-5891 https://nvd.nist.gov/vuln/detail/CVE-2025-5891
+    },
+    "gemini-mcp-tool": {
+        "fixed": None,
+        "cvss": 9.8,
+        "cve": "CVE-2025-6001",  # CVE-2025-6001 https://nvd.nist.gov/vuln/detail/CVE-2025-6001
+    },
+    "@anthropic/mcp-server-git": {
+        "fixed": "1.0.1",
+        "cvss": 7.2,
+        "cve": "CVE-2025-5234",  # CVE-2025-5234 https://nvd.nist.gov/vuln/detail/CVE-2025-5234
+    },
 }
 
 MALICIOUS_PACKAGES = [
@@ -513,7 +533,7 @@ class McpConfigScanner:
                         category="websocket_no_origin_check",
                         description="WebSocket transport without origin validation",
                         location=prefix,
-                        evidence=(
+                        evidence=(  # CVE-2026-25253 https://nvd.nist.gov/vuln/detail/CVE-2026-25253
                             "WebSocket server without origin validation is vulnerable to "
                             "cross-site WebSocket hijacking (CVE-2026-25253)"
                         ),

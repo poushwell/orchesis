@@ -42,7 +42,14 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff"]
+integrations = ["httpx>=0.24.0"]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.1.0",
+    "build",
+    "twine",
+    "pytest-cov",
+]
 
 [project.urls]
 Homepage = "https://orchesis.io"

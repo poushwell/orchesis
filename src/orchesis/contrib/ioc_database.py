@@ -82,12 +82,12 @@ IOC_DATABASE: list[IoC] = [
         description="Hidden instructions and Unicode obfuscation for prompt injection.",
     ),
     IoC(
-        id="CVE-2026-25253",
+        id="CVE-2026-25253",  # CVE-2026-25253 https://nvd.nist.gov/vuln/detail/CVE-2026-25253
         name="OpenClaw Gateway Token Theft",
         category="gateway_attack",
         source="Depthfirst, Feb 2026",
         severity="critical",
-        cve="CVE-2026-25253",
+        cve="CVE-2026-25253",  # CVE-2026-25253 https://nvd.nist.gov/vuln/detail/CVE-2026-25253
         indicators=[
             r"gatewayUrl\s*=",
             r"ws://[^/]*:\d+/ws",

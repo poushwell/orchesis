@@ -7,7 +7,16 @@ from dataclasses import dataclass
 from functools import wraps
 from typing import Any
 
-import httpx
+def _get_httpx():
+    try:
+        import httpx
+
+        return httpx
+    except ImportError:
+        raise ImportError(
+            "httpx is required for Orchesis HTTP client. "
+            "Install with: pip install orchesis[integrations]"
+        ) from None
 
 
 @dataclass
@@ -143,6 +152,7 @@ class OrchesisClient:
         params: dict[str, Any] | None = None,
         auth_required: bool = True,
     ) -> dict[str, Any]:
+        httpx = _get_httpx()
         headers: dict[str, str] = {"Accept": "application/json"}
         if auth_required:
             if not self._token:
@@ -158,7 +168,10 @@ class OrchesisClient:
                 headers=headers,
                 timeout=self._timeout,
             )
-        except httpx.RequestError as error:
+        except Exception as error:  # noqa: BLE001
+            request_error = getattr(httpx, "RequestError", Exception)
+            if not isinstance(error, request_error):
+                raise
             raise ConnectionError(f"Failed to connect to Orchesis API at {url}") from error
         if response.status_code >= 400:
             detail: str
