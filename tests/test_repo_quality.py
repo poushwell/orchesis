@@ -51,9 +51,9 @@ def test_ci_tests_python_312_only() -> None:
 
 def test_readme_has_badges() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert '<img src="docs/banner.svg" alt="Orchesis" />' in content
+    assert '<img src="https://raw.githubusercontent.com/poushwell/orchesis/main/docs/banner.svg" alt="Orchesis" />' in content
     assert "img.shields.io/pypi/v/orchesis" in content
-    assert "img.shields.io/badge/tests-2738%20passing-brightgreen" in content
+    assert "img.shields.io/badge/tests-2927%20passing-brightgreen" in content
 
 
 def test_readme_has_docker_section() -> None:
@@ -66,5 +66,5 @@ def test_readme_has_docker_section() -> None:
 def test_readme_has_project_status() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "## By the numbers" in content
-    assert "2,738" in content
+    assert "2,927" in content
     assert "## What Orchesis does" in content
