@@ -5,7 +5,7 @@
 <div align="center">
 
 [![PyPI](https://img.shields.io/pypi/v/orchesis?color=purple&label=PyPI)](https://pypi.org/project/orchesis/)
-[![Tests](https://img.shields.io/badge/tests-2927%20passing-brightgreen)](https://github.com/poushwell/orchesis)
+[![Tests](https://img.shields.io/badge/tests-2738%20passing-brightgreen)](https://github.com/poushwell/orchesis)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/poushwell/orchesis?style=social)](https://github.com/poushwell/orchesis)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](https://github.com/poushwell/orchesis)
@@ -71,7 +71,7 @@ graph LR
 | MAST coverage | 78.6% |
 | OWASP coverage | 80% |
 | Auto-heal actions | 6 |
-| Tests passing | 2,927 |
+| Tests passing | 2,738 |
 | Dependencies | **0** (stdlib only) |
 
 ## Free MCP Security Scanner

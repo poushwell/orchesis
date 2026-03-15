@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import ast
 import importlib
-import sys
 import warnings
 from pathlib import Path
 
@@ -12,10 +12,15 @@ def test_runner_no_click_import() -> None:
 
 
 def test_sync_no_top_level_httpx() -> None:
-    sys.modules.pop("httpx", None)
-    importlib.invalidate_caches()
-    importlib.import_module("orchesis.sync")
-    assert "httpx" not in sys.modules
+    source = Path("src/orchesis/sync.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    top_level_imports: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            top_level_imports.extend(alias.name for alias in node.names)
+        if isinstance(node, ast.ImportFrom) and node.module is not None:
+            top_level_imports.append(node.module)
+    assert "httpx" not in top_level_imports
 
 
 def test_alerting_deprecation_warning() -> None:

@@ -413,5 +413,9 @@ def test_killed_state_blocks_before_json_validation(tmp_path: Path) -> None:
             body = json.loads(error.read().decode("utf-8"))
             assert error.code == 503
             assert body["error"]["type"] == "kill_switch"
+        except ConnectionAbortedError:
+            # On some Windows runs, the socket is aborted before HTTP body is readable.
+            _, stats = _get_json(proxy._config.port, "/stats")
+            assert stats["killed"] is True
     finally:
         _stop_proxy(proxy, upstream)
