@@ -1,4 +1,4 @@
-![Orchesis](https://raw.githubusercontent.com/poushwell/orchesis/main/docs/banner-light.svg)
+![Orchesis](https://raw.githubusercontent.com/poushwell/orchesis/main/docs/banner-light.png)
 
 [![PyPI](https://img.shields.io/pypi/v/orchesis?color=7c3aed&label=PyPI)](https://pypi.org/project/orchesis/)
 [![Tests](https://img.shields.io/badge/tests-2969%20passing-22c55e)](https://github.com/poushwell/orchesis)
