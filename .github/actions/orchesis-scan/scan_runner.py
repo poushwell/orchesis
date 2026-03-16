@@ -39,7 +39,7 @@ def _parse_bool(raw: str) -> bool:
 
 def _normalize_severity(raw: str) -> str:
     sev = str(raw).strip().lower()
-    return sev if sev in SEVERITIES else "high"
+    return sev if sev in SEVERITIES else "critical"
 
 
 def _split_paths(raw: str) -> list[Path]:
@@ -188,7 +188,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Orchesis CI security checks")
     parser.add_argument("--config", default="", help="MCP config path (optional)")
     parser.add_argument("--policy", default="", help="Policy path (optional)")
-    parser.add_argument("--severity", default="high", help="critical|high|medium|low")
+    parser.add_argument("--severity", default="critical", help="critical|high|medium|low")
+    parser.add_argument("--fail-on", default="critical", help="critical|high|medium|low")
     parser.add_argument("--format", default="text", choices=("text", "json", "sarif"))
     parser.add_argument("--fail-on-findings", default="true")
     return parser.parse_args(argv)
@@ -197,6 +198,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     threshold = _normalize_severity(args.severity)
+    fail_threshold = _normalize_severity(args.fail_on)
     fail_on_findings = _parse_bool(args.fail_on_findings)
     root = Path.cwd()
 
@@ -221,7 +223,8 @@ def main(argv: list[str] | None = None) -> int:
 
     _write_step_summary(os.getenv("GITHUB_STEP_SUMMARY"), findings, threshold, report_path)
 
-    if fail_on_findings and filtered:
+    fail_candidates = [item for item in findings if severity_meets_threshold(item.severity, fail_threshold)]
+    if fail_on_findings and fail_candidates:
         return 1
     return 0
 

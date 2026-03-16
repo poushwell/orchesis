@@ -10,9 +10,13 @@ inputs:
     required: false
     default: ""
   severity:
-    description: "Minimum severity to fail: critical, high, medium, low"
+    description: "Minimum severity to include in report: critical, high, medium, low"
     required: false
-    default: "high"
+    default: "critical"
+  fail-on:
+    description: "Fail workflow on findings at or above this severity"
+    required: false
+    default: "critical"
   format:
     description: "Output format: text, json, sarif"
     required: false
@@ -37,5 +41,6 @@ runs:
           --config "${{ inputs.config-path }}" \
           --policy "${{ inputs.policy-path }}" \
           --severity "${{ inputs.severity }}" \
+          --fail-on "${{ inputs.fail-on }}" \
           --format "${{ inputs.format }}" \
           --fail-on-findings "${{ inputs.fail-on-findings }}"
