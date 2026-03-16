@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta:__legacy__"
 
 [project]
 name = "orchesis"
-version = "0.1.1"
-description = "AI Agent Control Plane — transparent HTTP proxy for security, cost optimization, and reliability"
+version = "0.1.2"
+description = "Transparent HTTP proxy for AI agents. Sees everything SDK cannot — cross-agent patterns, fleet anomalies, duplicate context. Zero code changes. MIT license."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.12"

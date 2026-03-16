@@ -1,11 +1,7 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/poushwell/orchesis/main/docs/banner.svg" alt="Orchesis" />
-</div>
-
-<div align="center">
 
 [![PyPI](https://img.shields.io/pypi/v/orchesis?color=purple&label=PyPI)](https://pypi.org/project/orchesis/)
-[![Tests](https://img.shields.io/badge/tests-2927%20passing-brightgreen)](https://github.com/poushwell/orchesis)
+[![Tests](https://img.shields.io/badge/tests-2969%20passing-brightgreen)](https://github.com/poushwell/orchesis)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/poushwell/orchesis?style=social)](https://github.com/poushwell/orchesis)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](https://github.com/poushwell/orchesis)
@@ -16,6 +12,9 @@
 and LLM APIs. Every request passes through a 17-phase
 detection pipeline. Zero dependencies. MIT license.
 AI Agent -> [Orchesis: 17 phases] -> LLM Provider (OpenAI, Anthropic...)
+
+SDK sees one agent. Static analysis sees code. Observability sees metrics.  
+**Proxy sees everything — in real time, without code changes.**
 
 <div align="center">
 
@@ -55,6 +54,18 @@ graph LR
     B --> D[Dashboard<br/>Metrics & Alerts]
 ```
 
+## Why proxy, not SDK?
+
+| Approach | What it sees | Code changes needed |
+|----------|-------------|---------------------|
+| SDK/callbacks (LangSmith, LangChain) | One agent, one session | Yes — integrate per agent |
+| Static analysis (Snyk, Semgrep) | Code at rest | Yes — add to CI pipeline |
+| Observability (Datadog, Helicone) | Metrics and logs | Yes — instrument code |
+| **Orchesis proxy** | **All agents, all requests, cross-session patterns** | **No — one config line** |
+
+The proxy layer sees what SDK cannot: cross-agent patterns, fleet-level anomalies, 
+duplicate context across providers. This is an architectural advantage, not a feature difference.
+
 ## What Orchesis does
 
 | | Security | Cost | Reliability | Observability |
@@ -71,8 +82,11 @@ graph LR
 | MAST coverage | 78.6% |
 | OWASP coverage | 80% |
 | Auto-heal actions | 6 |
-| Tests passing | 2,927 |
+| Tests passing | 2,969 |
 | Dependencies | **0** (stdlib only) |
+
+- **MVE result**: 0.8% proxy overhead. 12x context collapse detected without proxy.
+- **Zero external dependencies** — no vendor lock-in, no data leaves your infrastructure
 
 ## Free MCP Security Scanner
 
