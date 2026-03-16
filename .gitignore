@@ -6,9 +6,12 @@ __pycache__/
 .orchesis/
 orchesis-report.sarif
 build/
+dist/
 .hypothesis/
 .orchesis/sessions/
 .orchesis/nightly-logs/
 *.egg-info/
+src/*.egg-info/
+policy.yaml
 .orchesis/*.jsonl
 .venv/
