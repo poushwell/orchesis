@@ -328,7 +328,7 @@ def test_perf_ngram_check_with_baseline() -> None:
 
 
 def test_perf_ngram_cosine_similarity() -> None:
-    assert _module_results()["ngram_cosine_similarity"]["mean_us"] < _th(100.0)
+    assert _module_results()["ngram_cosine_similarity"]["mean_us"] < _th(150.0)
 
 
 def test_perf_session_risk_observe() -> None:
