@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import time
 import tracemalloc
 from concurrent.futures import ThreadPoolExecutor
@@ -85,6 +87,12 @@ DEFAULT_FUZZ_RUNS_PATH = Path(".orchesis") / "fuzz_runs.jsonl"
 DEFAULT_MUTATION_RUNS_PATH = Path(".orchesis") / "mutation_runs.jsonl"
 DEFAULT_REPLAY_RUNS_PATH = Path(".orchesis") / "replay_runs.jsonl"
 OPERATIONS_LOG = StructuredLogger("cli")
+AGENT_COMMANDS: dict[str, list[str]] = {
+    "openclaw": ["openclaw", "--base-url", "http://localhost:8080/v1"],
+    "claude": ["claude", "--api-base", "http://localhost:8080/v1"],
+    "codex": ["codex", "--base-url", "http://localhost:8080/v1"],
+    "aider": ["aider", "--openai-api-base", "http://localhost:8080/v1"],
+}
 
 
 @click.group(invoke_without_command=True)
@@ -990,6 +998,52 @@ def demo_command(port: int) -> None:
 
     server = DemoServer()
     server.start(port=max(1, int(port)))
+
+
+@main.command("launch")
+@click.argument("agent", type=click.Choice(sorted(AGENT_COMMANDS.keys())))
+@click.option("--config", "config_path", type=click.Path(), default=None)
+def launch_command(agent: str, config_path: str | None) -> None:
+    """Launch a local agent through Orchesis proxy."""
+    proxy_cmd = [sys.executable, "-m", "orchesis", "proxy", "--host", "127.0.0.1", "--port", "8080"]
+    if isinstance(config_path, str) and config_path.strip():
+        proxy_cmd.extend(["--config", config_path.strip()])
+
+    proxy_process: subprocess.Popen[Any] | None = None
+    try:
+        proxy_process = subprocess.Popen(proxy_cmd)
+    except Exception as error:
+        raise click.ClickException(f"Failed to start proxy: {error}") from error
+
+    print("Orchesis proxy running on :8080")
+    time.sleep(1.5)
+
+    agent_cmd = list(AGENT_COMMANDS[agent])
+    print(f"Launching {agent} through proxy...")
+    print("Intercepting " + f"{agent}" + " traffic · http://localhost:8080/v1")
+
+    agent_exit_code = 0
+    try:
+        agent_process = subprocess.Popen(agent_cmd)
+        agent_exit_code = int(agent_process.wait())
+    except FileNotFoundError as error:
+        print(f"Failed to launch {agent}: {error}")
+        agent_exit_code = 1
+    finally:
+        if proxy_process is not None:
+            try:
+                proxy_process.terminate()
+            except Exception:
+                pass
+            try:
+                proxy_process.wait(timeout=5)
+            except Exception:
+                try:
+                    proxy_process.kill()
+                except Exception:
+                    pass
+
+    raise SystemExit(agent_exit_code)
 
 
 @main.command("audit-openclaw")

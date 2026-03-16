@@ -6,6 +6,8 @@ from pathlib import Path
 
 from orchesis import __version__
 
+ALLOWED_RUNTIME_DEPS = {"pyyaml"}  # pyyaml needed for YAML policy parsing
+
 
 def _read_pyproject() -> dict:
     content = Path("pyproject.toml").read_bytes()
@@ -40,7 +42,9 @@ def test_all_modules_importable() -> None:
 def test_no_external_dependencies() -> None:
     data = _read_pyproject()
     deps = data["project"].get("dependencies", [])
-    assert deps == []
+    assert isinstance(deps, list)
+    normalized = {str(dep).split(">=")[0].split("==")[0].strip().lower() for dep in deps}
+    assert normalized.issubset(ALLOWED_RUNTIME_DEPS)
 
 
 def test_package_includes_dashboard_html() -> None:
