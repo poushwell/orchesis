@@ -1,27 +1,17 @@
 <svg viewBox="0 0 900 180" width="900" height="180" xmlns="http://www.w3.org/2000/svg">
-  <rect width="900" height="180" rx="8" fill="#f8fafc"/>
-  <rect x="0" y="0" width="900" height="2" rx="1" fill="#7c3aed" opacity="0.5"/>
-  <rect x="0" y="2" width="900" height="28" fill="#eef2ff"/>
-  <circle cx="18" cy="16" r="4.5" fill="#ef4444" opacity="0.65"/>
-  <circle cx="33" cy="16" r="4.5" fill="#eab308" opacity="0.65"/>
-  <circle cx="48" cy="16" r="4.5" fill="#22c55e" opacity="0.65"/>
-  <text x="64" y="20" fill="#475569" font-size="11" font-family="'Courier New',monospace">orchesis - runtime gateway</text>
-  <line x1="0" y1="30" x2="900" y2="30" stroke="#cbd5e1" stroke-width="1"/>
-  <text x="20" y="56" fill="#64748b" font-size="12" font-family="'Courier New',monospace">$ </text>
-  <text x="34" y="56" fill="#0f172a" font-size="12" font-family="'Courier New',monospace">pip install orchesis</text>
-  <text x="20" y="77" fill="#64748b" font-size="12" font-family="'Courier New',monospace">$ </text>
-  <text x="34" y="77" fill="#475569" font-size="12" font-family="'Courier New',monospace">base_url = </text>
-  <text x="120" y="77" fill="#7c3aed" font-size="12" font-family="'Courier New',monospace">"http://localhost:8080/v1"</text>
-  <text x="20" y="98" fill="#64748b" font-size="12" font-family="'Courier New',monospace"># </text>
-  <text x="40" y="98" fill="#dc2626" font-size="12" font-family="'Courier New',monospace">threats blocked</text>
-  <text x="178" y="98" fill="#64748b" font-size="12" font-family="'Courier New',monospace"> · </text>
-  <text x="200" y="98" fill="#0284c7" font-size="12" font-family="'Courier New',monospace">tokens saved</text>
-  <text x="314" y="98" fill="#64748b" font-size="12" font-family="'Courier New',monospace"> · </text>
-  <text x="336" y="98" fill="#ea580c" font-size="12" font-family="'Courier New',monospace">fleet visible</text>
-  <text x="20" y="119" fill="#64748b" font-size="12" font-family="'Courier New',monospace"># 2,969 tests · zero deps · MIT · orchesis.io</text>
-  <line x1="476" y1="33" x2="476" y2="163" stroke="#cbd5e1" stroke-width="1"/>
-  <text x="688" y="79" fill="#111827" font-size="34" font-weight="700" letter-spacing="-0.03em" text-anchor="middle" font-family="-apple-system,system-ui,sans-serif">Orchesis</text>
-  <text x="688" y="100" fill="#475569" font-size="12" text-anchor="middle" font-family="-apple-system,system-ui,sans-serif">Runtime Gateway for AI Agents</text>
-  <text x="688" y="126" fill="#7c3aed" font-size="12" font-weight="500" text-anchor="middle" font-family="-apple-system,system-ui,sans-serif">Block threats. Cut token waste.</text>
-  <text x="688" y="144" fill="#7c3aed" font-size="12" font-weight="500" text-anchor="middle" font-family="-apple-system,system-ui,sans-serif">Monitor your fleet. One config change.</text>
+  <rect width="900" height="180" rx="8" fill="#ffffff"/>
+  <rect x="0" y="0" width="900" height="3" rx="1" fill="#a855f7" opacity="0.6"/>
+  <line x1="0" y1="179.5" x2="900" y2="179.5" stroke="#f0f0f0" stroke-width="1"/>
+  <text x="44" y="68" fill="#111" font-size="44" font-weight="700" letter-spacing="-0.04em" font-family="-apple-system,system-ui,sans-serif">Orchesis</text>
+  <text x="44" y="91" fill="#888" font-size="13" font-family="-apple-system,system-ui,sans-serif">Runtime Gateway for AI Agents</text>
+  <text x="44" y="116" fill="#333" font-size="13" font-weight="500" font-family="-apple-system,system-ui,sans-serif">Block threats. Cut token waste. Monitor your fleet.</text>
+  <text x="44" y="134" fill="#aaa" font-size="12" font-family="-apple-system,system-ui,sans-serif">One config change.</text>
+  <line x1="44" y1="153" x2="856" y2="153" stroke="#f0f0f0" stroke-width="1"/>
+  <text x="44" y="169" fill="#ccc" font-size="11" font-family="-apple-system,system-ui,sans-serif">MIT License · Zero dependencies · 2,969 tests passing</text>
+  <text x="856" y="169" fill="#ccc" font-size="11" text-anchor="end" font-family="-apple-system,system-ui,sans-serif">orchesis.io</text>
+  <rect x="548" y="60" width="306" height="52" rx="10" fill="#f8f5ff" stroke="#e0d5f5" stroke-width="1.5"/>
+  <text x="568" y="81" fill="#888" font-size="11" font-family="'Courier New',monospace">$</text>
+  <text x="580" y="81" fill="#555" font-size="13" font-family="'Courier New',monospace">pip install orchesis</text>
+  <text x="568" y="100" fill="#aaa" font-size="11" font-family="'Courier New',monospace">base_url = </text>
+  <text x="645" y="100" fill="#a855f7" font-size="11" font-family="'Courier New',monospace">"localhost:8080/v1"</text>
 </svg>
