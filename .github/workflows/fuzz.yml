@@ -36,8 +36,10 @@ jobs:
 
       - name: Install dependencies
         run: |
+          pip install -e ".[dev]"
           pip install atheris
           pip install -e ".[server]"
+          pip install pyyaml httpx hypothesis mcp pytest-asyncio fastapi
 
       - name: Restore corpus cache
         uses: actions/cache/restore@v4

@@ -29,6 +29,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]" build twine pytest-cov
+          pip install pyyaml httpx hypothesis mcp pytest-asyncio fastapi
 
       - name: Lint
         run: ruff check src/ tests/
@@ -64,6 +65,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+          pip install pyyaml httpx hypothesis mcp pytest-asyncio fastapi
 
       - name: Orchesis Security Gate
         run: orchesis gate --policy examples/strict-policy.yaml --fail-on high || true
