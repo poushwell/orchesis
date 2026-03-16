@@ -48,12 +48,12 @@ def test_readme_has_install_command() -> None:
 
 def test_readme_has_quick_start() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
-    assert "Get Started" in text
+    assert "GET%20STARTED" in text
 
 
 def test_readme_has_badge_tests() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
-    assert "img.shields.io/badge/tests-2969%20passing-brightgreen" in text
+    assert "img.shields.io/badge/tests-2969%20passing-22c55e" in text
 
 
 def test_readme_has_license_badge() -> None:

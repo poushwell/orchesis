@@ -40,7 +40,7 @@ def format_blocked_embed(event: AlertEvent) -> dict[str, Any]:
                     {"name": "Pattern", "value": f"`{(event.pattern or '')[:100]}`", "inline": False},
                 ],
                 "timestamp": event.timestamp,
-                "footer": {"text": "Orchesis AI Agent Control Plane"},
+                "footer": {"text": "Orchesis Runtime Gateway for AI Agents"},
             }
         ]
     }

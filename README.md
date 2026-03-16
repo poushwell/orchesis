@@ -1,28 +1,29 @@
-<div align="center">
+<p align="center">
+  <img src="docs/banner.svg" alt="Orchesis" width="900"/>
+</p>
 
-[![PyPI](https://img.shields.io/pypi/v/orchesis?color=purple&label=PyPI)](https://pypi.org/project/orchesis/)
-[![Tests](https://img.shields.io/badge/tests-2969%20passing-brightgreen)](https://github.com/poushwell/orchesis)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/poushwell/orchesis?style=social)](https://github.com/poushwell/orchesis)
-[![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](https://github.com/poushwell/orchesis)
+<p align="center">
+  <a href="https://pypi.org/project/orchesis/"><img src="https://img.shields.io/pypi/v/orchesis?color=7c3aed&label=PyPI" alt="PyPI"/></a>
+  <a href="https://github.com/poushwell/orchesis/actions"><img src="https://img.shields.io/badge/tests-2969%20passing-22c55e" alt="tests"/></a>
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"/>
+  <a href="https://github.com/poushwell/orchesis"><img src="https://img.shields.io/github/stars/poushwell/orchesis?style=flat&color=7c3aed" alt="Stars"/></a>
+  <img src="https://img.shields.io/badge/dependencies-0-green" alt="Zero dependencies"/>
+</p>
 
-</div>
+Orchesis is a transparent HTTP proxy for AI agents. Every request passes through
+a 17-phase detection pipeline before reaching the LLM provider.
+Zero dependencies. MIT license.
 
-**Orchesis** is a transparent HTTP proxy between AI agents
-and LLM APIs. Every request passes through a 17-phase
-detection pipeline. Zero dependencies. MIT license.
-AI Agent -> [Orchesis: 17 phases] -> LLM Provider (OpenAI, Anthropic...)
+SDK sees one agent. Static analysis sees code. Observability sees metrics.
+**Proxy sees everything, in real time, without code changes.**
 
-SDK sees one agent. Static analysis sees code. Observability sees metrics.  
-**Proxy sees everything — in real time, without code changes.**
-
-<div align="center">
-
-[![Get Started](https://img.shields.io/badge/Get%20Started-8B5CF6?style=for-the-badge)](https://orchesis.io/docs)
-[![MCP Scanner](https://img.shields.io/badge/MCP%20Scanner-Free-00FF41?style=for-the-badge)](https://orchesis.io/scan)
-[![Website](https://img.shields.io/badge/Website-orchesis.io-white?style=for-the-badge)](https://orchesis.io)
-
-</div>
+<p align="center">
+  <a href="https://orchesis.io/docs"><img src="https://img.shields.io/badge/GET%20STARTED-8B5CF6?style=for-the-badge" alt="GET STARTED"/></a>
+  <a href="https://orchesis.io/scan"><img src="https://img.shields.io/badge/MCP%20SCANNER-00FF41?style=for-the-badge" alt="MCP SCANNER"/></a>
+  <a href="https://orchesis.io/scan"><img src="https://img.shields.io/badge/FREE-111111?style=for-the-badge" alt="FREE"/></a>
+  <a href="https://orchesis.io"><img src="https://img.shields.io/badge/WEBSITE-white?style=for-the-badge" alt="WEBSITE"/></a>
+  <a href="https://orchesis.io"><img src="https://img.shields.io/badge/ORCHESIS.IO-7c3aed?style=for-the-badge" alt="ORCHESIS.IO"/></a>
+</p>
 
 ## Installation
 ```bash
@@ -58,19 +59,23 @@ graph LR
 
 | Approach | What it sees | Code changes needed |
 |----------|-------------|---------------------|
-| SDK/callbacks (LangSmith, LangChain) | One agent, one session | Yes — integrate per agent |
-| Static analysis (Snyk, Semgrep) | Code at rest | Yes — add to CI pipeline |
-| Observability (Datadog, Helicone) | Metrics and logs | Yes — instrument code |
-| **Orchesis proxy** | **All agents, all requests, cross-session patterns** | **No — one config line** |
+| SDK/callbacks (LangSmith, LangChain) | One agent, one session | Yes |
+| Static analysis (Snyk, Semgrep) | Code at rest | Yes |
+| Observability (Datadog, Helicone) | Metrics and logs | Yes |
+| **Orchesis proxy** | **All agents, all requests, cross-session patterns** | **No** |
 
-The proxy layer sees what SDK cannot: cross-agent patterns, fleet-level anomalies, 
+The proxy layer sees what SDK cannot: cross-agent patterns, fleet-level anomalies,
 duplicate context across providers. This is an architectural advantage, not a feature difference.
 
 ## What Orchesis does
 
-| | Security | Cost | Reliability | Observability |
-|---|---|---|---|---|
-| | 17-phase detection. Prompt injection, credential leaks, tool abuse. 25 signatures. | Context compression 80-90%. Semantic cache. Thompson Sampling routing. | Auto-healing. Circuit breakers. Loop detection. 6 recovery actions. | Real-time dashboard. Flow X-Ray. Agent Reliability Score. |
+| Capability | Current coverage |
+|---|---|
+| Security detection | 17-phase detection pipeline, prompt injection, credential leaks, tool abuse, 25 signatures |
+| Reliability controls | Auto-healing, circuit breakers, loop detection, 6 recovery actions |
+| Visibility | Real-time dashboard, Flow X-Ray, Agent Reliability Score |
+| Proxy overhead | 0.8% (MVE experiment, 10 iterations) |
+| Context growth caught | 12x detected without proxy (MVE) |
 
 ## By the numbers
 
@@ -78,26 +83,30 @@ duplicate context across providers. This is an architectural advantage, not a fe
 |--------|-------|
 | Pipeline phases | 17 |
 | Threat signatures | 25 across 10 categories |
-| Token savings | 80-90% |
 | MAST coverage | 78.6% |
 | OWASP coverage | 80% |
 | Auto-heal actions | 6 |
 | Tests passing | 2,969 |
 | Dependencies | **0** (stdlib only) |
-
-- **MVE result**: 0.8% proxy overhead. 12x context collapse detected without proxy.
-- **Zero external dependencies** — no vendor lock-in, no data leaves your infrastructure
+| Proxy overhead | 0.8% measured |
+| Context collapse | 12x growth caught |
 
 ## Free MCP Security Scanner
 
-Check your MCP configuration for security issues:
+We scanned 900+ MCP configurations on GitHub. 75% had at least one security issue:
+hardcoded credentials, overpermissioned tools, missing input validation.
 
-**[→ orchesis.io/scan](https://orchesis.io/scan)**
+Run the scanner on your own configs in 30 seconds:
+
+**-> [orchesis.io/scan](https://orchesis.io/scan)**
 
 Or via CLI:
 ```bash
-orchesis audit-openclaw
+npx orchesis-scan
 ```
+
+52 security checks across 10 categories. No data sent to external servers.
+Results in 30 seconds.
 
 ---
 
@@ -105,14 +114,12 @@ orchesis audit-openclaw
 > **Note:** `dashboard/dist/` is intentionally committed for zero-setup deployment.
 > Run `npm run build` in `dashboard/` to rebuild from source.
 
-<div align="center">
+<p align="center">
+  <a href="https://orchesis.io">Website</a> ·
+  <a href="https://orchesis.io/docs">Documentation</a> ·
+  <a href="https://orchesis.io/scan">MCP Scanner</a> ·
+  <a href="https://orchesis.io/blog">Blog</a>
+</p>
 
-**[Website](https://orchesis.io)** ·
-**[Documentation](https://orchesis.io/docs)** ·
-**[MCP Scanner](https://orchesis.io/scan)** ·
-**[Blog](https://orchesis.io/blog)**
-
-MIT License · Built with ❤️ and zero dependencies
-
-</div>
+<p align="center">MIT License · Built with ♥ and zero dependencies</p>
 

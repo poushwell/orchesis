@@ -1,6 +1,6 @@
-"""Orchesis — AI Agent Control Plane."""
+"""Orchesis — Runtime Gateway for AI Agents."""
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 from orchesis.engine import Decision, PolicyEngine
 from orchesis.scanner import McpConfigScanner, PolicyScanner, SkillScanner

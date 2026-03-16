@@ -51,9 +51,9 @@ def test_ci_tests_python_312_only() -> None:
 
 def test_readme_has_badges() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "docs/banner.svg" not in content
+    assert "docs/banner.svg" in content
     assert "img.shields.io/pypi/v/orchesis" in content
-    assert "img.shields.io/badge/tests-2969%20passing-brightgreen" in content
+    assert "img.shields.io/badge/tests-2969%20passing-22c55e" in content
 
 
 def test_readme_has_docker_section() -> None:

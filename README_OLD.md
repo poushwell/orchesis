@@ -1,6 +1,6 @@
 # Orchesis
 
-**AI Agent Control Plane — transparent HTTP proxy for security, cost optimization, and reliability.**
+**Runtime Gateway for AI Agents — transparent HTTP proxy for security, cost optimization, and reliability.**
 
 [![Tests](https://github.com/poushwell/orchesis/actions/workflows/test.yml/badge.svg)](https://github.com/poushwell/orchesis/actions/workflows/test.yml)
 [![Python](https://img.shields.io/badge/python-3.12+-blue)]()
