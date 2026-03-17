@@ -85,12 +85,35 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Orchesis Dashboard</title>
   <style>
-    :root {
-      --bg: #0A0A12;
-      --panel: rgba(255,255,255,0.03);
-      --border: rgba(255,255,255,0.06);
-      --text: #E8E8F0;
+    :root[data-theme="light"] {
+      --bg: #ffffff;
+      --surface: #f5f5f5;
+      --text: #111111;
+      --border: #e0e0e0;
+      --accent: #7c3aed;
+      --panel: var(--surface);
+      --text-secondary: #5f5f6f;
+      --hero-radial: #dcdff0;
+    }
+    :root[data-theme="dark"] {
+      --bg: #090909;
+      --surface: #111114;
+      --text: #e4e4e7;
+      --border: #27272a;
+      --accent: #a855f7;
+      --panel: var(--surface);
       --text-secondary: #6B6B80;
+      --hero-radial: #18203A;
+    }
+    :root {
+      --bg: #090909;
+      --surface: #111114;
+      --text: #e4e4e7;
+      --border: #27272a;
+      --accent: #a855f7;
+      --panel: var(--surface);
+      --text-secondary: #6B6B80;
+      --hero-radial: #18203A;
       --ok: #00E5A0;
       --warn: #FFB800;
       --danger: #FF3B5C;
@@ -102,7 +125,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     body {
       margin: 0;
       font-family: system-ui, -apple-system, sans-serif;
-      background: radial-gradient(1200px 600px at 20% -20%, #18203A 0%, var(--bg) 55%);
+      background: radial-gradient(1200px 600px at 20% -20%, var(--hero-radial) 0%, var(--bg) 55%);
       color: var(--text);
       min-height: 100vh;
     }
@@ -114,9 +137,9 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       gap: 16px;
     }
     .topbar {
-      background: linear-gradient(90deg, rgba(24,32,58,0.9), rgba(10,10,18,0.9));
+      background: linear-gradient(90deg, var(--surface), color-mix(in srgb, var(--surface) 86%, var(--bg)));
       border: 1px solid var(--border);
-      border-bottom: 1px solid rgba(255,255,255,0.06);
+      border-bottom: 1px solid var(--border);
       border-radius: var(--radius);
       backdrop-filter: blur(12px);
       box-shadow: 0 1px 0 rgba(0,229,160,0.05);
@@ -143,7 +166,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       padding: 4px 10px;
       font-size: 12px;
       color: var(--text-secondary);
-      background: rgba(255,255,255,0.02);
+      background: var(--surface);
     }
     .conn-dot {
       width: 10px; height: 10px; border-radius: 50%;
@@ -165,7 +188,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     .tab-btn {
       border: 1px solid var(--border);
       border-radius: var(--radius-sm);
-      background: rgba(255,255,255,0.02);
+      background: var(--surface);
       color: var(--text);
       padding: 8px 12px;
       cursor: pointer;
@@ -178,8 +201,20 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       box-shadow: 0 0 16px rgba(0,229,160,0.1), inset 0 1px 0 rgba(0,229,160,0.15);
     }
     .tab-btn:hover:not(.active) {
-      background: rgba(255,255,255,0.04);
+      background: color-mix(in srgb, var(--surface) 86%, var(--text));
       border-color: rgba(255,255,255,0.12);
+    }
+    #theme-toggle {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--text);
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    #theme-toggle:hover {
+      border-color: var(--accent);
     }
     .toast {
       position: fixed;
@@ -912,6 +947,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       <div class="badges">
         <span class="badge"><span id="conn-dot" class="conn-dot"></span><span id="conn-text">Connected</span></span>
         <span class="badge" id="status-badge">Status: --</span>
+        <button id="theme-toggle" onclick="toggleTheme()">☀️</button>
       </div>
     </div>
     {{DEMO_BANNER}}
@@ -1096,6 +1132,20 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         <div class="panel"><div class="subtle">Tracked Sessions</div><div id="exp-sessions" class="metric-value">0</div></div>
       </div>
       <div id="exp-cards"></div>
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+          <div class="section-title" style="margin:0;padding:0;border:0;"><strong>Benchmark</strong></div>
+          <div style="display:flex;gap:8px;">
+            <button id="exp-benchmark-run" class="ow-btn">Run Benchmark</button>
+            <button id="exp-benchmark-export" class="ow-btn">Export Results</button>
+          </div>
+        </div>
+        <div id="exp-benchmark-score" class="subtle" style="margin-top:8px;">Overall score vs baseline: --</div>
+        <table id="exp-benchmark-table" class="table" style="margin-top:8px;">
+          <thead><tr><th>Case</th><th>Category</th><th>Expected</th><th>Status</th></tr></thead>
+          <tbody><tr><td colspan="4" class="subtle">No benchmark data yet.</td></tr></tbody>
+        </table>
+      </div>
       <div class="panel panel-primary">
         <div class="section-title"><strong>Task Correlations & Insights</strong></div>
         <div id="exp-correlations" class="event-feed"></div>
@@ -1365,6 +1415,18 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     let overwatchTeamDetail = null;
     const sparkHistory = {};
     const SPARK_MAX = 20;
+    function applyTheme(theme){
+      const next = theme === "light" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      localStorage.setItem("orchesis-theme", next);
+      const btn = document.getElementById("theme-toggle");
+      if(btn){ btn.textContent = next === "dark" ? "☀️" : "🌙"; }
+    }
+    function toggleTheme() {
+      const current = document.documentElement.getAttribute("data-theme");
+      const next = current === "dark" ? "light" : "dark";
+      applyTheme(next);
+    }
 
     function fmtNum(v){ return Number(v||0).toLocaleString(); }
     function fmtMoney(v){ return "$" + Number(v||0).toFixed(2); }
@@ -2173,7 +2235,61 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       svg.innerHTML = html;
     }
 
-    function renderExperiments(experiments, outcomes, correlations, stats){
+    function renderBenchmark(casesPayload, resultsPayload){
+      const scoreEl = document.getElementById("exp-benchmark-score");
+      const body = document.querySelector("#exp-benchmark-table tbody");
+      if(!body){ return; }
+      const cases = (casesPayload && Array.isArray(casesPayload.cases)) ? casesPayload.cases : [];
+      const report = (resultsPayload && resultsPayload.results && typeof resultsPayload.results === "object")
+        ? resultsPayload.results
+        : null;
+      const comparison = report && report.comparison && typeof report.comparison === "object" ? report.comparison : null;
+      const byId = {};
+      const rows = report && Array.isArray(report.results) ? report.results : [];
+      rows.forEach((item)=>{
+        if(item && item.case_id){ byId[String(item.case_id)] = item; }
+      });
+      if(scoreEl){
+        if(comparison){
+          scoreEl.textContent = `Overall score vs baseline: ${Number(comparison.score || 0).toFixed(1)} · percentile ${Number(comparison.percentile || 0).toFixed(1)}`;
+        }else{
+          scoreEl.textContent = "Overall score vs baseline: --";
+        }
+      }
+      if(cases.length === 0){
+        body.innerHTML = `<tr><td colspan="4" class="subtle">No benchmark cases available.</td></tr>`;
+        return;
+      }
+      body.innerHTML = cases.map((c)=>{
+        const r = byId[String(c.id)] || null;
+        const status = r ? (r.passed ? "PASS" : "FAIL") : "--";
+        const cls = status === "PASS" ? "low" : (status === "FAIL" ? "high" : "info");
+        return `<tr><td>${c.id}</td><td>${c.category}</td><td>${c.expected_action}</td><td><span class="sev ${cls}">${status}</span></td></tr>`;
+      }).join("");
+    }
+
+    async function runBenchmarkSuite(){
+      await fetch("/api/v1/benchmark/run-all", { method: "POST" });
+      await pollExperiments();
+    }
+
+    function exportBenchmarkResults(resultsPayload){
+      const report = (resultsPayload && resultsPayload.results && typeof resultsPayload.results === "object")
+        ? resultsPayload.results
+        : null;
+      if(!report){ return; }
+      const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "benchmark_results.json";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    function renderExperiments(experiments, outcomes, correlations, stats, benchmarkCases, benchmarkResults){
       const exp = (stats && stats.experiments) ? stats.experiments : {};
       const task = (stats && stats.task_tracking) ? stats.task_tracking : {};
       document.getElementById("exp-active").textContent = fmtNum(exp.active || 0);
@@ -2230,6 +2346,15 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
           const pct = (v / total * 100).toFixed(1);
           return `<div class="panel"><div class="subtle">${k}</div><div class="metric-value">${fmtNum(v)} (${pct}%)</div></div>`;
         }).join("");
+      }
+      renderBenchmark(benchmarkCases, benchmarkResults);
+      const runBtn = document.getElementById("exp-benchmark-run");
+      const exportBtn = document.getElementById("exp-benchmark-export");
+      if(runBtn){
+        runBtn.onclick = ()=> runBenchmarkSuite();
+      }
+      if(exportBtn){
+        exportBtn.onclick = ()=> exportBenchmarkResults(benchmarkResults);
       }
     }
 
@@ -2713,13 +2838,15 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     }
 
     async function pollExperiments(){
-      const [experiments, outcomes, correlations, stats] = await Promise.all([
+      const [experiments, outcomes, correlations, stats, benchmarkCases, benchmarkResults] = await Promise.all([
         fetchData("/api/experiments"),
         fetchData("/api/tasks/outcomes"),
         fetchData("/api/tasks/correlations"),
         fetchData("/stats"),
+        fetchData("/api/v1/benchmark/cases"),
+        fetchData("/api/v1/benchmark/results"),
       ]);
-      renderExperiments(experiments, outcomes, correlations, stats);
+      renderExperiments(experiments, outcomes, correlations, stats, benchmarkCases, benchmarkResults);
     }
 
     async function pollThreats(){
@@ -2876,6 +3003,8 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     }
 
     async function boot(){
+      const savedTheme = localStorage.getItem("orchesis-theme") || "dark";
+      applyTheme(savedTheme);
       bindUI();
       await pollShield();
       if(pollTimer){ clearInterval(pollTimer); }

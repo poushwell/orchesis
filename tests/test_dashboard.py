@@ -115,7 +115,8 @@ def test_dashboard_html_contains_expected_tabs() -> None:
 def test_dashboard_html_contains_css_styles() -> None:
     html = get_dashboard_html()
     assert "<style>" in html
-    assert "#0A0A12" in html
+    assert ':root[data-theme="light"]' in html
+    assert ':root[data-theme="dark"]' in html
     assert "backdrop-filter" in html
 
 
@@ -126,6 +127,39 @@ def test_dashboard_html_contains_javascript() -> None:
     assert "fetchData(" in html
     assert html.count("const ratio =") >= 1
     assert "const poolHitRatio =" in html
+
+
+def test_theme_toggle_button_present() -> None:
+    html = get_dashboard_html()
+    assert 'id="theme-toggle"' in html
+    assert "toggleTheme()" in html
+
+
+def test_light_theme_css_variables_defined() -> None:
+    html = get_dashboard_html()
+    assert ':root[data-theme="light"]' in html
+    assert "--bg: #ffffff;" in html
+    assert "--surface: #f5f5f5;" in html
+    assert "--text: #111111;" in html
+    assert "--border: #e0e0e0;" in html
+    assert "--accent: #7c3aed;" in html
+
+
+def test_dark_theme_css_variables_defined() -> None:
+    html = get_dashboard_html()
+    assert ':root[data-theme="dark"]' in html
+    assert "--bg: #090909;" in html
+    assert "--surface: #111114;" in html
+    assert "--text: #e4e4e7;" in html
+    assert "--border: #27272a;" in html
+    assert "--accent: #a855f7;" in html
+
+
+def test_localstorage_theme_persistence_code() -> None:
+    html = get_dashboard_html()
+    assert "localStorage.getItem(\"orchesis-theme\")" in html
+    assert "localStorage.setItem(\"orchesis-theme\", next)" in html
+    assert "document.documentElement.setAttribute(\"data-theme\", next)" in html
 
 
 def test_dashboard_html_size_reasonable() -> None:

@@ -6,6 +6,7 @@ import json
 import os
 import time
 import hashlib
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from orchesis.auth import AgentAuthenticator, CredentialStore
 from orchesis.agent_health import AgentHealthScore
 from orchesis.audit import AuditEngine, AuditQuery
 from orchesis.compliance_report import ComplianceReportGenerator
+from orchesis.benchmark import BenchmarkSuite, ORCHESIS_BENCHMARK_V1
 from orchesis.agent_store import AgentPolicyStore, build_agent_overwatch_snapshot
 from orchesis.config import load_policy, validate_policy, validate_policy_warnings
 from orchesis.corpus import RegressionCorpus
@@ -122,6 +124,7 @@ def create_api_app(
     app.state.flow_decisions = {}
     app.state.api_token_override = api_token.strip() if isinstance(api_token, str) and api_token.strip() else None
     app.state.token_yield = TokenYieldTracker()
+    app.state.benchmark_results = {}
     app.state.dna_store = ContextDNAStore(str(policy_file.parent / ".orchesis" / "dna"))
     mcp_monitor_cfg = (
         current_version.policy.get("mcp_monitor")
@@ -966,6 +969,60 @@ def create_api_app(
     def token_yield_global(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
         return app.state.token_yield.get_global_stats()
+
+    @app.get("/api/v1/benchmark/cases")
+    def benchmark_cases(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        cases = [
+            {
+                "id": case.id,
+                "category": case.category,
+                "subcategory": case.subcategory,
+                "description": case.description,
+                "expected_action": case.expected_action,
+                "severity": case.severity,
+                "tags": list(case.tags),
+                "reference": case.reference,
+            }
+            for case in ORCHESIS_BENCHMARK_V1
+        ]
+        return {"total": len(cases), "cases": cases}
+
+    @app.get("/api/v1/benchmark/run/{case_id}")
+    def benchmark_run_case(
+        case_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        selected = [case for case in ORCHESIS_BENCHMARK_V1 if case.id == case_id]
+        if not selected:
+            raise HTTPException(status_code=404, detail={"error": "benchmark case not found"})
+        suite = BenchmarkSuite(cases=selected, policy=app.state.current_version.policy)
+        report = suite.run()
+        payload = asdict(report)
+        payload["comparison"] = suite.compare_to_baseline(payload)
+        app.state.benchmark_results[case_id] = payload
+        app.state.benchmark_results["latest"] = payload
+        return payload
+
+    @app.post("/api/v1/benchmark/run-all")
+    def benchmark_run_all(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        suite = BenchmarkSuite(policy=app.state.current_version.policy)
+        report = suite.run()
+        payload = asdict(report)
+        payload["comparison"] = suite.compare_to_baseline(payload)
+        app.state.benchmark_results["run_all"] = payload
+        app.state.benchmark_results["latest"] = payload
+        return payload
+
+    @app.get("/api/v1/benchmark/results")
+    def benchmark_results(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        latest = app.state.benchmark_results.get("latest")
+        if isinstance(latest, dict):
+            return {"results": latest, "saved_runs": len(app.state.benchmark_results)}
+        return {"results": None, "saved_runs": 0}
 
     @app.get("/api/v1/mcp/monitor/status")
     def mcp_monitor_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:

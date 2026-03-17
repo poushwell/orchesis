@@ -3,6 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
+import pytest
+
+from orchesis.api import create_api_app
 from orchesis.benchmark import (
     ORCHESIS_BENCHMARK_V1,
     BenchmarkCase,
@@ -143,4 +147,102 @@ def test_benchmark_case_fields() -> None:
 def test_benchmark_report_totals() -> None:
     report = BenchmarkSuite().run()
     assert report.passed + report.failed == report.total
+
+
+def _policy_yaml() -> str:
+    return """
+api:
+  token: "orch_sk_test"
+rules: []
+"""
+
+
+def _auth() -> dict[str, str]:
+    return {"Authorization": "Bearer orch_sk_test"}
+
+
+async def _client(app):
+    transport = httpx.ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://test")
+
+
+def _make_app(tmp_path: Path):
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(_policy_yaml(), encoding="utf-8")
+    app = create_api_app(
+        policy_path=str(policy_path),
+        state_persist=str(tmp_path / "state.jsonl"),
+        decisions_log=str(tmp_path / "decisions.jsonl"),
+        history_path=str(tmp_path / "policy_versions.jsonl"),
+    )
+    return app
+
+
+def test_compare_to_baseline_returns_score() -> None:
+    suite = BenchmarkSuite()
+    report = suite.run()
+    payload = {
+        "results": [
+            {
+                "case_id": row.case_id,
+                "passed": row.passed,
+            }
+            for row in report.results
+        ]
+    }
+    cmp = suite.compare_to_baseline(payload)
+    assert isinstance(cmp["score"], float)
+    assert 0.0 <= cmp["score"] <= 100.0
+    assert 0.0 <= cmp["percentile"] <= 100.0
+
+
+def test_export_results_json() -> None:
+    suite = BenchmarkSuite()
+    payload = {"results": [{"case_id": "SEC-001", "passed": True}]}
+    text = suite.export_results(payload, format="json")
+    parsed = json.loads(text)
+    assert parsed["results"][0]["case_id"] == "SEC-001"
+
+
+def test_export_results_csv() -> None:
+    suite = BenchmarkSuite()
+    payload = {
+        "results": [
+            {
+                "case_id": "SEC-001",
+                "category": "security",
+                "expected_action": "block",
+                "actual_action": "block",
+                "passed": True,
+                "latency_ms": 1.2,
+                "details": "ok",
+            }
+        ]
+    }
+    text = suite.export_results(payload, format="csv")
+    assert "case_id,category,expected_action,actual_action,passed,latency_ms,details" in text
+    assert "SEC-001" in text
+
+
+@pytest.mark.asyncio
+async def test_api_cases_endpoint(tmp_path: Path) -> None:
+    app = _make_app(tmp_path)
+    async with await _client(app) as client:
+        res = await client.get("/api/v1/benchmark/cases", headers=_auth())
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["total"] == len(ORCHESIS_BENCHMARK_V1)
+    assert len(payload["cases"]) == len(ORCHESIS_BENCHMARK_V1)
+
+
+@pytest.mark.asyncio
+async def test_api_run_case_endpoint(tmp_path: Path) -> None:
+    app = _make_app(tmp_path)
+    case_id = ORCHESIS_BENCHMARK_V1[0].id
+    async with await _client(app) as client:
+        res = await client.get(f"/api/v1/benchmark/run/{case_id}", headers=_auth())
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["total"] == 1
+    assert isinstance(payload.get("comparison", {}).get("score"), float)
 

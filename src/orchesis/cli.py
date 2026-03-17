@@ -55,8 +55,10 @@ from orchesis.reliability import ReliabilityReportGenerator
 from orchesis.llm_config import load_llm_config
 from orchesis.llm_judge import LLMJudge
 from orchesis.rules_generator import generate_security_rules_from_policy
+from orchesis.policy_validator import PolicyAsCodeValidator
 from orchesis.scanner_server import run_scanner_http_server
 from orchesis.scenarios import AdversarialScenarios
+from orchesis.experiment_runner import NLCEExperimentRunner
 from orchesis.integrity import IntegrityMonitor, build_integrity_alert_callback
 from orchesis.hooks import ClaudeCodeHooks, evaluate_hook_tool, log_hook_tool
 from orchesis.quickstart import QuickstartWizard
@@ -662,24 +664,68 @@ def verify(
 
 
 @main.command()
-@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
-def validate(policy_path: str) -> None:
+@click.option("--config", "config_path", type=click.Path(exists=True), default=None)
+@click.option("--policy", "policy_path", type=click.Path(exists=True), default=None)
+@click.option(
+    "--framework",
+    type=click.Choice(["none", "eu-ai-act", "owasp", "all"], case_sensitive=False),
+    default="none",
+)
+@click.option("--strict", "strict_mode", is_flag=True, default=False)
+def validate(
+    config_path: str | None,
+    policy_path: str | None,
+    framework: str,
+    strict_mode: bool,
+) -> None:
     """Validate policy file."""
+    resolved_policy = (
+        config_path
+        if isinstance(config_path, str) and config_path.strip()
+        else (policy_path if isinstance(policy_path, str) and policy_path.strip() else None)
+    )
+    if not isinstance(resolved_policy, str):
+        raise click.ClickException("One of --config or --policy is required")
     try:
-        policy = load_policy(policy_path)
+        policy = load_policy(resolved_policy)
     except (ValueError, YAMLError, OSError) as error:
         raise click.ClickException(f"Failed to load policy: {error}") from error
 
     errors = validate_policy(policy)
     warnings = validate_policy_warnings(policy)
+    validator = PolicyAsCodeValidator()
+    selected_framework = str(framework).strip().lower()
+    framework_violations: list[str] = []
+    report = validator.validate(policy)
+    if selected_framework == "eu-ai-act":
+        framework_violations = validator.validate_eu_ai_act(policy)
+    elif selected_framework == "owasp":
+        framework_violations = validator.validate_owasp(policy)
+    elif selected_framework == "all":
+        framework_violations = list(report.violations)
+
+    if selected_framework in {"all", "eu-ai-act"}:
+        click.echo(f"EU AI Act score: {report.eu_ai_act_score * 100:.1f}%")
+    if selected_framework in {"all", "owasp"}:
+        click.echo(f"OWASP score: {report.owasp_score * 100:.1f}%")
+
     for warning in warnings:
         click.echo(f"! warning: {warning}")
-    if not errors:
+    for violation in framework_violations:
+        click.echo(f"- {violation}")
+
+    if strict_mode and warnings:
+        raise SystemExit(1)
+
+    if not errors and not framework_violations:
         click.echo("OK")
         return
 
     for error in errors:
         click.echo(f"- {error}")
+    if framework_violations:
+        for fix in validator.suggest_fixes(framework_violations):
+            click.echo(f"> fix:\n{fix}")
     raise SystemExit(1)
 
 
@@ -2970,6 +3016,68 @@ def reliability_report(output_format: str) -> None:
         click.echo(generator.to_json(report))
         return
     click.echo(generator.to_markdown(report))
+
+
+def _load_experiment_data(data_path: str) -> list[dict[str, Any]]:
+    source = Path(data_path)
+    text = source.read_text(encoding="utf-8")
+    if source.suffix.lower() == ".jsonl":
+        rows: list[dict[str, Any]] = []
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                rows.append(payload)
+        return rows
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise click.ClickException(f"Invalid data file JSON: {error}") from error
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        return [payload]
+    return []
+
+
+@main.command("experiment")
+@click.option("--id", "experiment_id", default=None, help="Experiment id (e.g. exp8)")
+@click.option("--data", "data_path", type=click.Path(exists=True), default=None, help="Input JSON/JSONL data file")
+@click.option("--list", "list_only", is_flag=True, default=False, help="List available experiments")
+@click.option("--results", "show_results", is_flag=True, default=False, help="List saved results")
+@click.option("--results-dir", "results_dir", default="experiments/results", show_default=True)
+def experiment_command(
+    experiment_id: str | None,
+    data_path: str | None,
+    list_only: bool,
+    show_results: bool,
+    results_dir: str,
+) -> None:
+    """Run NLCE experiments or inspect results."""
+    runner = NLCEExperimentRunner({"results_dir": results_dir})
+    if list_only:
+        click.echo("Available experiments:")
+        for exp_id, name in sorted(runner.EXPERIMENTS.items()):
+            click.echo(f"  {exp_id}: {name}")
+        return
+    if show_results:
+        items = runner.list_results()
+        click.echo(json.dumps(items, ensure_ascii=False, indent=2))
+        return
+    if not experiment_id:
+        raise click.ClickException("--id is required unless using --list/--results")
+    if not data_path:
+        raise click.ClickException("--data is required when running an experiment")
+    data = _load_experiment_data(data_path)
+    result = runner.run(experiment_id=experiment_id, data=data)
+    saved_path = runner.save(result)
+    payload = dict(result)
+    payload["saved_path"] = saved_path
+    click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 @main.command("benchmark")

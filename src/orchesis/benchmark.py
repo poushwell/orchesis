@@ -170,6 +170,62 @@ class BenchmarkSuite:
             "improvement_count": improvement_count,
         }
 
+    def compare_to_baseline(self, results: dict) -> dict:
+        """Compare run results to ORCHESIS_BENCHMARK_V1 baseline."""
+        rows = results.get("results", []) if isinstance(results, dict) else []
+        if not isinstance(rows, list):
+            rows = []
+        better: list[str] = []
+        worse: list[str] = []
+        passed = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            case_id = str(row.get("case_id", ""))
+            is_pass = bool(row.get("passed", False))
+            if is_pass:
+                passed += 1
+                if case_id:
+                    better.append(case_id)
+            elif case_id:
+                worse.append(case_id)
+        total = max(1, len(rows))
+        score = max(0.0, min(100.0, (passed / float(total)) * 100.0))
+        percentile = round(score, 2)
+        return {
+            "better_than_baseline": better,
+            "worse_than_baseline": worse,
+            "score": round(score, 2),
+            "percentile": percentile,
+        }
+
+    def export_results(self, results: dict, format: str = "json") -> str:
+        """Export benchmark results as json or csv."""
+        fmt = str(format or "json").strip().lower()
+        if fmt == "json":
+            return json.dumps(results if isinstance(results, dict) else {}, ensure_ascii=False, indent=2)
+        if fmt == "csv":
+            rows = results.get("results", []) if isinstance(results, dict) else []
+            if not isinstance(rows, list):
+                rows = []
+            fieldnames = ["case_id", "category", "expected_action", "actual_action", "passed", "latency_ms", "details"]
+            lines = [",".join(fieldnames)]
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                values = [
+                    str(row.get("case_id", "")),
+                    str(row.get("category", "")),
+                    str(row.get("expected_action", "")),
+                    str(row.get("actual_action", "")),
+                    str(bool(row.get("passed", False))),
+                    str(row.get("latency_ms", "")),
+                    str(row.get("details", "")).replace(",", ";"),
+                ]
+                lines.append(",".join(values))
+            return "\n".join(lines) + "\n"
+        raise ValueError(f"Unsupported export format: {format}")
+
     @staticmethod
     def load_cases_from_jsonl(path: str) -> list[BenchmarkCase]:
         cases: list[BenchmarkCase] = []
