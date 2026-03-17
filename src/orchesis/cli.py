@@ -89,11 +89,13 @@ DEFAULT_FUZZ_RUNS_PATH = Path(".orchesis") / "fuzz_runs.jsonl"
 DEFAULT_MUTATION_RUNS_PATH = Path(".orchesis") / "mutation_runs.jsonl"
 DEFAULT_REPLAY_RUNS_PATH = Path(".orchesis") / "replay_runs.jsonl"
 OPERATIONS_LOG = StructuredLogger("cli")
-AGENT_COMMANDS: dict[str, list[str]] = {
+AGENT_COMMANDS: dict[str, list[str] | None] = {
     "openclaw": ["openclaw", "--base-url", "http://localhost:8080/v1"],
     "claude": ["claude", "--api-base", "http://localhost:8080/v1"],
     "codex": ["codex", "--base-url", "http://localhost:8080/v1"],
     "aider": ["aider", "--openai-api-base", "http://localhost:8080/v1"],
+    "continue": ["continue", "--base-url", "http://localhost:8080/v1"],
+    "cursor": None,
 }
 
 
@@ -1068,6 +1070,17 @@ def demo_command(proxy_port: int, api_port: int, policy_path: str) -> None:
 @click.option("--config", "config_path", type=click.Path(), default=None)
 def launch_command(agent: str, config_path: str | None) -> None:
     """Launch a local agent through Orchesis proxy."""
+    if agent == "cursor":
+        os.environ["OPENAI_API_BASE"] = "http://localhost:8080/v1"
+        print("✓ Set OPENAI_API_BASE for Cursor IDE")
+        print("  Restart Cursor to apply proxy settings")
+        return
+
+    agent_cmd_raw = AGENT_COMMANDS.get(agent)
+    if not isinstance(agent_cmd_raw, list):
+        raise click.ClickException(f"Unsupported agent launch mode: {agent}")
+
+    launch_started = time.monotonic()
     proxy_cmd = [sys.executable, "-m", "orchesis", "proxy", "--host", "127.0.0.1", "--port", "8080"]
     if isinstance(config_path, str) and config_path.strip():
         proxy_cmd.extend(["--config", config_path.strip()])
@@ -1078,12 +1091,21 @@ def launch_command(agent: str, config_path: str | None) -> None:
     except Exception as error:
         raise click.ClickException(f"Failed to start proxy: {error}") from error
 
-    print("Orchesis proxy running on :8080")
-    time.sleep(1.5)
+    if not _wait_for_proxy(8080, timeout=5.0):
+        if proxy_process is not None:
+            try:
+                proxy_process.terminate()
+            except Exception:
+                pass
+        raise click.ClickException("Proxy failed health check on port 8080")
 
-    agent_cmd = list(AGENT_COMMANDS[agent])
-    print(f"Launching {agent} through proxy...")
-    print("Intercepting " + f"{agent}" + " traffic · http://localhost:8080/v1")
+    print("✓ Orchesis proxy running on :8080")
+    print(f"✓ Intercepting {agent} traffic")
+    print("  Dashboard: http://localhost:8080/dashboard")
+    print("  Press Ctrl+C to stop proxy and agent")
+
+    before_stats = _get_proxy_stats(8080)
+    agent_cmd = list(agent_cmd_raw)
 
     agent_exit_code = 0
     try:
@@ -1106,7 +1128,44 @@ def launch_command(agent: str, config_path: str | None) -> None:
                 except Exception:
                     pass
 
+    after_stats = _get_proxy_stats(8080)
+    elapsed = max(0.0, time.monotonic() - launch_started)
+    requests_before = int(before_stats.get("requests", 0) or 0)
+    requests_after = int(after_stats.get("requests", requests_before) or requests_before)
+    blocked_before = int(before_stats.get("blocked", 0) or 0)
+    blocked_after = int(after_stats.get("blocked", blocked_before) or blocked_before)
+    cost_before = float(before_stats.get("cost_today", 0.0) or 0.0)
+    cost_after = float(after_stats.get("cost_today", cost_before) or cost_before)
+    print("\n── Session summary ──")
+    print(f"  Duration: {elapsed:.0f}s")
+    print(f"  Requests intercepted: {max(0, requests_after - requests_before)}")
+    print(f"  Threats blocked: {max(0, blocked_after - blocked_before)}")
+    print(f"  Cost: ${max(0.0, cost_after - cost_before):.4f}")
+
     raise SystemExit(agent_exit_code)
+
+
+def _wait_for_proxy(port: int, timeout: float = 5.0) -> bool:
+    """Check proxy is up before launching agent."""
+    deadline = time.monotonic() + max(0.1, float(timeout))
+    while time.monotonic() < deadline:
+        try:
+            with urlopen(f"http://127.0.0.1:{max(1, int(port))}/health", timeout=1.0):
+                return True
+        except Exception:
+            time.sleep(0.1)
+    return False
+
+
+def _get_proxy_stats(port: int) -> dict[str, Any]:
+    try:
+        with urlopen(f"http://127.0.0.1:{max(1, int(port))}/stats", timeout=2.0) as response:
+            parsed = json.loads(response.read().decode("utf-8"))
+            if isinstance(parsed, dict):
+                return parsed
+    except Exception:
+        return {}
+    return {}
 
 
 @main.command("audit-openclaw")

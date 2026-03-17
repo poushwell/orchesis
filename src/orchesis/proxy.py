@@ -67,6 +67,7 @@ from orchesis.session_risk import RiskSignal, SessionRiskAccumulator
 from orchesis.flow_xray import FlowAnalyzer, FlowXRayConfig
 from orchesis.ars import AgentReliabilityScore
 from orchesis.adaptive_detector import AdaptiveDetector
+from orchesis.adaptive_detection_v2 import AdaptiveDetectionV2
 from orchesis.community import CommunityClient
 from orchesis.mast_detectors import MASTDetectors
 from orchesis.message_chain import validate_tool_chain
@@ -2052,6 +2053,14 @@ class LLMHTTPProxy:
         self._adaptive_detector: AdaptiveDetector | None = None
         if isinstance(adaptive_cfg, dict) and bool(adaptive_cfg.get("enabled", False)):
             self._adaptive_detector = AdaptiveDetector(adaptive_cfg)
+        adaptive_v2_cfg = self._policy.get("adaptive_detection_v2")
+        self._adaptive_detection_v2: AdaptiveDetectionV2 | None = None
+        self._adaptive_detection_v2_threshold = 0.62
+        if isinstance(adaptive_v2_cfg, dict) and bool(adaptive_v2_cfg.get("enabled", False)):
+            self._adaptive_detection_v2 = AdaptiveDetectionV2(adaptive_v2_cfg)
+            self._adaptive_detection_v2_threshold = float(
+                adaptive_v2_cfg.get("confidence_threshold", 0.62)
+            )
         context_opt_cfg = self._policy.get("context_optimizer")
         self._context_optimizer: ContextOptimizer | None = None
         if isinstance(context_opt_cfg, dict) and bool(context_opt_cfg.get("enabled", False)):
@@ -2179,6 +2188,8 @@ class LLMHTTPProxy:
             payload["ars"] = self._ars.stats
         if self._adaptive_detector is not None:
             payload["adaptive_detection"] = self._adaptive_detector.get_stats()
+        if self._adaptive_detection_v2 is not None:
+            payload["adaptive_detection_v2"] = self._adaptive_detection_v2.get_layer_stats()
         if self._mast is not None:
             payload["mast"] = self._mast.get_stats()
         if self._context_optimizer is not None:
@@ -3885,6 +3896,64 @@ class LLMHTTPProxy:
                                 description=f"{getattr(match, 'name', 'threat')}: {str(getattr(match, 'description', ''))[:100]}",
                             ),
                         )
+        if self._adaptive_detection_v2 is not None:
+            messages = ctx.body.get("messages", [])
+            if not isinstance(messages, list):
+                messages = []
+            message_text: list[str] = []
+            for item in messages:
+                if isinstance(item, dict):
+                    value = item.get("content", "")
+                    if isinstance(value, str):
+                        message_text.append(value)
+            tool_names = [
+                str(t.get("name", ""))
+                for t in ctx.body.get("tools", [])
+                if isinstance(t, dict) and t.get("name")
+            ]
+            parsed = ctx.parsed_req
+            tool_calls: list[dict[str, Any]] = []
+            if parsed and hasattr(parsed, "tool_calls"):
+                for tc in parsed.tool_calls:
+                    if isinstance(tc, dict):
+                        tool_calls.append(
+                            {"name": str(tc.get("name", "")), "input": tc.get("input", tc.get("params", {}))}
+                        )
+                    else:
+                        tool_calls.append(
+                            {
+                                "name": str(getattr(tc, "name", "") or ""),
+                                "input": getattr(tc, "params", None) or getattr(tc, "input", {}),
+                            }
+                        )
+            request_text = "\n".join(message_text + tool_names)
+            detection_v2 = self._adaptive_detection_v2.detect(
+                request_text,
+                context={
+                    "agent_id": str(ctx.behavior_agent_id or "unknown"),
+                    "messages": messages,
+                    "tools": tool_names,
+                    "tool_calls": tool_calls,
+                    "model": str(ctx.body.get("model", "")),
+                    "session_risk_score": float(ctx.proc_result.get("session_risk_score", 0.0) or 0.0),
+                    "session_risk_level": str(ctx.proc_result.get("session_risk_level", "observe")),
+                },
+            )
+            ctx.proc_result["adaptive_v2_layers_hit"] = list(detection_v2.layers_hit)
+            ctx.proc_result["adaptive_v2_confidence"] = float(detection_v2.confidence)
+            ctx.proc_result["adaptive_v2_triggered"] = bool(detection_v2.triggered)
+            if detection_v2.triggered and detection_v2.confidence >= self._adaptive_detection_v2_threshold:
+                existing = ctx.proc_result.get("threat_reasons")
+                reasons = list(existing) if isinstance(existing, list) else []
+                reasons.extend([f"adaptive_v2:{reason}" for reason in detection_v2.reasons])
+                ctx.proc_result["threat_reasons"] = reasons
+                ctx.session_headers["X-Orchesis-AdaptiveV2-Confidence"] = f"{detection_v2.confidence:.2f}"
+                ctx.session_headers["X-Orchesis-AdaptiveV2-Layers"] = ",".join(detection_v2.layers_hit)
+            _HTTP_PROXY_LOGGER.info(
+                "adaptive_detection_v2 layers=%s confidence=%.3f",
+                ",".join(detection_v2.layers_hit) if detection_v2.layers_hit else "-",
+                float(detection_v2.confidence),
+            )
         for match in matches:
             if match.action == "block":
                 self._inc("blocked")

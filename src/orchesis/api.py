@@ -26,6 +26,7 @@ from orchesis.forensics import ForensicsEngine, Incident
 from orchesis.integrations import SlackEmitter, SlackNotifier, TelegramEmitter, TelegramNotifier
 from orchesis.integrations.forensics_emitter import ForensicsEmitter
 from orchesis.metrics import MetricsCollector
+from orchesis.mcp_monitor import McpRuntimeMonitor
 from orchesis.otel import OTelEmitter, TraceContext
 from orchesis.policy_store import PolicyStore
 from orchesis.plugins import load_plugins_for_policy
@@ -101,6 +102,28 @@ def create_api_app(
     app.state.auth_mode = "optional"
     app.state.flow_analyzer = FlowAnalyzer({"enabled": True})
     app.state.flow_decisions = {}
+    mcp_monitor_cfg = (
+        current_version.policy.get("mcp_monitor")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("mcp_monitor"), dict)
+        else {}
+    )
+    monitor_enabled = bool(mcp_monitor_cfg.get("enabled", False))
+    monitor_paths_raw = mcp_monitor_cfg.get("config_paths")
+    monitor_paths = (
+        [item for item in monitor_paths_raw if isinstance(item, str) and item.strip()]
+        if isinstance(monitor_paths_raw, list)
+        else []
+    )
+    if not monitor_paths:
+        monitor_paths = [str(policy_file)]
+    monitor_interval = (
+        int(mcp_monitor_cfg.get("interval_seconds", 30))
+        if isinstance(mcp_monitor_cfg.get("interval_seconds", 30), int | float)
+        else 30
+    )
+    app.state.mcp_monitor = McpRuntimeMonitor(monitor_paths, interval_seconds=monitor_interval)
+    if monitor_enabled:
+        app.state.mcp_monitor.start()
 
     def _build_audit_redactor(candidate_policy: dict[str, Any]) -> AuditRedactor | None:
         logging_cfg = candidate_policy.get("logging")
@@ -357,6 +380,12 @@ def create_api_app(
         if isinstance(decision_header, str):
             response.headers["X-Orchesis-Decision"] = decision_header
         return response
+
+    @app.on_event("shutdown")
+    async def _shutdown_monitor() -> None:
+        monitor = getattr(app.state, "mcp_monitor", None)
+        if monitor is not None and hasattr(monitor, "stop"):
+            monitor.stop()
 
     @app.post("/api/v1/policy")
     def post_policy(
@@ -758,6 +787,30 @@ def create_api_app(
             "subscriber_count": event_bus.subscriber_count,
             "corpus_size": corpus_stats["total"],
         }
+
+    @app.get("/api/v1/mcp/monitor/status")
+    def mcp_monitor_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        monitor = app.state.mcp_monitor
+        stats = monitor.get_stats()
+        return {"status": "ok", "monitor": stats}
+
+    @app.get("/api/v1/mcp/monitor/alerts")
+    def mcp_monitor_alerts(
+        since: float | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        monitor = app.state.mcp_monitor
+        alerts = monitor.get_alerts(since=since)
+        return {"alerts": alerts, "total": len(alerts)}
+
+    @app.post("/api/v1/mcp/monitor/check")
+    def mcp_monitor_check(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        monitor = app.state.mcp_monitor
+        changes = monitor.check_once()
+        return {"changes": changes, "count": len(changes)}
 
     @app.get("/favicon.ico")
     def favicon() -> Response:
