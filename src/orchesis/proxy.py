@@ -6,6 +6,7 @@ from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import os
@@ -42,7 +43,7 @@ from orchesis.credential_injector import CredentialInjector
 from orchesis.credential_vault import CredentialNotFoundError, build_vault_from_policy
 from orchesis.contrib.pii_detector import PiiDetector
 from orchesis.contrib.secret_scanner import SecretScanner
-from orchesis.config import PolicyWatcher, load_policy
+from orchesis.config import PolicyWatcher, load_policy, validate_policy
 from orchesis.engine import evaluate
 from orchesis.events import EventBus
 from orchesis.forensics import Incident
@@ -2250,6 +2251,48 @@ class LLMHTTPProxy:
             self._server.shutdown()
             self._server.server_close()
             self._server = None
+
+    @staticmethod
+    def _policy_hash(policy: dict[str, Any]) -> str:
+        encoded = json.dumps(policy, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()[:12]
+
+    def reload_policy(self, new_policy: dict[str, Any]) -> bool:
+        """Atomically replace active policy if valid."""
+        if not isinstance(new_policy, dict):
+            return False
+        validation_errors = validate_policy(new_policy)
+        if validation_errors:
+            return False
+        candidate = dict(new_policy)
+        with self._stats_lock:
+            self._policy = candidate
+        _HTTP_PROXY_LOGGER.info("Policy reloaded: %s", self._policy_hash(candidate))
+        return True
+
+    def _handle_policy_reload(self, handler: BaseHTTPRequestHandler) -> None:
+        policy_path = str(self._policy_path or "policy.yaml")
+        try:
+            loaded = load_policy(policy_path)
+        except ValueError as error:
+            self._send_json(handler, 400, {"status": "invalid", "errors": [str(error)]})
+            return
+        errors = validate_policy(loaded)
+        if errors:
+            self._send_json(handler, 400, {"status": "invalid", "errors": errors})
+            return
+        if not self.reload_policy(loaded):
+            self._send_json(handler, 500, {"status": "error", "message": "policy_reload_failed"})
+            return
+        self._send_json(
+            handler,
+            200,
+            {
+                "status": "reloaded",
+                "version": self._policy_hash(loaded),
+                "timestamp": time.time(),
+            },
+        )
         self._state_tracker.flush()
         self._connection_pool.close_all()
         if self._recorder is not None:
@@ -4923,6 +4966,9 @@ class LLMHTTPProxy:
                 return
             if request_path == "/resume":
                 self._handle_resume(handler)
+                return
+            if request_path == "/api/v1/policy/reload":
+                self._handle_policy_reload(handler)
                 return
             if self._experiment_manager is not None and request_path == "/api/experiments":
                 body = self._read_json_body(handler)

@@ -39,8 +39,13 @@ def infer_agent_status(last_seen_ts: float | None, now_ts: float | None = None) 
 class AgentPolicyStore:
     """Simple JSON-backed policy store for per-agent overrides."""
 
-    def __init__(self, path: str | Path = ".orchesis/agent_policies.json") -> None:
+    def __init__(
+        self,
+        path: str | Path = ".orchesis/agent_policies.json",
+        decisions_log_path: str | Path = ".orchesis/decisions.jsonl",
+    ) -> None:
         self._path = Path(path)
+        self._decisions_log_path = Path(decisions_log_path)
 
     def _load(self) -> dict[str, dict[str, Any]]:
         if not self._path.exists():
@@ -76,12 +81,89 @@ class AgentPolicyStore:
     def update_policy(self, agent_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         data = self._load()
         policy = dict(data.get(str(agent_id), {}))
-        for key in ("budget_daily", "block_patterns", "require_approval", "mode"):
+        for key in ("budget_daily", "block_patterns", "require_approval", "mode", "team_id"):
             if key in patch:
                 policy[key] = patch[key]
         data[str(agent_id)] = policy
         self._save(data)
         return policy
+
+    def set_agent_team(self, agent_id: str, team_id: str) -> None:
+        """Assign agent to a team."""
+        data = self._load()
+        policy = dict(data.get(str(agent_id), {}))
+        policy["team_id"] = str(team_id)
+        data[str(agent_id)] = policy
+        self._save(data)
+
+    def get_team_summary(self, team_id: str) -> dict[str, Any]:
+        """Aggregate cost/requests/threats for all agents in team."""
+        normalized_team_id = str(team_id)
+        policy_data = self._load()
+        team_agent_ids = sorted(
+            agent_id
+            for agent_id, policy in policy_data.items()
+            if isinstance(policy, dict) and str(policy.get("team_id", "")) == normalized_team_id
+        )
+        snapshot = build_agent_overwatch_snapshot(
+            decisions_log_path=self._decisions_log_path,
+            policy_store=self,
+        )
+        snapshot_by_id = {
+            str(row.get("id")): row
+            for row in snapshot.get("agents", [])
+            if isinstance(row, dict) and isinstance(row.get("id"), str)
+        }
+        agents: list[dict[str, Any]] = []
+        for agent_id in team_agent_ids:
+            row = dict(snapshot_by_id.get(agent_id, {}))
+            if not row:
+                row = {
+                    "id": agent_id,
+                    "team_id": normalized_team_id,
+                    "status": "unknown",
+                    "model": "unknown",
+                    "cost_today": 0.0,
+                    "cost_velocity": 0.0,
+                    "budget_limit": None,
+                    "budget_remaining": None,
+                    "security_score": "A+",
+                    "threats_today": 0,
+                    "last_threat_at": None,
+                    "requests_today": 0,
+                    "pending_approvals": 0,
+                }
+            row["team_id"] = normalized_team_id
+            agents.append(row)
+        budget_limit = sum(
+            float(row["budget_limit"])
+            for row in agents
+            if isinstance(row.get("budget_limit"), int | float)
+        )
+        budget_remaining = sum(
+            float(row["budget_remaining"])
+            for row in agents
+            if isinstance(row.get("budget_remaining"), int | float)
+        )
+        return {
+            "team_id": normalized_team_id,
+            "agents": agents,
+            "cost_today": round(sum(float(row.get("cost_today", 0.0)) for row in agents), 6),
+            "requests_today": int(sum(int(row.get("requests_today", 0)) for row in agents)),
+            "threats_today": int(sum(int(row.get("threats_today", 0)) for row in agents)),
+            "budget_limit": round(budget_limit, 6),
+            "budget_remaining": round(budget_remaining, 6),
+        }
+
+    def list_teams(self) -> list[str]:
+        """Return all team_ids."""
+        data = self._load()
+        teams = {
+            str(policy.get("team_id", "")).strip()
+            for policy in data.values()
+            if isinstance(policy, dict) and str(policy.get("team_id", "")).strip()
+        }
+        return sorted(teams)
 
     def get_cost_today(self, agent_id: str, decisions_log_path: str | Path) -> float:
         target = Path(decisions_log_path)
@@ -173,6 +255,7 @@ def build_agent_overwatch_snapshot(
         agents.append(
             {
                 "id": agent_id,
+                "team_id": str(policy.get("team_id")) if isinstance(policy.get("team_id"), str) else None,
                 "status": status,
                 "model": item.get("last_model") or "unknown",
                 "cost_today": spent,

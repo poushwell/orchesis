@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import time
+import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,7 @@ from orchesis.state import RateLimitTracker
 from orchesis.structured_log import StructuredLogger
 from orchesis.sync import PolicySyncServer
 from orchesis.telemetry import JsonlEmitter
+from orchesis.flow_xray import FlowAnalyzer
 from orchesis.pipeline import check_budget
 from orchesis import __version__
 
@@ -81,7 +84,10 @@ def create_api_app(
     app.state.corpus = corpus
     app.state.policy_path = str(policy_file)
     app.state.decisions_log = decisions_log
-    app.state.agent_policy_store = AgentPolicyStore(policy_file.parent / ".orchesis" / "agent_policies.json")
+    app.state.agent_policy_store = AgentPolicyStore(
+        policy_file.parent / ".orchesis" / "agent_policies.json",
+        decisions_log_path=decisions_log,
+    )
     app.state.incidents_log = ".orchesis/incidents.jsonl"
     app.state.current_version = current_version
     app.state.plugin_modules = list(plugin_modules or [])
@@ -91,6 +97,8 @@ def create_api_app(
     app.state.proxy_stats = None
     app.state.authenticator = None
     app.state.auth_mode = "optional"
+    app.state.flow_analyzer = FlowAnalyzer({"enabled": True})
+    app.state.flow_decisions = {}
 
     def _build_audit_redactor(candidate_policy: dict[str, Any]) -> AuditRedactor | None:
         logging_cfg = candidate_policy.get("logging")
@@ -198,6 +206,7 @@ def create_api_app(
         app.state.sync_server.set_current_version(app.state.current_version.version_id)
         _sync_alerts(app.state.current_version.policy)
         _sync_auth(app.state.current_version.policy)
+        _sync_agent_teams_from_policy(app.state.current_version.policy)
 
     def _sync_auth(candidate_policy: dict[str, Any]) -> None:
         auth = candidate_policy.get("authentication")
@@ -219,9 +228,28 @@ def create_api_app(
         )
         app.state.auth_mode = mode
 
+    def _sync_agent_teams_from_policy(candidate_policy: dict[str, Any]) -> None:
+        agents = candidate_policy.get("agents")
+        if not isinstance(agents, list):
+            return
+        for item in agents:
+            if not isinstance(item, dict):
+                continue
+            agent_id = item.get("id")
+            if not isinstance(agent_id, str) or not agent_id.strip():
+                continue
+            team_id = item.get("team")
+            if not isinstance(team_id, str):
+                team_id = item.get("team_id")
+            if isinstance(team_id, str) and team_id.strip():
+                app.state.agent_policy_store.set_agent_team(agent_id.strip(), team_id.strip())
+            else:
+                app.state.agent_policy_store.update_policy(agent_id.strip(), {"team_id": None})
+
     _sync_decision_emitter(current_version.policy)
     _sync_alerts(current_version.policy)
     _sync_auth(current_version.policy)
+    _sync_agent_teams_from_policy(current_version.policy)
 
     def _auth_token_from_policy() -> str | None:
         policy = app.state.current_version.policy
@@ -247,6 +275,70 @@ def create_api_app(
 
     def _audit_engine() -> AuditEngine:
         return AuditEngine(app.state.decisions_log)
+
+    def _extract_session_id(payload: dict[str, Any]) -> str | None:
+        direct = payload.get("session_id")
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
+        context = payload.get("context")
+        if isinstance(context, dict):
+            nested = context.get("session_id")
+            if isinstance(nested, str) and nested.strip():
+                return nested.strip()
+        return None
+
+    def _flow_share_payload(session_id: str) -> dict[str, str]:
+        issued_at = datetime.now(timezone.utc).isoformat()
+        token_seed = f"{session_id}:{issued_at}"
+        token = hashlib.sha256(token_seed.encode("utf-8")).hexdigest()[:8]
+        return {"token": token, "url": f"http://localhost:8080/flow/{token}"}
+
+    def _record_flow_decision(payload: dict[str, Any], response: dict[str, Any]) -> None:
+        session_id = _extract_session_id(payload)
+        if session_id is None:
+            return
+        tool_name = payload.get("tool_name")
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            tool_name = payload.get("tool")
+        cost_raw = payload.get("cost", 0.0)
+        try:
+            cost_usd = float(cost_raw)
+        except (TypeError, ValueError):
+            cost_usd = 0.0
+        duration_ms = max(0.0, float(response.get("latency_us", 0.0) or 0.0) / 1000.0)
+        allowed = bool(response.get("allowed", False))
+        node_id = app.state.flow_analyzer.record_request(
+            session_id=session_id,
+            model="governance-evaluator",
+            messages=[{"role": "system", "content": str(tool_name or "")}],
+            tools=[],
+        )
+        app.state.flow_analyzer.record_response(
+            session_id=session_id,
+            node_id=node_id,
+            tokens_in=0,
+            tokens_out=0,
+            cost_usd=cost_usd,
+            latency_ms=duration_ms,
+            status="ok" if allowed else "denied",
+            tool_calls=[],
+        )
+        decisions = app.state.flow_decisions.setdefault(session_id, [])
+        decisions.append(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "tool_name": str(tool_name or ""),
+                "allowed": allowed,
+                "decision": "ALLOW" if allowed else "DENY",
+                "reasons": list(response.get("reasons", []))
+                if isinstance(response.get("reasons"), list)
+                else [],
+                "cost_usd": cost_usd,
+                "duration_ms": duration_ms,
+            }
+        )
+        if len(decisions) > 2000:
+            del decisions[:-2000]
 
     @app.middleware("http")
     async def trace_headers_middleware(request: Request, call_next):
@@ -348,6 +440,24 @@ def create_api_app(
         warnings = validate_policy_warnings(loaded)
         return {"valid": len(errors) == 0, "errors": errors, "warnings": warnings}
 
+    @app.post("/api/v1/policy/reload")
+    def policy_reload(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        try:
+            loaded = load_policy(policy_file)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail={"errors": [str(error)]}) from error
+        errors = validate_policy(loaded)
+        if errors:
+            raise HTTPException(status_code=400, detail={"errors": errors})
+        version = store.load(str(policy_file))
+        _refresh_current_version()
+        return {
+            "status": "reloaded",
+            "version": version.version_id,
+            "timestamp": time.time(),
+        }
+
     @app.get("/api/v1/agents")
     def get_agents(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
@@ -441,6 +551,35 @@ def create_api_app(
             raise HTTPException(status_code=400, detail={"error": "daily_limit must be a number"})
         policy = app.state.agent_policy_store.set_daily_limit(agent_id, float(daily_limit))
         return {"agent_id": agent_id, "policy": policy}
+
+    @app.post("/api/v1/overwatch/{agent_id}/team")
+    def post_overwatch_team(
+        agent_id: str,
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        team_id = body.get("team_id")
+        if not isinstance(team_id, str) or not team_id.strip():
+            raise HTTPException(status_code=400, detail={"error": "team_id is required"})
+        app.state.agent_policy_store.set_agent_team(agent_id, team_id.strip())
+        return {"agent_id": agent_id, "team_id": team_id.strip()}
+
+    @app.get("/api/v1/overwatch/teams")
+    def get_overwatch_teams(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        team_ids = app.state.agent_policy_store.list_teams()
+        return {
+            "teams": [app.state.agent_policy_store.get_team_summary(team_id) for team_id in team_ids]
+        }
+
+    @app.get("/api/v1/overwatch/teams/{team_id}")
+    def get_overwatch_team(
+        team_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.agent_policy_store.get_team_summary(team_id)
 
     @app.get("/api/v1/overwatch/{agent_id}/policy")
     def get_overwatch_policy(
@@ -598,6 +737,59 @@ def create_api_app(
         )
         return json.loads(generator.to_json(generator.generate()))
 
+    @app.get("/api/v1/flow/{session_id}/share-token")
+    def flow_share_token(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        share = _flow_share_payload(session_id)
+        return {"session_id": session_id, "token": share["token"], "url": share["url"]}
+
+    @app.get("/api/v1/flow/{session_id}/export")
+    def flow_export(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        analysis = app.state.flow_analyzer.analyze_session(session_id)
+        graph = app.state.flow_analyzer.get_session_graph(session_id)
+        decisions_raw = app.state.flow_decisions.get(session_id, [])
+        decisions = [dict(item) for item in decisions_raw if isinstance(item, dict)]
+        phase_counts: dict[str, int] = {}
+        if graph is not None:
+            for node in graph.nodes.values():
+                key = f"{node.node_type.value}_phase"
+                phase_counts[key] = phase_counts.get(key, 0) + 1
+        pipeline_phases = [{"phase": key, "count": value} for key, value in sorted(phase_counts.items())]
+        if not pipeline_phases:
+            pipeline_phases = [{"phase": "evaluate_phase", "count": len(decisions)}]
+        total_requests = len(decisions)
+        blocked = sum(1 for item in decisions if item.get("allowed") is False)
+        cost_usd = round(sum(float(item.get("cost_usd", 0.0) or 0.0) for item in decisions), 8)
+        duration_ms = round(sum(float(item.get("duration_ms", 0.0) or 0.0) for item in decisions), 6)
+        if analysis is not None:
+            if total_requests == 0:
+                total_requests = int(analysis.topology.total_llm_calls)
+            if cost_usd == 0.0:
+                cost_usd = round(float(analysis.topology.total_cost_usd), 8)
+            if duration_ms == 0.0:
+                duration_ms = round(float(analysis.topology.total_latency_ms), 6)
+        share = _flow_share_payload(session_id)
+        return {
+            "session_id": session_id,
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "pipeline_phases": pipeline_phases,
+            "decisions": decisions,
+            "summary": {
+                "total_requests": total_requests,
+                "blocked": blocked,
+                "cost_usd": cost_usd,
+                "duration_ms": duration_ms,
+            },
+            "share_url": share["url"],
+        }
+
     def _evaluate_payload(body: dict[str, Any], trace: TraceContext) -> dict[str, Any]:
         payload = dict(body)
         tool_name = payload.get("tool_name")
@@ -717,6 +909,7 @@ def create_api_app(
             raise HTTPException(status_code=429, detail=budget_meta)
         response = _evaluate_payload(body=body, trace=trace)
         request.state.orchesis_decision = "ALLOW" if response["allowed"] else "DENY"
+        _record_flow_decision(body, response)
         logger.debug(
             "remote evaluation completed",
             allowed=response["allowed"],
@@ -762,7 +955,9 @@ def create_api_app(
                 )
                 if not budget_allowed:
                     raise HTTPException(status_code=429, detail=budget_meta)
-                results.append(_evaluate_payload(item, trace))
+                result = _evaluate_payload(item, trace)
+                _record_flow_decision(item, result)
+                results.append(result)
         denied_count = sum(1 for item in results if item.get("allowed") is False)
         request.state.orchesis_decision = "DENY" if denied_count > 0 else "ALLOW"
         return {

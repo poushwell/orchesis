@@ -1176,6 +1176,26 @@ def resume_command(port: int, token: str) -> None:
     click.echo(f"Proxy resumed on :{port} ({payload.get('status', 'ok')})")
 
 
+@main.command("reload")
+@click.option("--config", "config_path", type=click.Path(exists=True), default="orchesis.yaml")
+@click.option("--port", type=int, default=None)
+def reload_command(config_path: str, port: int | None) -> None:
+    """Reload policy in a running proxy instance."""
+    resolved_port = max(1, int(port)) if isinstance(port, int | float) else 8100
+    if not isinstance(port, int | float):
+        try:
+            loaded_cfg = load_policy(config_path)
+        except (ValueError, YAMLError, OSError) as error:
+            raise click.ClickException(f"Failed to load config: {error}") from error
+        proxy_cfg = loaded_cfg.get("proxy")
+        if isinstance(proxy_cfg, dict):
+            port_from_cfg = proxy_cfg.get("port")
+            if isinstance(port_from_cfg, int | float):
+                resolved_port = max(1, int(port_from_cfg))
+    payload = _post_proxy_control(resolved_port, "/api/v1/policy/reload", {})
+    click.echo(f"✓ Policy reloaded (version: {payload.get('version', 'unknown')})")
+
+
 @main.command("mcp-proxy")
 @click.pass_context
 @click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)

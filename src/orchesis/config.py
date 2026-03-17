@@ -999,7 +999,7 @@ def _normalize_semantic_cache(policy: dict[str, Any]) -> None:
     if not isinstance(raw, dict):
         raise PolicyError("semantic_cache must be a mapping")
     raw["enabled"] = bool(raw.get("enabled", False))
-    raw["max_entries"] = max(1, int(raw.get("max_entries", 2000)))
+    raw["max_entries"] = max(1, int(raw.get("max_entries", 1000)))
     raw["ttl_seconds"] = max(1.0, float(raw.get("ttl_seconds", 600)))
     raw["simhash_threshold"] = max(0, min(64, int(raw.get("simhash_threshold", 8))))
     raw["jaccard_threshold"] = max(0.0, min(1.0, float(raw.get("jaccard_threshold", 0.6))))
@@ -1009,6 +1009,16 @@ def _normalize_semantic_cache(policy: dict[str, Any]) -> None:
     raw["cacheable_models"] = [str(m) for m in cacheable if m] if isinstance(cacheable, list) else []
     raw["exclude_tool_calls"] = bool(raw.get("exclude_tool_calls", True))
     raw["track_savings"] = bool(raw.get("track_savings", True))
+    similarity_threshold = raw.get("similarity_threshold", 0.85)
+    if not isinstance(similarity_threshold, float) or not (0.0 < similarity_threshold <= 1.0):
+        similarity_threshold = 0.85
+    raw["similarity_threshold"] = similarity_threshold
+
+    exact_match_only = bool(raw.get("exact_match_only", False))
+    raw["exact_match_only"] = exact_match_only
+
+    max_entries = int(raw.get("max_entries", 1000))
+    raw["max_entries"] = max(1, min(100000, max_entries))
     policy["semantic_cache"] = raw
 
 

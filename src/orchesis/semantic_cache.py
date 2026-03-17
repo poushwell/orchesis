@@ -344,8 +344,31 @@ class SemanticCache:
     No external dependencies.
     """
 
-    def __init__(self, config: Optional[SemanticCacheConfig] = None) -> None:
-        self._config = config or SemanticCacheConfig()
+    def __init__(self, config: dict[str, Any] | SemanticCacheConfig | None = None) -> None:
+        if isinstance(config, SemanticCacheConfig):
+            self._config = config
+            self.similarity_threshold = float(self._config.jaccard_threshold)
+            self.exact_match_only = False
+            self.max_entries = int(self._config.max_entries)
+        else:
+            cfg = config or {}
+            self.similarity_threshold = float(cfg.get("similarity_threshold", 0.85))
+            self.exact_match_only = bool(cfg.get("exact_match_only", False))
+            self.max_entries = int(cfg.get("max_entries", 1000))
+            self._config = SemanticCacheConfig(
+                enabled=bool(cfg.get("enabled", True)),
+                max_entries=self.max_entries,
+                ttl_seconds=float(cfg.get("ttl_seconds", 600.0)),
+                simhash_threshold=int(cfg.get("simhash_threshold", 8)),
+                jaccard_threshold=self.similarity_threshold,
+                min_content_length=int(cfg.get("min_content_length", 20)),
+                max_content_length=int(cfg.get("max_content_length", 50000)),
+                cacheable_models=list(cfg.get("cacheable_models", []))
+                if isinstance(cfg.get("cacheable_models"), list)
+                else [],
+                exclude_tool_calls=bool(cfg.get("exclude_tool_calls", True)),
+                track_savings=bool(cfg.get("track_savings", True)),
+            )
         self._lock = threading.Lock()
         self._entries: OrderedDict[str, CacheEntry] = OrderedDict()
         self._simhash_index: list[tuple[int, str]] = []
@@ -395,6 +418,9 @@ class SemanticCache:
                     tokens_saved=entry.tokens_saved,
                     cost_saved_usd=entry.cost_saved_usd,
                 )
+            if self.exact_match_only:
+                self._misses += 1
+                return CacheLookupResult(hit=False)
             if self._config.cacheable_models and model and model not in self._config.cacheable_models:
                 self._misses += 1
                 return CacheLookupResult(hit=False)

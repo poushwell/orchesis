@@ -181,6 +181,26 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       background: rgba(255,255,255,0.04);
       border-color: rgba(255,255,255,0.12);
     }
+    .toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 9999;
+      padding: 10px 14px;
+      border-radius: var(--radius-sm);
+      color: #06110D;
+      background: #00E5A0;
+      border: 1px solid rgba(0,0,0,0.12);
+      font-weight: 700;
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition: opacity 0.18s ease, transform 0.18s ease;
+    }
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
     .screen { display: none; gap: 12px; }
     .screen.active { display: grid; animation: fadeIn 0.25s ease; }
     @keyframes fadeIn {
@@ -707,6 +727,40 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       font-size: 12px;
     }
     .ow-radar-footer { display: flex; justify-content: flex-end; }
+    .ow-teams-wrap { display: grid; gap: 12px; }
+    .ow-team-cards {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(220px, 1fr));
+      gap: 10px;
+    }
+    .ow-team-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--panel);
+      padding: 10px;
+      cursor: pointer;
+      display: grid;
+      gap: 6px;
+    }
+    .ow-team-card:hover {
+      border-color: rgba(168,85,247,0.55);
+    }
+    .ow-team-title {
+      font-weight: 700;
+      color: #e9d5ff;
+      text-transform: lowercase;
+    }
+    .ow-team-detail {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--panel);
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+    .ow-team-detail .table {
+      margin-top: 6px;
+    }
     .ow-ap-section { display: grid; gap: 10px; }
     .ow-ap-item {
       border: 1px solid rgba(249,115,22,0.4);
@@ -937,7 +991,10 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       <div class="panel panel-primary">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
           <strong class="section-title" style="margin:0;padding:0;border:0;">Flow X-Ray</strong>
-          <select id="flow-session-select" class="tab-btn" style="padding:6px 10px;"></select>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <select id="flow-session-select" class="tab-btn" style="padding:6px 10px;"></select>
+            <button id="flow-share-btn" class="tab-btn" style="padding:6px 10px;">Share</button>
+          </div>
         </div>
       </div>
       <div class="grid-4">
@@ -1015,6 +1072,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
           <div class="ow-switch">
             <button id="ow-view-cards" class="ow-view-btn active">Cards</button>
             <button id="ow-view-radar" class="ow-view-btn">Radar</button>
+            <button id="ow-view-teams" class="ow-view-btn">Teams</button>
           </div>
         </div>
         <div id="ow-cards-view">
@@ -1032,6 +1090,12 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
             <svg id="ow-radar" class="ow-radar-svg" viewBox="0 0 620 460"></svg>
           </div>
           <div class="ow-radar-footer"><button id="ow-share" class="ow-btn">Share</button></div>
+        </div>
+        <div id="ow-teams-view" class="ow-teams-wrap" style="display:none;">
+          <div id="ow-teams-cards" class="ow-team-cards"></div>
+          <div id="ow-team-detail" class="ow-team-detail">
+            <div class="subtle">Select a team card to view its agents.</div>
+          </div>
         </div>
         <div id="ow-approvals-section" class="ow-ap-section" style="display:none;">
           <div class="section-title"><strong>Pending Approvals</strong></div>
@@ -1051,6 +1115,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       </div>
     </section>
   </div>
+  <div id="toast" class="toast"></div>
 
   <script>
     const POLL_INTERVAL = 3000;
@@ -1060,6 +1125,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     let overwatchView = "cards";
     let overwatchUseDemo = false;
     let overwatchSnapshot = null;
+    let overwatchTeamDetail = null;
     const sparkHistory = {};
     const SPARK_MAX = 20;
 
@@ -1105,6 +1171,26 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       try { document.execCommand("copy"); } catch (_err) {}
       document.body.removeChild(box);
     }
+    function showToast(message){
+      const el = document.getElementById("toast");
+      if(!el){ return; }
+      el.textContent = String(message || "Link copied!");
+      el.classList.add("show");
+      if(showToast._timer){ clearTimeout(showToast._timer); }
+      showToast._timer = setTimeout(()=>{ el.classList.remove("show"); }, 3000);
+    }
+    async function shareFlowXRay(sessionId) {
+      if(!sessionId){ return; }
+      const resp = await fetch(`/api/v1/flow/${encodeURIComponent(sessionId)}/share-token`);
+      if(!resp.ok){ throw new Error(`share token failed (${resp.status})`); }
+      const payload = await resp.json();
+      const token = payload && typeof payload.token === "string" ? payload.token : "";
+      const url = payload && typeof payload.url === "string" && payload.url
+        ? payload.url
+        : `http://localhost:8080/flow/${token}`;
+      await navigator.clipboard.writeText(url);
+      showToast("Link copied!");
+    }
     function mockOverwatchData(){
       return {
         summary: {
@@ -1127,19 +1213,23 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       };
     }
     function normalizeOverwatch(payload){
-      if (!payload || typeof payload !== "object") return { summary: null, agents: [], approvals: [] };
-      const summaryRaw = (payload.summary && typeof payload.summary === "object") ? payload.summary : payload;
+      if (!payload || typeof payload !== "object") return { summary: null, agents: [], approvals: [], teams: [] };
+      const summaryRaw = (payload.summary && typeof payload.summary === "object")
+        ? payload.summary
+        : ((payload.overwatch_summary && typeof payload.overwatch_summary === "object") ? payload.overwatch_summary : payload);
       const agents = Array.isArray(payload.agents) ? payload.agents : (Array.isArray(payload.items) ? payload.items : []);
       const approvals = Array.isArray(payload.approvals) ? payload.approvals : (Array.isArray(payload.pending) ? payload.pending : []);
+      const teams = Array.isArray(payload.teams) ? payload.teams : [];
       return {
         summary: {
-          active_agents: Number(summaryRaw.active_agents ?? summaryRaw.active ?? agents.filter((a)=> String(a.status || "").toLowerCase() === "active").length ?? 0),
-          total_cost_day_usd: Number(summaryRaw.total_cost_day_usd ?? summaryRaw.cost_day_usd ?? summaryRaw.cost_per_day ?? 0),
+          active_agents: Number(summaryRaw.active_agents ?? summaryRaw.active ?? agents.filter((a)=> String(a.status || "").toLowerCase() === "working").length ?? 0),
+          total_cost_day_usd: Number(summaryRaw.total_cost_day_usd ?? summaryRaw.cost_day_usd ?? summaryRaw.cost_per_day ?? summaryRaw.total_cost_today ?? 0),
           threats_blocked: Number(summaryRaw.threats_blocked ?? summaryRaw.blocked ?? 0),
           pending_approvals: Number(summaryRaw.pending_approvals ?? approvals.length ?? 0),
         },
         agents,
         approvals,
+        teams,
       };
     }
     function animateValue(el, start, end, duration, formatter) {
@@ -1935,16 +2025,16 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       }
       emptyEl.style.display = "none";
       cardsEl.innerHTML = agents.map((agent)=>{
-        const name = String(agent.agent_id || agent.name || "unknown-agent");
+        const name = String(agent.agent_id || agent.id || agent.name || "unknown-agent");
         const status = String(agent.status || "active").toLowerCase();
         const grade = formatGrade(agent.security_grade || agent.ars_grade || "A");
         const task = String(agent.current_task || "").trim() || "Idle";
         const threats = Number(agent.threats_today || 0);
         const pending = Number(agent.pending_approvals || 0);
         const modelName = String(agent.model || agent.primary_model || "-");
-        const costDay = Number(agent.cost_day_usd || agent.total_cost_usd || 0);
+        const costDay = Number(agent.cost_day_usd || agent.cost_today || agent.total_cost_usd || 0);
         const reqs = Number(agent.requests_today || agent.total_requests || 0);
-        const budgetLimit = Number(agent.budget_limit_usd || 0);
+        const budgetLimit = Number(agent.budget_limit_usd || agent.budget_limit || 0);
         const budgetUsed = Number(agent.budget_used_usd || costDay || 0);
         const budgetRatio = budgetLimit > 0 ? Math.max(0, Math.min(100, (budgetUsed / budgetLimit) * 100)) : 0;
         const budgetColor = budgetRatio > 90 ? "var(--red)" : (budgetRatio > 70 ? "var(--orange)" : "var(--green)");
@@ -1958,7 +2048,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
           <div class="ow-budget-line">
             ${budgetLimit > 0 ? `<div class="ow-meta">${fmtMoney(budgetUsed)} / ${fmtMoney(budgetLimit)}</div><div class="ow-budget-bar"><div style="width:${budgetRatio.toFixed(1)}%;background:${budgetColor};"></div></div>` : `<div class="ow-meta">No budget limit</div>`}
           </div>
-          <div class="ow-meta">${fmtMoney(costDay)}/day · ${modelName} · ${fmtNum(threats)} threats</div>
+          <div class="ow-meta">${fmtMoney(costDay)}/day · ${modelName} · ${fmtNum(threats)} threats${agent.team_id ? ` · team:${agent.team_id}` : ""}</div>
           <div class="ow-actions">
             <button class="ow-btn">Set Budget</button>
             <button class="ow-btn">Threats</button>
@@ -1968,6 +2058,56 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
           <div class="ow-meta">requests today: ${fmtNum(reqs)}</div>
         </div>`;
       }).join("");
+    }
+
+    async function loadTeamDetail(teamId){
+      const data = await fetchData(`/api/v1/overwatch/teams/${encodeURIComponent(teamId)}`);
+      if(data && typeof data === "object"){
+        overwatchTeamDetail = data;
+        renderOverwatchTeams(overwatchSnapshot || normalizeOverwatch({}));
+      }
+    }
+
+    function renderOverwatchTeams(model){
+      const cardsEl = document.getElementById("ow-teams-cards");
+      const detailEl = document.getElementById("ow-team-detail");
+      if(!cardsEl || !detailEl){ return; }
+      const teams = Array.isArray(model.teams) ? model.teams : [];
+      if(teams.length === 0){
+        cardsEl.innerHTML = `<div class="ow-empty" style="grid-column:1 / -1;"><div>No teams configured.</div></div>`;
+        detailEl.innerHTML = `<div class="subtle">Assign agents to teams to view rollups.</div>`;
+        return;
+      }
+      cardsEl.innerHTML = teams.map((team)=>{
+        const teamId = String(team.team_id || "unknown");
+        const selected = overwatchTeamDetail && String(overwatchTeamDetail.team_id || "") === teamId;
+        return `<button class="ow-team-card${selected ? " active" : ""}" data-ow-team="${teamId}">
+          <div class="ow-team-title">${teamId}</div>
+          <div class="ow-meta">Cost: ${fmtMoney(team.cost_today || 0)}</div>
+          <div class="ow-meta">Agents: ${fmtNum((Array.isArray(team.agents) ? team.agents.length : 0))}</div>
+          <div class="ow-meta">Threats: ${fmtNum(team.threats_today || 0)}</div>
+        </button>`;
+      }).join("");
+      cardsEl.querySelectorAll("[data-ow-team]").forEach((btn)=>{
+        btn.addEventListener("click", ()=> loadTeamDetail(String(btn.getAttribute("data-ow-team") || "")));
+      });
+      const detail = overwatchTeamDetail || teams[0];
+      const detailAgents = Array.isArray(detail.agents) ? detail.agents : [];
+      detailEl.innerHTML = `
+        <div><strong>Team:</strong> ${detail.team_id || "unknown"} · <strong>Budget:</strong> ${fmtMoney(detail.budget_remaining || 0)} / ${fmtMoney(detail.budget_limit || 0)} remaining</div>
+        <table class="table">
+          <thead><tr><th>Agent</th><th>Cost Today</th><th>Requests</th><th>Threats</th><th>Budget Left</th></tr></thead>
+          <tbody>
+            ${detailAgents.map((agent)=> `<tr>
+              <td>${agent.id || agent.agent_id || "unknown-agent"}</td>
+              <td>${fmtMoney(agent.cost_today || 0)}</td>
+              <td>${fmtNum(agent.requests_today || 0)}</td>
+              <td>${fmtNum(agent.threats_today || 0)}</td>
+              <td>${fmtMoney(agent.budget_remaining || 0)}</td>
+            </tr>`).join("") || `<tr><td colspan="5" class="subtle">No agents in team.</td></tr>`}
+          </tbody>
+        </table>
+      `;
     }
 
     function renderOverwatchRadar(model){
@@ -2081,12 +2221,18 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       }
       renderOverwatchCards(model);
       renderOverwatchRadar(model);
+      renderOverwatchTeams(model);
       renderOverwatchApprovals(model);
     }
 
     async function pollOverwatch(){
-      const data = await fetchData("/api/v1/overwatch");
-      renderOverwatch(data || {});
+      const [snapshot, teams] = await Promise.all([
+        fetchData("/api/v1/overwatch"),
+        fetchData("/api/v1/overwatch/teams"),
+      ]);
+      const payload = Object.assign({}, snapshot || {});
+      payload.teams = (teams && Array.isArray(teams.teams)) ? teams.teams : [];
+      renderOverwatch(payload);
     }
 
     async function pollShield(){
@@ -2187,6 +2333,20 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         btn.addEventListener("click", ()=> switchTab(btn.dataset.tab));
       });
       document.getElementById("flow-session-select").addEventListener("change", ()=> pollFlow());
+      const flowShareBtn = document.getElementById("flow-share-btn");
+      if(flowShareBtn){
+        flowShareBtn.addEventListener("click", async ()=>{
+          const sid = (document.getElementById("flow-session-select") || {}).value || "";
+          if(!sid){ return; }
+          try {
+            await shareFlowXRay(sid);
+          } catch (_err) {
+            const fallback = `http://localhost:8080/flow/${encodeURIComponent(sid)}`;
+            copyText(fallback);
+            showToast("Link copied!");
+          }
+        });
+      }
       const exportBtn = document.getElementById("export-compliance-btn");
       if(exportBtn){
         exportBtn.addEventListener("click", ()=>{
@@ -2195,23 +2355,39 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       }
       const owCards = document.getElementById("ow-view-cards");
       const owRadar = document.getElementById("ow-view-radar");
+      const owTeams = document.getElementById("ow-view-teams");
       const cardsView = document.getElementById("ow-cards-view");
       const radarView = document.getElementById("ow-radar-view");
-      if (owCards && owRadar && cardsView && radarView) {
+      const teamsView = document.getElementById("ow-teams-view");
+      if (owCards && owRadar && owTeams && cardsView && radarView && teamsView) {
         owCards.addEventListener("click", ()=>{
           overwatchView = "cards";
           owCards.classList.add("active");
           owRadar.classList.remove("active");
+          owTeams.classList.remove("active");
           cardsView.style.display = "";
           radarView.style.display = "none";
+          teamsView.style.display = "none";
         });
         owRadar.addEventListener("click", ()=>{
           overwatchView = "radar";
           owRadar.classList.add("active");
           owCards.classList.remove("active");
+          owTeams.classList.remove("active");
           radarView.style.display = "";
           cardsView.style.display = "none";
+          teamsView.style.display = "none";
           if (overwatchSnapshot) renderOverwatchRadar(overwatchSnapshot);
+        });
+        owTeams.addEventListener("click", ()=>{
+          overwatchView = "teams";
+          owTeams.classList.add("active");
+          owCards.classList.remove("active");
+          owRadar.classList.remove("active");
+          teamsView.style.display = "";
+          cardsView.style.display = "none";
+          radarView.style.display = "none";
+          if (overwatchSnapshot) renderOverwatchTeams(overwatchSnapshot);
         });
       }
       const owLoadDemo = document.getElementById("ow-load-demo");

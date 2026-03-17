@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import threading
 import time
+from pathlib import Path
+import tempfile
 
 import pytest
 
@@ -12,6 +14,7 @@ from orchesis.semantic_cache import (
     SemanticCache,
     SemanticCacheConfig,
 )
+from orchesis.config import load_policy
 
 
 # --- SimHash (8 tests) ---
@@ -562,3 +565,80 @@ semantic_cache:
         import os
 
         os.unlink(path)
+
+
+def test_custom_similarity_threshold_respected() -> None:
+    cache = SemanticCache({"enabled": True, "similarity_threshold": 0.92})
+    assert cache.similarity_threshold == pytest.approx(0.92)
+    assert cache._config.jaccard_threshold == pytest.approx(0.92)
+
+
+def test_exact_match_only_mode() -> None:
+    cache = SemanticCache({"enabled": True, "exact_match_only": True, "similarity_threshold": 0.2})
+    msgs_a = [{"role": "user", "content": "summarize this document for me please"}]
+    msgs_b = [{"role": "user", "content": "please summarize this document for me"}]
+    body = b'{"content":[{"type":"text","text":"Summary"}]}'
+    assert cache.store(msgs_a, "gpt-4", None, body) is True
+    assert cache.lookup(msgs_a, "gpt-4", None).hit is True
+    assert cache.lookup(msgs_b, "gpt-4", None).hit is False
+
+
+def test_threshold_validation_rejects_invalid() -> None:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        f.write(
+            """
+semantic_cache:
+  enabled: true
+  similarity_threshold: 4
+"""
+        )
+        path = f.name
+    try:
+        policy = load_policy(path)
+        sc = policy.get("semantic_cache", {})
+        assert isinstance(sc, dict)
+        assert sc.get("similarity_threshold") == pytest.approx(0.85)
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_threshold_from_yaml_config() -> None:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        f.write(
+            """
+semantic_cache:
+  enabled: true
+  similarity_threshold: 0.92
+  exact_match_only: false
+  max_entries: 5000
+"""
+        )
+        path = f.name
+    try:
+        policy = load_policy(path)
+        sc = policy.get("semantic_cache", {})
+        assert isinstance(sc, dict)
+        assert sc.get("similarity_threshold") == pytest.approx(0.92)
+        assert sc.get("exact_match_only") is False
+        assert sc.get("max_entries") == 5000
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_max_entries_limit_enforced() -> None:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        f.write(
+            """
+semantic_cache:
+  enabled: true
+  max_entries: 99999999
+"""
+        )
+        path = f.name
+    try:
+        policy = load_policy(path)
+        sc = policy.get("semantic_cache", {})
+        assert isinstance(sc, dict)
+        assert sc.get("max_entries") == 100000
+    finally:
+        Path(path).unlink(missing_ok=True)

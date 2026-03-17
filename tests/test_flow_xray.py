@@ -10,8 +10,10 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.request import Request as UrlRequest, urlopen
 
+import httpx
 import pytest
 
+from orchesis.api import create_api_app
 from orchesis.config import load_policy
 from orchesis.flow_xray import EdgeType, FlowAnalyzer, FlowXRayConfig, NodeType, PatternType
 from orchesis.proxy import HTTPProxyConfig, LLMHTTPProxy
@@ -745,3 +747,128 @@ def test_proxy_flow_disabled_endpoints(tmp_path: Path) -> None:
         proxy.stop()
         upstream.shutdown()
         upstream.server_close()
+
+
+def _api_policy_yaml() -> str:
+    return """
+api:
+  token: "orch_sk_test"
+rules:
+  - name: budget_limit
+    max_cost_per_call: 0.05
+    daily_budget: 10.0
+  - name: rate_limit
+    max_requests_per_minute: 100
+""".strip()
+
+
+def _api_auth() -> dict[str, str]:
+    return {"Authorization": "Bearer orch_sk_test"}
+
+
+async def _api_client(app):
+    transport = httpx.ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://test")
+
+
+@pytest.mark.asyncio
+async def test_flow_export_returns_valid_json(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(_api_policy_yaml(), encoding="utf-8")
+    app = create_api_app(
+        policy_path=str(policy_path),
+        state_persist=str(tmp_path / "state.jsonl"),
+        decisions_log=str(tmp_path / "decisions.jsonl"),
+        history_path=str(tmp_path / "policy_versions.jsonl"),
+    )
+    async with await _api_client(app) as client:
+        await client.post(
+            "/api/v1/evaluate",
+            headers=_api_auth(),
+            json={"session_id": "flow-s1", "tool_name": "read_file", "params": {"path": "/tmp/a"}, "cost": 0.01},
+        )
+        resp = await client.get("/api/v1/flow/flow-s1/export", headers=_api_auth())
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["session_id"] == "flow-s1"
+    assert isinstance(payload.get("exported_at"), str)
+    assert isinstance(payload.get("pipeline_phases"), list)
+    assert isinstance(payload.get("decisions"), list)
+    assert isinstance(payload.get("summary"), dict)
+    assert isinstance(payload.get("share_url"), str)
+
+
+@pytest.mark.asyncio
+async def test_flow_share_token_generated(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(_api_policy_yaml(), encoding="utf-8")
+    app = create_api_app(
+        policy_path=str(policy_path),
+        state_persist=str(tmp_path / "state.jsonl"),
+        decisions_log=str(tmp_path / "decisions.jsonl"),
+        history_path=str(tmp_path / "policy_versions.jsonl"),
+    )
+    async with await _api_client(app) as client:
+        resp = await client.get("/api/v1/flow/flow-s2/share-token", headers=_api_auth())
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert isinstance(payload.get("token"), str)
+    assert len(payload["token"]) == 8
+    assert payload["url"].endswith(payload["token"])
+
+
+@pytest.mark.asyncio
+async def test_flow_export_includes_all_phases(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(_api_policy_yaml(), encoding="utf-8")
+    app = create_api_app(
+        policy_path=str(policy_path),
+        state_persist=str(tmp_path / "state.jsonl"),
+        decisions_log=str(tmp_path / "decisions.jsonl"),
+        history_path=str(tmp_path / "policy_versions.jsonl"),
+    )
+    async with await _api_client(app) as client:
+        await client.post(
+            "/api/v1/evaluate",
+            headers=_api_auth(),
+            json={"session_id": "flow-s3", "tool_name": "read_file", "params": {"path": "/tmp/a"}, "cost": 0.01},
+        )
+        await client.post(
+            "/api/v1/evaluate",
+            headers=_api_auth(),
+            json={"session_id": "flow-s3", "tool_name": "sql_query", "params": {"q": "DROP table t"}, "cost": 0.2},
+        )
+        resp = await client.get("/api/v1/flow/flow-s3/export", headers=_api_auth())
+    assert resp.status_code == 200
+    payload = resp.json()
+    phases = payload.get("pipeline_phases", [])
+    assert isinstance(phases, list)
+    assert phases
+    assert all(isinstance(item.get("phase"), str) for item in phases if isinstance(item, dict))
+    assert payload["summary"]["total_requests"] >= 2
+    assert payload["summary"]["blocked"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_flow_share_link_format(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(_api_policy_yaml(), encoding="utf-8")
+    app = create_api_app(
+        policy_path=str(policy_path),
+        state_persist=str(tmp_path / "state.jsonl"),
+        decisions_log=str(tmp_path / "decisions.jsonl"),
+        history_path=str(tmp_path / "policy_versions.jsonl"),
+    )
+    async with await _api_client(app) as client:
+        await client.post(
+            "/api/v1/evaluate",
+            headers=_api_auth(),
+            json={"session_id": "flow-s4", "tool_name": "read_file", "params": {"path": "/tmp/a"}, "cost": 0.01},
+        )
+        resp = await client.get("/api/v1/flow/flow-s4/export", headers=_api_auth())
+    assert resp.status_code == 200
+    share_url = str(resp.json().get("share_url", ""))
+    assert share_url.startswith("http://localhost:8080/flow/")
+    token = share_url.rsplit("/", 1)[-1]
+    assert len(token) == 8
+    assert all(ch in "0123456789abcdef" for ch in token)
