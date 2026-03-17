@@ -171,7 +171,28 @@ class PiiDetector:
                 )
         return findings
 
+    def detect(self, text: str) -> list[dict[str, Any]]:
+        """Compatibility detect entrypoint hardened for fuzzed inputs."""
+        if not isinstance(text, str):
+            return []
+        try:
+            text = text.encode("utf-8", errors="replace").decode("utf-8")
+        except Exception:
+            return []
+        if not text.strip():
+            return []
+        try:
+            return self.scan_text(text)
+        except (re.error, UnicodeDecodeError, OverflowError):
+            return []
+
     def scan_text(self, text: str) -> list[dict[str, Any]]:
+        if not isinstance(text, str):
+            return []
+        try:
+            text = text.encode("utf-8", errors="replace").decode("utf-8")
+        except Exception:
+            return []
         text = sanitize_text(text)
         if text is None:
             return []

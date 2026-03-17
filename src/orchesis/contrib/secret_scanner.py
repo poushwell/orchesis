@@ -315,7 +315,26 @@ class SecretScanner:
                 )
         return sorted(findings, key=lambda item: int(item.get("position", 0)))
 
+    def scan(self, text: str) -> list[dict[str, Any]]:
+        """Compatibility scan entrypoint hardened for fuzzed inputs."""
+        if not isinstance(text, str):
+            return []
+        text = text.replace("\x00", "").replace("\xff", "")
+        text = "".join(ch for ch in text if ch.isprintable() or ch in {"\n", "\r", "\t"})
+        if not text.strip():
+            return []
+        try:
+            return self.scan_text(text)
+        except (re.error, UnicodeDecodeError, OverflowError):
+            return []
+
     def scan_text(self, text: str) -> list[dict[str, Any]]:
+        if not isinstance(text, str):
+            return []
+        text = text.replace("\x00", "").replace("\xff", "")
+        text = "".join(ch for ch in text if ch.isprintable() or ch in {"\n", "\r", "\t"})
+        if not text.strip():
+            return []
         text = sanitize_text(text)
         if text is None:
             return []

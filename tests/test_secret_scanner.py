@@ -108,3 +108,15 @@ def test_fuzz_crash_ed9e87f9026() -> None:
     crash_input = b'\x00\x00\xff\xff\x8cu,\x00\x00\x88'
     findings = scanner.scan_text(crash_input)  # type: ignore[arg-type]
     assert isinstance(findings, list)
+
+
+def test_secret_scanner_handles_null_bytes() -> None:
+    scanner = SecretScanner()
+    findings = scanner.scan("token=\x00sk-abcdefghijklmnopqrstuvwxyz123456\x00")
+    assert isinstance(findings, list)
+
+
+def test_secret_scanner_handles_binary_input() -> None:
+    scanner = SecretScanner()
+    findings = scanner.scan(b"\x00\xffbinary-data")  # type: ignore[arg-type]
+    assert findings == []

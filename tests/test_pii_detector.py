@@ -105,3 +105,15 @@ def test_fuzz_crash_2f4fc2fec4e() -> None:
     )
     findings = detector.scan_text(crash_input)  # type: ignore[arg-type]
     assert isinstance(findings, list)
+
+
+def test_pii_detector_handles_unicode_surrogates() -> None:
+    detector = PiiDetector()
+    findings = detector.detect("contact:\ud800user@example.com")
+    assert isinstance(findings, list)
+
+
+def test_pii_detector_handles_mixed_binary() -> None:
+    detector = PiiDetector()
+    findings = detector.detect(b"\x00\xffuser@example.com123-45-6789")  # type: ignore[arg-type]
+    assert findings == []
