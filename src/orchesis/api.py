@@ -6,8 +6,10 @@ import json
 import os
 import time
 import hashlib
+import threading
+from collections import defaultdict
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +50,9 @@ from orchesis.context_dna_store import ContextDNAStore
 from orchesis.agent_profile import AgentIntelligenceProfile
 from orchesis.pipeline import check_budget
 from orchesis.evidence_record import EvidenceRecord
+from orchesis.session_replay import SessionReplay
 from orchesis.token_yield import TokenYieldTracker
+from orchesis.threat_feed import ThreatFeed
 from orchesis import __version__
 
 
@@ -124,8 +128,16 @@ def create_api_app(
     app.state.flow_decisions = {}
     app.state.api_token_override = api_token.strip() if isinstance(api_token, str) and api_token.strip() else None
     app.state.token_yield = TokenYieldTracker()
+    feed_cfg = (
+        current_version.policy.get("threat_feed")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("threat_feed"), dict)
+        else {}
+    )
+    app.state.threat_feed = ThreatFeed(feed_cfg)
     app.state.benchmark_results = {}
     app.state.dna_store = ContextDNAStore(str(policy_file.parent / ".orchesis" / "dna"))
+    app.state.notifications: list[dict[str, Any]] = []
+    app.state.notifications_lock = threading.Lock()
     mcp_monitor_cfg = (
         current_version.policy.get("mcp_monitor")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("mcp_monitor"), dict)
@@ -400,6 +412,94 @@ def create_api_app(
             "context_window": context_window,
         }
 
+    def _default_rate_limit_per_minute(policy: dict[str, Any]) -> int:
+        rules = policy.get("rules", [])
+        if not isinstance(rules, list):
+            return 60
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            value = rule.get("max_requests_per_minute")
+            if isinstance(value, int) and value > 0:
+                return value
+        return 60
+
+    def _build_rate_limit_status_payload() -> dict[str, Any]:
+        tracker = app.state.tracker
+        tracker.flush()
+        path = Path(getattr(tracker, "persist_path", "") or "")
+        now = datetime.now(timezone.utc)
+        window_start = now - timedelta(seconds=60)
+        hour_start = now - timedelta(hours=1)
+        events_per_agent: dict[str, int] = defaultdict(int)
+        minute_buckets: dict[str, int] = defaultdict(int)
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                row = line.strip()
+                if not row:
+                    continue
+                try:
+                    payload = json.loads(row)
+                except json.JSONDecodeError:
+                    continue
+                if payload.get("event") != "rate":
+                    continue
+                agent_id = str(payload.get("agent_id") or "__global__")
+                ts_raw = payload.get("timestamp")
+                if not isinstance(ts_raw, str):
+                    continue
+                try:
+                    ts = datetime.fromisoformat(ts_raw)
+                except ValueError:
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                else:
+                    ts = ts.astimezone(timezone.utc)
+                if ts >= window_start:
+                    events_per_agent[agent_id] += 1
+                if ts >= hour_start:
+                    minute_key = ts.replace(second=0, microsecond=0).isoformat()
+                    minute_buckets[minute_key] += 1
+
+        _refresh_current_version()
+        registry = app.state.current_version.registry
+        agents_seen = set(events_per_agent.keys()) | set(registry.agents.keys())
+        default_limit = _default_rate_limit_per_minute(app.state.current_version.policy)
+        reset_at = (now.replace(second=0, microsecond=0) + timedelta(minutes=1)).isoformat()
+        agent_payload: dict[str, Any] = {}
+        for agent_id in sorted(agents_seen):
+            identity = registry.agents.get(agent_id)
+            limit = (
+                int(identity.rate_limit_per_minute)
+                if identity is not None and isinstance(identity.rate_limit_per_minute, int) and identity.rate_limit_per_minute > 0
+                else default_limit
+            )
+            used = int(events_per_agent.get(agent_id, 0))
+            percent = (used / float(limit) * 100.0) if limit > 0 else 0.0
+            status = "ok"
+            if percent >= 100.0:
+                status = "throttled"
+            elif percent >= 80.0:
+                status = "warning"
+            agent_payload[agent_id] = {
+                "requests_this_minute": used,
+                "limit_per_minute": int(limit),
+                "percent_used": round(percent, 2),
+                "status": status,
+                "reset_at": reset_at,
+            }
+
+        global_requests = sum(events_per_agent.values())
+        peak_this_hour = max(minute_buckets.values()) if minute_buckets else 0
+        return {
+            "agents": agent_payload,
+            "global": {
+                "requests_this_minute": int(global_requests),
+                "peak_this_hour": int(peak_this_hour),
+            },
+        }
+
     def _record_flow_decision(payload: dict[str, Any], response: dict[str, Any]) -> None:
         session_id = _extract_session_id(payload)
         if session_id is None:
@@ -625,6 +725,29 @@ def create_api_app(
         payload = json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8")
         headers = {"Content-Disposition": f'attachment; filename="evidence_{session_id}.json"'}
         return Response(content=payload, media_type="application/json", headers=headers)
+
+    @app.get("/api/v1/sessions/{session_id}/replay")
+    def replay_session_endpoint(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        replayer = SessionReplay(app.state.decisions_log)
+        result = replayer.replay(session_id=session_id, policy=app.state.current_version.policy)
+        return asdict(result)
+
+    @app.post("/api/v1/sessions/{session_id}/replay")
+    def replay_session_with_policy_endpoint(
+        session_id: str,
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        policy = body.get("policy") if isinstance(body, dict) else None
+        effective_policy = policy if isinstance(policy, dict) else (body if isinstance(body, dict) else None)
+        replayer = SessionReplay(app.state.decisions_log)
+        result = replayer.replay(session_id=session_id, policy=effective_policy)
+        return asdict(result)
 
     @app.get("/api/v1/compliance/report/{agent_id}")
     def compliance_report_endpoint(
@@ -957,6 +1080,37 @@ def create_api_app(
             "corpus_size": corpus_stats["total"],
         }
 
+    @app.get("/api/v1/notifications")
+    def get_notifications(
+        since: float = 0.0,
+        limit: int = 50,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        safe_limit = max(1, min(200, int(limit)))
+        safe_since = float(since or 0.0)
+        with app.state.notifications_lock:
+            records = list(app.state.notifications)
+        if safe_since > 0:
+            records = [item for item in records if float(item.get("timestamp", 0.0) or 0.0) > safe_since]
+        records = records[-safe_limit:]
+        return {"notifications": records, "count": len(records)}
+
+    @app.post("/api/v1/notifications/dismiss/{notification_id}")
+    def dismiss_notification(
+        notification_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        target = str(notification_id)
+        with app.state.notifications_lock:
+            before = len(app.state.notifications)
+            app.state.notifications = [
+                item for item in app.state.notifications if str(item.get("id", "")) != target
+            ]
+            removed = before - len(app.state.notifications)
+        return {"status": "dismissed", "id": target, "removed": removed}
+
     @app.get("/api/v1/token-yield/{session_id}")
     def token_yield_session(
         session_id: str,
@@ -969,6 +1123,27 @@ def create_api_app(
     def token_yield_global(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
         return app.state.token_yield.get_global_stats()
+
+    @app.get("/api/v1/threat-feed/status")
+    def threat_feed_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.threat_feed.get_stats()
+
+    @app.post("/api/v1/threat-feed/update")
+    def threat_feed_update(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        added = app.state.threat_feed.fetch()
+        return {"added": len(added), "signatures": added}
+
+    @app.get("/api/v1/threat-feed/signatures")
+    def threat_feed_signatures(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {"signatures": list(app.state.threat_feed._signatures)}
+
+    @app.get("/api/v1/rate-limits/status")
+    def rate_limits_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return _build_rate_limit_status_payload()
 
     @app.get("/api/v1/benchmark/cases")
     def benchmark_cases(authorization: str | None = Header(default=None)) -> dict[str, Any]:

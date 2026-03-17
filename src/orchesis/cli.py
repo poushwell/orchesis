@@ -51,11 +51,13 @@ from orchesis.coverage import CoverageReport
 from orchesis.policy_store import PolicyStore
 from orchesis.plugins import load_plugins_for_policy
 from orchesis.replay import ReplayEngine, read_events_from_jsonl
+from orchesis.session_replay import SessionReplay
 from orchesis.reliability import ReliabilityReportGenerator
 from orchesis.llm_config import load_llm_config
 from orchesis.llm_judge import LLMJudge
 from orchesis.rules_generator import generate_security_rules_from_policy
 from orchesis.policy_validator import PolicyAsCodeValidator
+from orchesis.threat_feed import ThreatFeed
 from orchesis.scanner_server import run_scanner_http_server
 from orchesis.scenarios import AdversarialScenarios
 from orchesis.experiment_runner import NLCEExperimentRunner
@@ -2914,11 +2916,50 @@ def incidents_timeline(agent_id: str | None, incident_id: str | None, last_n: in
 
 
 @main.command()
-@click.option("--log", "log_path", type=click.Path(exists=True), required=True)
-@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
+@click.option("--log", "log_path", type=click.Path(exists=True), required=False, default=None)
+@click.option("--policy", "policy_path", type=click.Path(exists=True), required=False, default=None)
 @click.option("--strict", is_flag=True, default=False)
-def replay(log_path: str, policy_path: str, strict: bool) -> None:
-    """Replay structured decision logs and check determinism."""
+@click.option("--session", "session_id", type=str, required=False, default=None)
+@click.option("--diff-only", is_flag=True, default=False)
+def replay(
+    log_path: str | None,
+    policy_path: str | None,
+    strict: bool,
+    session_id: str | None,
+    diff_only: bool,
+) -> None:
+    """Replay structured logs or a specific session."""
+    if session_id:
+        decisions_log = log_path or str(DEFAULT_DECISIONS_PATH)
+        policy: dict[str, Any] = {"rules": []}
+        if policy_path is not None:
+            try:
+                policy = load_policy(policy_path)
+            except (ValueError, YAMLError, OSError) as error:
+                raise click.ClickException(f"Failed to load policy: {error}") from error
+        replayer = SessionReplay(decisions_log)
+        result = replayer.replay(session_id=session_id, policy=policy)
+        click.echo("Session replay summary:")
+        click.echo(f"  Session: {result.session_id}")
+        click.echo(f"  Total decisions: {result.summary['total']}")
+        click.echo(f"  Changed: {result.summary['changed']}")
+        click.echo(f"  Newly blocked: {result.summary['newly_blocked']}")
+        click.echo(f"  Newly allowed: {result.summary['newly_allowed']}")
+        if result.differences:
+            click.echo("")
+            click.echo("Differences:")
+            for row in result.differences:
+                click.echo(
+                    f"  #{row.get('index')} {row.get('event_id')}: "
+                    f"{row.get('original_decision')} -> {row.get('replayed_decision')}"
+                )
+                if not diff_only:
+                    click.echo(f"    original_reasons={row.get('original_reasons')}")
+                    click.echo(f"    replayed_reasons={row.get('replayed_reasons')}")
+        return
+
+    if not log_path or not policy_path:
+        raise click.ClickException("Either --session OR both --log and --policy are required")
     try:
         policy = load_policy(policy_path)
     except (ValueError, YAMLError, OSError) as error:
@@ -3199,6 +3240,43 @@ def readiness_command(agent_id: str, config_path: str) -> None:
     if not config_exists:
         click.echo("")
         click.echo(f"Note: config not found at {config_path}; evaluated using defaults.")
+
+
+@main.command("threat-feed")
+@click.option("--update", "do_update", is_flag=True, default=False)
+@click.option("--status", "show_status", is_flag=True, default=False)
+@click.option("--export", "export_path", type=click.Path(), default=None)
+@click.option("--import", "import_path", type=click.Path(exists=True), default=None)
+@click.option("--config", "config_path", type=click.Path(), default="orchesis.yaml")
+def threat_feed_command(
+    do_update: bool,
+    show_status: bool,
+    export_path: str | None,
+    import_path: str | None,
+    config_path: str,
+) -> None:
+    """Manage external threat intelligence feed."""
+    policy: dict[str, Any] = {}
+    config_file = Path(config_path)
+    if config_file.exists():
+        try:
+            policy = load_policy(str(config_file))
+        except Exception:
+            policy = {}
+    cfg = policy.get("threat_feed", {}) if isinstance(policy, dict) and isinstance(policy.get("threat_feed"), dict) else {}
+    feed = ThreatFeed(cfg)
+
+    if isinstance(import_path, str) and import_path.strip():
+        imported = feed.import_signatures(import_path)
+        click.echo(f"Imported signatures: {imported}")
+    if bool(do_update):
+        added = feed.fetch()
+        click.echo(f"Fetched signatures: {len(added)} new")
+    if isinstance(export_path, str) and export_path.strip():
+        feed.export_signatures(export_path)
+        click.echo(f"Exported signatures to {export_path}")
+    if show_status or (not do_update and export_path is None and import_path is None):
+        click.echo(json.dumps(feed.get_stats(), ensure_ascii=False, indent=2))
 
 
 @main.command("compliance")

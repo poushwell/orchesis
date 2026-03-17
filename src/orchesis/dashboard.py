@@ -168,6 +168,81 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       color: var(--text-secondary);
       background: var(--surface);
     }
+    #notif-bell {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px 10px;
+      cursor: pointer;
+      user-select: none;
+      background: var(--surface);
+      color: var(--text);
+      font-size: 12px;
+    }
+    #notif-count {
+      min-width: 20px;
+      text-align: center;
+      font-weight: 700;
+      color: var(--text);
+      border-color: var(--accent);
+    }
+    .notif-panel {
+      position: fixed;
+      top: 74px;
+      right: 16px;
+      width: min(420px, calc(100vw - 32px));
+      max-height: calc(100vh - 96px);
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.35);
+      z-index: 9998;
+      transform: translateX(0);
+      opacity: 1;
+      transition: transform 0.2s ease, opacity 0.2s ease;
+    }
+    .notif-panel.hidden {
+      transform: translateX(110%);
+      opacity: 0;
+      pointer-events: none;
+    }
+    .notif-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 12px;
+      border-bottom: 1px solid var(--border);
+      font-weight: 700;
+    }
+    .notif-header button {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 4px 8px;
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+    }
+    #notif-list {
+      display: grid;
+      gap: 8px;
+      padding: 10px 12px 12px;
+    }
+    .notif-item {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: color-mix(in srgb, var(--surface) 90%, var(--bg));
+      padding: 8px 10px;
+      display: grid;
+      gap: 3px;
+    }
+    .notif-item small {
+      color: var(--text-secondary);
+      font-size: 11px;
+    }
     .conn-dot {
       width: 10px; height: 10px; border-radius: 50%;
       display: inline-block; margin-right: 6px;
@@ -371,6 +446,26 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     .cbg-progress { display: grid; gap: 6px; }
     .cbg-bar { height: 10px; border-radius: 999px; background: rgba(255,255,255,0.08); overflow: hidden; }
     .cbg-bar > div { height: 100%; border-radius: inherit; width: 0%; background: #34d399; }
+    .rate-limit-widget {
+      border: 1px solid rgba(52, 211, 153, 0.35);
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, rgba(52, 211, 153, 0.1), rgba(52, 211, 153, 0.03));
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+    .rl-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .rl-counters { display: flex; gap: 12px; flex-wrap: wrap; }
+    .rl-counter { font-size: 12px; color: var(--text-secondary); }
+    .rl-counter .v { font-weight: 800; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+    .rl-rows { display: grid; gap: 8px; }
+    .rl-row { display: grid; gap: 4px; }
+    .rl-row-head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+    .rl-bar { height: 8px; border-radius: 999px; background: rgba(255,255,255,0.08); overflow: hidden; }
+    .rl-bar > div { height: 100%; width: 0%; border-radius: inherit; background: #34d399; }
+    .rl-status-ok { color: #34d399; }
+    .rl-status-warning { color: #facc15; }
+    .rl-status-throttled { color: #ef4444; }
     .agent-health-widget {
       border: 1px solid rgba(90,168,255,0.35);
       border-radius: var(--radius);
@@ -948,7 +1043,14 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         <span class="badge"><span id="conn-dot" class="conn-dot"></span><span id="conn-text">Connected</span></span>
         <span class="badge" id="status-badge">Status: --</span>
         <button id="theme-toggle" onclick="toggleTheme()">☀️</button>
+        <div id="notif-bell" onclick="toggleNotifications()">🔔 <span id="notif-count" class="badge">0</span></div>
       </div>
+    </div>
+    <div id="notif-panel" class="notif-panel hidden">
+      <div class="notif-header">
+        Notifications <button onclick="clearNotifications()">Clear all</button>
+      </div>
+      <div id="notif-list"></div>
     </div>
     {{DEMO_BANNER}}
 
@@ -1042,6 +1144,21 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         <div class="cbg-progress">
           <div class="subtle">Used / Max tokens: <span id="cbg-used-max">0 / 0</span></div>
           <div class="cbg-bar"><div id="cbg-used-bar"></div></div>
+        </div>
+      </div>
+      <div class="rate-limit-widget">
+        <div class="rl-head">
+          <div>
+            <div class="subtle">Rate Limits</div>
+            <div id="rl-reset-at" class="subtle">Resets at --</div>
+          </div>
+          <div class="rl-counters">
+            <div class="rl-counter">Global req/min: <span id="rl-global-rpm" class="v">0</span></div>
+            <div class="rl-counter">Throttled agents: <span id="rl-throttled" class="v">0</span></div>
+          </div>
+        </div>
+        <div id="rl-agent-rows" class="rl-rows">
+          <div class="empty">No rate limit data.</div>
         </div>
       </div>
       <div class="grid-4">
@@ -1405,6 +1522,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
 
   <script>
     const POLL_INTERVAL = 3000;
+    const RATE_LIMIT_REFRESH_MS = 10000;
     let currentTab = "shield";
     let pollTimer = null;
     let selectedAgentProfileId = "";
@@ -1413,6 +1531,19 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     let overwatchUseDemo = false;
     let overwatchSnapshot = null;
     let overwatchTeamDetail = null;
+    let notifTimer = null;
+    let notifLastTs = 0;
+    let rateLimitSnapshot = null;
+    let lastRateLimitFetchMs = 0;
+    const notifications = [];
+    const NOTIF_LIMIT = 50;
+    const NOTIF_POLL_INTERVAL = 5000;
+    const NOTIFICATION_TYPES = {
+      threat_blocked: { icon: "🔴", fallback: "Threat blocked" },
+      budget_warning: { icon: "🟡", fallback: "Budget warning" },
+      cache_milestone: { icon: "🔵", fallback: "Cache milestone" },
+      loop_detected: { icon: "⚪", fallback: "Loop detected" },
+    };
     const sparkHistory = {};
     const SPARK_MAX = 20;
     function applyTheme(theme){
@@ -1477,6 +1608,71 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       el.classList.add("show");
       if(showToast._timer){ clearTimeout(showToast._timer); }
       showToast._timer = setTimeout(()=>{ el.classList.remove("show"); }, 3000);
+    }
+    function fmtNotifTs(ts){
+      const d = new Date(Number(ts || 0) * 1000);
+      if (Number.isNaN(d.getTime())) { return "--"; }
+      return d.toLocaleTimeString();
+    }
+    function notifMessageForType(type, payload){
+      const t = String(type || "loop_detected");
+      const data = payload && typeof payload === "object" ? payload : {};
+      if (t === "threat_blocked") return `Threat blocked: ${String(data.threat_type || "unknown")}`;
+      if (t === "budget_warning") return `Budget at ${Number(data.percent || 0)}%`;
+      if (t === "cache_milestone") return `Cache saved $${Number(data.saved_usd || 0).toFixed(2)}`;
+      if (t === "loop_detected") return `Loop detected for ${String(data.agent_id || "agent")}`;
+      return String(data.message || "Notification");
+    }
+    function renderNotifications(){
+      const countEl = document.getElementById("notif-count");
+      if (countEl) countEl.textContent = String(notifications.length);
+      const listEl = document.getElementById("notif-list");
+      if (!listEl) return;
+      if (notifications.length === 0) {
+        listEl.innerHTML = `<div class="notif-item"><div>No notifications yet</div><small>Waiting for events...</small></div>`;
+        return;
+      }
+      listEl.innerHTML = notifications.map((item)=>{
+        const t = String(item.type || "");
+        const meta = NOTIFICATION_TYPES[t] || { icon: "⚪", fallback: "Notification" };
+        return `<div class="notif-item"><div>${meta.icon} ${String(item.message || meta.fallback)}</div><small>${fmtNotifTs(item.timestamp)}</small></div>`;
+      }).join("");
+    }
+    function addNotification(type, message, timestamp, id){
+      notifications.unshift({
+        id: String(id || `${Date.now()}-${Math.random()}`),
+        type: String(type || "loop_detected"),
+        message: String(message || "Notification"),
+        timestamp: Number(timestamp || (Date.now() / 1000)),
+      });
+      if (notifications.length > NOTIF_LIMIT) notifications.length = NOTIF_LIMIT;
+      renderNotifications();
+      showToast(message);
+    }
+    function toggleNotifications() {
+      const panel = document.getElementById("notif-panel");
+      if (!panel) return;
+      panel.classList.toggle("hidden");
+    }
+    function clearNotifications() {
+      notifications.length = 0;
+      renderNotifications();
+    }
+    async function pollNotifications() {
+      try {
+        const endpoint = `/api/v1/notifications?since=${encodeURIComponent(notifLastTs)}&limit=20`;
+        const response = await fetch(endpoint, { cache: "no-store" });
+        if (!response.ok) return;
+        const payload = await response.json();
+        const rows = Array.isArray(payload.notifications) ? payload.notifications : [];
+        for (const row of rows) {
+          const t = String(row.type || "");
+          const ts = Number(row.timestamp || (Date.now() / 1000));
+          const msg = String(row.message || notifMessageForType(t, row));
+          addNotification(t, msg, ts, row.id);
+          if (ts > notifLastTs) notifLastTs = ts;
+        }
+      } catch (_err) {}
     }
     async function shareFlowXRay(sessionId) {
       if(!sessionId){ return; }
@@ -1690,7 +1886,46 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       document.getElementById("health-score").textContent = val.toFixed(2);
     }
 
-    function renderOverview(data, stats, savings, tokenYield, contextBudget){
+    function renderRateLimits(payload){
+      const model = (payload && typeof payload === "object") ? payload : {};
+      const global = (model.global && typeof model.global === "object") ? model.global : {};
+      const agents = (model.agents && typeof model.agents === "object") ? model.agents : {};
+      const globalEl = document.getElementById("rl-global-rpm");
+      const throttledEl = document.getElementById("rl-throttled");
+      const resetEl = document.getElementById("rl-reset-at");
+      const rowsEl = document.getElementById("rl-agent-rows");
+      if(globalEl) globalEl.textContent = fmtNum(Number(global.requests_this_minute || 0));
+      const entries = Object.entries(agents);
+      const throttled = entries.filter(([, item])=> String((item && item.status) || "").toLowerCase() === "throttled").length;
+      if(throttledEl) throttledEl.textContent = fmtNum(throttled);
+      if(resetEl){
+        const first = entries.length > 0 && entries[0][1] ? entries[0][1].reset_at : null;
+        resetEl.textContent = first ? `Resets at ${fmtTs(first)}` : "Resets at --";
+      }
+      if(!rowsEl){ return; }
+      if(entries.length === 0){
+        rowsEl.innerHTML = `<div class="empty">No rate limit data.</div>`;
+        return;
+      }
+      const sorted = entries.sort((a, b)=> Number((b[1] && b[1].percent_used) || 0) - Number((a[1] && a[1].percent_used) || 0));
+      rowsEl.innerHTML = sorted.map(([agentId, item])=>{
+        const used = Number((item && item.requests_this_minute) || 0);
+        const limit = Math.max(1, Number((item && item.limit_per_minute) || 1));
+        const percent = Math.max(0, Number((item && item.percent_used) || 0));
+        const status = String((item && item.status) || "ok").toLowerCase();
+        const width = Math.min(100, percent);
+        const color = status === "throttled" ? "#ef4444" : (status === "warning" ? "#facc15" : "#34d399");
+        return `<div class="rl-row">
+          <div class="rl-row-head">
+            <span>${agentId}</span>
+            <span class="rl-status-${status}">${used}/${limit} (${percent.toFixed(1)}%)</span>
+          </div>
+          <div class="rl-bar"><div style="width:${width.toFixed(1)}%;background:${color};"></div></div>
+        </div>`;
+      }).join("");
+    }
+
+    function renderOverview(data, stats, savings, tokenYield, contextBudget, rateLimits){
       if(!data){ return; }
       lastOverview = data;
       setStatus(data.status || "clear");
@@ -1792,6 +2027,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       renderOpenClawSavings(savings || {});
       renderTokenYield(tokenYield || {});
       renderContextBudget(contextBudget || {});
+      renderRateLimits(rateLimits || {});
     }
 
     function renderTokenYield(payload){
@@ -2796,7 +3032,15 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         fetchData("/api/v1/token-yield/global"),
         fetchData("/api/v1/context-budget/stats"),
       ]);
-      renderOverview(data, stats, savings, tokenYield, contextBudget);
+      const now = Date.now();
+      if (!rateLimitSnapshot || (now - lastRateLimitFetchMs) >= RATE_LIMIT_REFRESH_MS) {
+        const freshRateLimits = await fetchData("/api/v1/rate-limits/status");
+        if (freshRateLimits) {
+          rateLimitSnapshot = freshRateLimits;
+          lastRateLimitFetchMs = now;
+        }
+      }
+      renderOverview(data, stats, savings, tokenYield, contextBudget, rateLimitSnapshot || {});
       renderAgentHealth((health && typeof health === "object") ? health : (data && data.agent_health ? data.agent_health : {}));
     }
     async function pollAgents(){
@@ -3006,9 +3250,13 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       const savedTheme = localStorage.getItem("orchesis-theme") || "dark";
       applyTheme(savedTheme);
       bindUI();
+      renderNotifications();
       await pollShield();
+      await pollNotifications();
       if(pollTimer){ clearInterval(pollTimer); }
       pollTimer = setInterval(()=>{ pollCurrent(); }, POLL_INTERVAL);
+      if(notifTimer){ clearInterval(notifTimer); }
+      notifTimer = setInterval(()=>{ pollNotifications(); }, NOTIF_POLL_INTERVAL);
     }
 
     boot();

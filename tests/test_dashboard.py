@@ -162,6 +162,32 @@ def test_localstorage_theme_persistence_code() -> None:
     assert "document.documentElement.setAttribute(\"data-theme\", next)" in html
 
 
+def test_notification_bell_present() -> None:
+    html = get_dashboard_html()
+    assert 'id="notif-bell"' in html
+    assert "toggleNotifications()" in html
+    assert 'id="notif-count"' in html
+
+
+def test_notification_panel_markup() -> None:
+    html = get_dashboard_html()
+    assert 'id="notif-panel"' in html
+    assert 'id="notif-list"' in html
+    assert "clearNotifications()" in html
+
+
+def test_notification_types_defined() -> None:
+    html = get_dashboard_html()
+    assert "threat_blocked" in html
+    assert "budget_warning" in html
+    assert "cache_milestone" in html
+    assert "loop_detected" in html
+    assert "Threat blocked:" in html
+    assert "Budget at" in html
+    assert "Cache saved $" in html
+    assert "Loop detected for" in html
+
+
 def test_dashboard_html_size_reasonable() -> None:
     html = get_dashboard_html()
     assert len(html) > 5_000
