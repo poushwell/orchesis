@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+import pytest
 import yaml
 
 from orchesis.api import create_api_app
@@ -154,10 +155,6 @@ def _make_app(tmp_path: Path):
         history_path=str(tmp_path / "policy_versions.jsonl"),
     )
     return app, decisions_log
-
-
-import pytest
-
 
 @pytest.mark.asyncio
 async def test_api_stats_endpoint(tmp_path: Path) -> None:
