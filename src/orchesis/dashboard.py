@@ -258,6 +258,56 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       -webkit-text-fill-color: transparent;
     }
     .hero-health { --hero-accent: rgba(90,168,255,0.95); }
+    .token-yield-widget {
+      border: 1px solid rgba(255, 99, 132, 0.28);
+      border-radius: var(--radius);
+      padding: 12px;
+      background: linear-gradient(135deg, rgba(255, 99, 132, 0.08), rgba(255, 99, 132, 0.03));
+      display: grid;
+      gap: 10px;
+    }
+    .token-yield-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .token-yield-percent {
+      font-size: clamp(34px, 6vw, 52px);
+      font-weight: 800;
+      line-height: 1;
+      color: #34d399;
+      font-variant-numeric: tabular-nums;
+    }
+    .token-yield-warning {
+      color: var(--danger);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .token-yield-bar {
+      width: 100%;
+      height: 8px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(255,255,255,0.08);
+    }
+    .token-yield-bar > div {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #f59e0b, #ef4444);
+    }
+    .token-yield-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .token-yield-table th, .token-yield-table td {
+      text-align: left;
+      padding: 5px 6px;
+      border-bottom: 1px solid var(--border);
+      font-variant-numeric: tabular-nums;
+    }
     .agent-health-widget {
       border: 1px solid rgba(90,168,255,0.35);
       border-radius: var(--radius);
@@ -510,6 +560,20 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       stroke-linecap: round;
       stroke-linejoin: round;
     }
+    .profile-badges { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:8px 0; }
+    .profile-tag {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 11px;
+      color: var(--text-secondary);
+      background: rgba(255,255,255,0.03);
+    }
+    .profile-tag.cold { color: var(--warn); border-color: rgba(255,184,0,0.35); }
+    .profile-grid { display:grid; gap:8px; grid-template-columns: repeat(4, minmax(120px, 1fr)); }
+    .profile-kv { font-size: 12px; color: var(--text-secondary); }
+    .profile-list { margin: 8px 0 0 0; padding-left: 18px; color: var(--text); }
+    .profile-alert { margin:6px 0; padding:8px; border:1px solid var(--border); border-radius:8px; font-size:12px; }
     .savings-panel {
       background: linear-gradient(135deg, rgba(0,229,160,0.05) 0%, var(--panel) 60%);
       border: 1px solid rgba(0,229,160,0.15);
@@ -882,6 +946,22 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
           <div class="hero-label">Overwatch Health</div>
         </div>
       </div>
+      <div class="token-yield-widget">
+        <div class="token-yield-head">
+          <div>
+            <div class="subtle">Token Yield</div>
+            <div id="ty-percent" class="token-yield-percent">0.0%</div>
+          </div>
+          <div id="ty-collapse" class="token-yield-warning"></div>
+        </div>
+        <div class="subtle">Waste: <span id="ty-waste-text">0.0%</span></div>
+        <div class="token-yield-bar"><div id="ty-waste-bar"></div></div>
+        <div class="subtle">Cache savings: <span id="ty-cache-savings">0</span> tokens</div>
+        <table class="token-yield-table">
+          <thead><tr><th>Iteration</th><th>Tokens</th></tr></thead>
+          <tbody id="ty-iterations"><tr><td colspan="2" class="subtle">No data</td></tr></tbody>
+        </table>
+      </div>
       <div class="grid-4">
         <div class="panel panel-primary">
           <div class="subtle">📥 Total Requests</div>
@@ -1036,6 +1116,38 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
           <thead><tr><th>Agent ID</th><th>Status</th><th>Requests</th><th>Cost</th><th>ARS Score</th></tr></thead>
           <tbody></tbody>
         </table>
+      </div>
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <div class="section-title"><strong>Profile</strong></div>
+          <select id="agent-profile-select" class="tab-btn" style="padding:6px 10px; min-width:220px;"></select>
+        </div>
+        <div id="agent-profile-empty" class="empty" style="display:none;">Select an agent to view profile.</div>
+        <div id="agent-profile-body" style="display:none;">
+          <div class="profile-badges">
+            <span class="profile-tag">Age: <span id="ap-age">0h</span></span>
+            <span id="ap-cold" class="profile-tag cold">Cold Start</span>
+          </div>
+          <div class="profile-grid">
+            <div class="panel"><div class="subtle">Avg Prompt</div><div id="ap-avg-prompt" class="metric-value">0</div></div>
+            <div class="panel"><div class="subtle">Tool Frequency</div><div id="ap-tool-freq" class="metric-value">0</div></div>
+            <div class="panel"><div class="subtle">Cache Hit Rate</div><div id="ap-cache-hit" class="metric-value">0%</div></div>
+            <div class="panel"><div class="subtle">Error Rate</div><div id="ap-error-rate" class="metric-value">0%</div></div>
+          </div>
+          <div class="grid-2" style="margin-top:10px;">
+            <div class="panel">
+              <strong>Detected Patterns</strong>
+              <div id="ap-patterns" style="margin-top:8px;"></div>
+              <strong style="display:block;margin-top:12px;">Cost Optimizations</strong>
+              <ul id="ap-optimizations" class="profile-list"></ul>
+            </div>
+            <div class="panel">
+              <strong>Reliability (7d)</strong>
+              <svg id="ap-reliability-spark" class="sparkline" viewBox="0 0 120 24" preserveAspectRatio="none"></svg>
+              <div id="ap-alerts" style="margin-top:10px;"></div>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -1199,6 +1311,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     const POLL_INTERVAL = 3000;
     let currentTab = "shield";
     let pollTimer = null;
+    let selectedAgentProfileId = "";
     let lastOverview = null;
     let overwatchView = "cards";
     let overwatchUseDemo = false;
@@ -1469,7 +1582,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       document.getElementById("health-score").textContent = val.toFixed(2);
     }
 
-    function renderOverview(data, stats, savings){
+    function renderOverview(data, stats, savings, tokenYield){
       if(!data){ return; }
       lastOverview = data;
       setStatus(data.status || "clear");
@@ -1569,6 +1682,48 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       renderCostChart(Array.isArray(data.cost_timeline) ? data.cost_timeline : []);
       renderSavings(stats || {});
       renderOpenClawSavings(savings || {});
+      renderTokenYield(tokenYield || {});
+    }
+
+    function renderTokenYield(payload){
+      const model = (payload && typeof payload === "object") ? payload : {};
+      const yieldValue = Math.max(0, Math.min(1, Number(model.token_yield || 0)));
+      const wasteValue = Math.max(0, Math.min(1, Number(model.waste_percent || (1 - yieldValue))));
+      const collapse = Boolean(model.context_collapses && Number(model.context_collapses) > 0);
+      const percentEl = document.getElementById("ty-percent");
+      const warningEl = document.getElementById("ty-collapse");
+      const wasteTextEl = document.getElementById("ty-waste-text");
+      const wasteBarEl = document.getElementById("ty-waste-bar");
+      const cacheEl = document.getElementById("ty-cache-savings");
+      const tableEl = document.getElementById("ty-iterations");
+      if (percentEl) {
+        percentEl.textContent = `${(yieldValue * 100).toFixed(1)}%`;
+        percentEl.style.color = yieldValue >= 0.6 ? "#34d399" : (yieldValue >= 0.4 ? "#facc15" : "#f97316");
+      }
+      if (warningEl) {
+        warningEl.textContent = collapse ? "⚠ Context collapse detected" : "";
+      }
+      if (wasteTextEl) {
+        wasteTextEl.textContent = `${(wasteValue * 100).toFixed(1)}%`;
+      }
+      if (wasteBarEl) {
+        wasteBarEl.style.width = `${(wasteValue * 100).toFixed(1)}%`;
+      }
+      if (cacheEl) {
+        cacheEl.textContent = fmtNum(Number(model.cache_savings || 0));
+      }
+      if (tableEl) {
+        const top = Array.isArray(model.top_sessions) && model.top_sessions.length > 0 ? model.top_sessions[0] : {};
+        const history = Array.isArray(top.history) ? top.history : [];
+        if (history.length === 0) {
+          tableEl.innerHTML = `<tr><td colspan="2" class="subtle">No data</td></tr>`;
+        } else {
+          tableEl.innerHTML = history.slice(-8).map((item, index)=>{
+            const rowNumber = history.length - Math.min(8, history.length) + index + 1;
+            return `<tr><td>#${rowNumber}</td><td>${fmtNum(Number(item || 0))}</td></tr>`;
+          }).join("");
+        }
+      }
     }
 
     function renderAgentHealth(payload){
@@ -1666,31 +1821,103 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     function renderAgents(data){
       const table = document.querySelector("#agents-table tbody");
       const empty = document.getElementById("agents-empty");
+      const profileSelect = document.getElementById("agent-profile-select");
       table.innerHTML = "";
       const agents = (data && Array.isArray(data.agents)) ? data.agents : [];
       if(agents.length === 0){
         empty.style.display = "block";
         document.getElementById("agents-table").style.display = "none";
+        if(profileSelect){ profileSelect.innerHTML = ""; }
+        renderAgentProfile(null);
         return;
       }
       empty.style.display = "none";
       document.getElementById("agents-table").style.display = "table";
+      if(profileSelect){
+        profileSelect.innerHTML = agents.map((a)=>{
+          const aid = String(a.agent_id || a.id || "unknown");
+          return `<option value="${aid}">${aid}</option>`;
+        }).join("");
+        if(selectedAgentProfileId && agents.some((a)=>String(a.agent_id || a.id || "") === selectedAgentProfileId)){
+          profileSelect.value = selectedAgentProfileId;
+        } else {
+          selectedAgentProfileId = String(agents[0].agent_id || agents[0].id || "unknown");
+          profileSelect.value = selectedAgentProfileId;
+        }
+      }
       agents.forEach((a)=>{
         const score = Number(a.ars_score ?? a.anomaly_score ?? 0);
         const status = String(a.status || a.state || "active");
         const reqs = Number(a.total_requests || a.requests_today || 0);
         const cost = Number(a.total_cost_usd || a.cost_day_usd || 0);
         const grade = String(a.ars_grade || "").toUpperCase();
+        const aid = String(a.agent_id || a.id || "unknown");
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td><strong>${a.agent_id || "unknown"}</strong></td>
+          <td><strong>${aid}</strong></td>
           <td>${status}</td>
           <td>${fmtNum(reqs)}</td>
           <td>${fmtMoney(cost)}</td>
           <td>${grade ? `${grade} (${score.toFixed(1)})` : score.toFixed(3)}</td>
         `;
+        tr.addEventListener("click", ()=>{
+          selectedAgentProfileId = aid;
+          const sel = document.getElementById("agent-profile-select");
+          if(sel){ sel.value = aid; }
+          loadAgentProfile(aid);
+        });
         table.appendChild(tr);
       });
+      if(selectedAgentProfileId){
+        loadAgentProfile(selectedAgentProfileId);
+      }
+    }
+    function drawProfileSparkline(values){
+      const svg = document.getElementById("ap-reliability-spark");
+      if(!svg || !Array.isArray(values) || values.length === 0){ return; }
+      const data = values.map((v)=>Number(v || 0));
+      const min = Math.min(...data);
+      const max = Math.max(...data, min + 0.0001);
+      const range = max - min || 1;
+      const w = 120, h = 24;
+      const points = data.map((v, i)=>{
+        const x = (i / Math.max(1, data.length - 1)) * w;
+        const y = h - ((v - min) / range) * (h - 2) - 1;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      }).join(" ");
+      svg.innerHTML = `<polyline points="${points}" />`;
+    }
+    function renderAgentProfile(profile){
+      const empty = document.getElementById("agent-profile-empty");
+      const body = document.getElementById("agent-profile-body");
+      if(!profile || typeof profile !== "object"){
+        if(empty){ empty.style.display = "block"; }
+        if(body){ body.style.display = "none"; }
+        return;
+      }
+      if(empty){ empty.style.display = "none"; }
+      if(body){ body.style.display = "block"; }
+      const baseline = (profile.baseline_metrics && typeof profile.baseline_metrics === "object") ? profile.baseline_metrics : {};
+      document.getElementById("ap-age").textContent = `${Number(profile.profile_age_hours || 0).toFixed(1)}h`;
+      document.getElementById("ap-cold").style.display = profile.cold_start ? "" : "none";
+      document.getElementById("ap-avg-prompt").textContent = fmtNum(Math.round(Number(baseline.avg_prompt_length || 0)));
+      document.getElementById("ap-tool-freq").textContent = Number(baseline.tool_call_frequency || 0).toFixed(2);
+      document.getElementById("ap-cache-hit").textContent = `${(Number(baseline.cache_hit_rate || 0) * 100).toFixed(1)}%`;
+      document.getElementById("ap-error-rate").textContent = `${(Number(baseline.error_rate || 0) * 100).toFixed(1)}%`;
+      const patterns = Array.isArray(profile.detected_patterns) ? profile.detected_patterns : [];
+      document.getElementById("ap-patterns").innerHTML = patterns.map((p)=> `<span class="profile-tag">${p}</span>`).join(" ");
+      const optimizations = Array.isArray(profile.cost_optimizations) ? profile.cost_optimizations : [];
+      document.getElementById("ap-optimizations").innerHTML = optimizations.map((o)=> `<li>${o}</li>`).join("");
+      const alerts = Array.isArray(profile.anomaly_alerts) ? profile.anomaly_alerts : [];
+      document.getElementById("ap-alerts").innerHTML = alerts.slice(-5).map((a)=>{
+        return `<div class="profile-alert"><strong>${String(a.severity || "low").toUpperCase()}</strong> · ${String(a.reason || "n/a")}<div class="profile-kv">${String(a.timestamp || "")}</div></div>`;
+      }).join("");
+      drawProfileSparkline(Array.isArray(profile.reliability_history) ? profile.reliability_history : []);
+    }
+    async function loadAgentProfile(agentId){
+      if(!agentId){ renderAgentProfile(null); return; }
+      const profile = await fetchData(`/api/v1/agents/${encodeURIComponent(agentId)}/profile`);
+      renderAgentProfile(profile);
     }
 
     function renderSessions(data){
@@ -2356,13 +2583,14 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     }
 
     async function pollShield(){
-      const [data, stats, savings, health] = await Promise.all([
+      const [data, stats, savings, health, tokenYield] = await Promise.all([
         fetchData("/api/dashboard/overview"),
         fetchData("/stats"),
         fetchData("/api/v1/savings"),
         fetchData("/api/v1/agents/__global__/health"),
+        fetchData("/api/v1/token-yield/global"),
       ]);
-      renderOverview(data, stats, savings);
+      renderOverview(data, stats, savings, tokenYield);
       renderAgentHealth((health && typeof health === "object") ? health : (data && data.agent_health ? data.agent_health : {}));
     }
     async function pollAgents(){
@@ -2454,6 +2682,13 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       document.querySelectorAll(".tab-btn[data-tab]").forEach((btn)=>{
         btn.addEventListener("click", ()=> switchTab(btn.dataset.tab));
       });
+      const profileSelect = document.getElementById("agent-profile-select");
+      if(profileSelect){
+        profileSelect.addEventListener("change", ()=>{
+          selectedAgentProfileId = profileSelect.value || "";
+          loadAgentProfile(selectedAgentProfileId);
+        });
+      }
       document.getElementById("flow-session-select").addEventListener("change", ()=> pollFlow());
       const flowShareBtn = document.getElementById("flow-share-btn");
       if(flowShareBtn){

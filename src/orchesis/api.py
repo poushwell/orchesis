@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, Response
 from orchesis.auth import AgentAuthenticator, CredentialStore
 from orchesis.agent_health import AgentHealthScore
 from orchesis.audit import AuditEngine, AuditQuery
+from orchesis.compliance_report import ComplianceReportGenerator
 from orchesis.agent_store import AgentPolicyStore, build_agent_overwatch_snapshot
 from orchesis.config import load_policy, validate_policy, validate_policy_warnings
 from orchesis.corpus import RegressionCorpus
@@ -38,8 +39,12 @@ from orchesis.structured_log import StructuredLogger
 from orchesis.sync import PolicySyncServer
 from orchesis.telemetry import JsonlEmitter
 from orchesis.flow_xray import FlowAnalyzer
+from orchesis.context_dna import ContextDNA
+from orchesis.context_dna_store import ContextDNAStore
+from orchesis.agent_profile import AgentIntelligenceProfile
 from orchesis.pipeline import check_budget
 from orchesis.evidence_record import EvidenceRecord
+from orchesis.token_yield import TokenYieldTracker
 from orchesis import __version__
 
 
@@ -102,6 +107,8 @@ def create_api_app(
     app.state.auth_mode = "optional"
     app.state.flow_analyzer = FlowAnalyzer({"enabled": True})
     app.state.flow_decisions = {}
+    app.state.token_yield = TokenYieldTracker()
+    app.state.dna_store = ContextDNAStore(str(policy_file.parent / ".orchesis" / "dna"))
     mcp_monitor_cfg = (
         current_version.policy.get("mcp_monitor")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("mcp_monitor"), dict)
@@ -323,6 +330,12 @@ def create_api_app(
         decisions = audit.query(AuditQuery(session_id=session_id, limit=1_000_000))
         return EvidenceRecord().build(session_id=session_id, decisions_log=decisions)
 
+    def _build_compliance_report(agent_id: str) -> dict[str, Any]:
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        filtered = [event for event in events if str(getattr(event, "agent_id", "")) == str(agent_id)]
+        return ComplianceReportGenerator().generate(agent_id=str(agent_id), decisions_log=filtered)
+
     def _record_flow_decision(payload: dict[str, Any], response: dict[str, Any]) -> None:
         session_id = _extract_session_id(payload)
         if session_id is None:
@@ -369,6 +382,13 @@ def create_api_app(
         )
         if len(decisions) > 2000:
             del decisions[:-2000]
+        agent_id = str(response.get("agent_id", "__global__") or "__global__")
+        dna = app.state.dna_store.get(agent_id)
+        if dna is None:
+            dna = ContextDNA(agent_id=agent_id)
+        dna.observe(payload, response)
+        dna.compute_baseline()
+        app.state.dna_store.save(dna)
 
     @app.middleware("http")
     async def trace_headers_middleware(request: Request, call_next):
@@ -505,6 +525,24 @@ def create_api_app(
         headers = {"Content-Disposition": f'attachment; filename="evidence_{session_id}.json"'}
         return Response(content=payload, media_type="application/json", headers=headers)
 
+    @app.get("/api/v1/compliance/report/{agent_id}")
+    def compliance_report_endpoint(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return _build_compliance_report(agent_id)
+
+    @app.get("/api/v1/compliance/report/{agent_id}/text")
+    def compliance_report_text_endpoint(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> Response:
+        _require_auth(authorization)
+        report = _build_compliance_report(agent_id)
+        text_report = ComplianceReportGenerator().export_text(report)
+        return Response(content=text_report, media_type="text/plain; charset=utf-8")
+
     @app.post("/api/v1/policy/reload")
     def policy_reload(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
@@ -612,6 +650,21 @@ def create_api_app(
             previous_score = float(scorer.compute(previous_stats)["score"])
         health = scorer.compute({**current_stats, "previous_score": previous_score})
         return {"agent_id": agent_id, **health}
+
+    @app.get("/api/v1/agents/{agent_id}/profile")
+    def get_agent_profile(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        health = get_agent_health(agent_id, authorization)
+        builder = AgentIntelligenceProfile()
+        return builder.build(
+            agent_id=agent_id,
+            dna_store=app.state.dna_store,
+            health_score=health,
+            decisions_log=app.state.decisions_log,
+        )
 
     @app.get("/api/v1/overwatch")
     def get_overwatch(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -787,6 +840,19 @@ def create_api_app(
             "subscriber_count": event_bus.subscriber_count,
             "corpus_size": corpus_stats["total"],
         }
+
+    @app.get("/api/v1/token-yield/{session_id}")
+    def token_yield_session(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.token_yield.get_yield(session_id)
+
+    @app.get("/api/v1/token-yield/global")
+    def token_yield_global(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.token_yield.get_global_stats()
 
     @app.get("/api/v1/mcp/monitor/status")
     def mcp_monitor_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -993,6 +1059,29 @@ def create_api_app(
         }
         if debug_mode:
             response["debug_trace"] = decision.debug_trace
+        session_id = _extract_session_id(payload)
+        if not isinstance(session_id, str) or not session_id.strip():
+            session_id = str(payload_context.get("trace_id", "__global__"))
+        prompt_tokens_raw = payload.get("prompt_tokens", payload_context.get("prompt_tokens", 0))
+        completion_tokens_raw = payload.get("completion_tokens", payload_context.get("completion_tokens", 0))
+        unique_ratio_raw = payload.get(
+            "unique_content_ratio",
+            payload_context.get("unique_content_ratio", 1.0),
+        )
+        cache_hit_raw = payload.get("cache_hit", payload_context.get("cache_hit", False))
+        prompt_tokens = int(prompt_tokens_raw) if isinstance(prompt_tokens_raw, int | float) else 0
+        completion_tokens = (
+            int(completion_tokens_raw) if isinstance(completion_tokens_raw, int | float) else 0
+        )
+        unique_ratio = float(unique_ratio_raw) if isinstance(unique_ratio_raw, int | float) else 1.0
+        cache_hit = bool(cache_hit_raw)
+        app.state.token_yield.record(
+            session_id=session_id,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cache_hit=cache_hit,
+            unique_content_ratio=unique_ratio,
+        )
         return response
 
     def _authenticate_request(request: Request, eval_payload: dict[str, Any]) -> tuple[bool, str]:

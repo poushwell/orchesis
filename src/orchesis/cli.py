@@ -26,6 +26,7 @@ from yaml import YAMLError
 from orchesis.auth import AgentAuthenticator, CredentialStore
 from orchesis.audit import AuditEngine, AuditQuery
 from orchesis.compliance import ComplianceEngine, FRAMEWORK_CHECKS, FrameworkCrossReference
+from orchesis.compliance_report import ComplianceReportGenerator
 from orchesis.ari import AgentReadinessIndex
 from orchesis.benchmark import BenchmarkSuite
 from orchesis.contrib.ioc_database import IoCMatcher
@@ -3054,12 +3055,46 @@ def readiness_command(agent_id: str, config_path: str) -> None:
 
 
 @main.command("compliance")
-@click.argument("framework")
+@click.argument("framework", required=False)
+@click.option("--agent", "agent_id", default=None)
 @click.option("--policy", "policy_path", default="policy.yaml")
+@click.option("--decisions", "decisions_path", default=str(DEFAULT_DECISIONS_PATH))
 @click.option("--format", "output_format", type=click.Choice(["md", "json", "text"]), default="text")
 @click.option("--output", "output_path", type=click.Path(), default=None)
-def compliance_command(framework: str, policy_path: str, output_format: str, output_path: str | None) -> None:
+def compliance_command(
+    framework: str | None,
+    agent_id: str | None,
+    policy_path: str,
+    decisions_path: str,
+    output_format: str,
+    output_path: str | None,
+) -> None:
     """Generate compliance report(s) for one or all frameworks."""
+    if isinstance(agent_id, str) and agent_id.strip():
+        source = Path(decisions_path)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        filtered = [event for event in events if str(getattr(event, "agent_id", "")) == agent_id.strip()]
+        generator = ComplianceReportGenerator()
+        report = generator.generate(agent_id=agent_id.strip(), decisions_log=filtered)
+        if output_format == "json":
+            content = json.dumps(report, ensure_ascii=False, indent=2)
+        else:
+            content = generator.export_text(report)
+        if output_path is not None:
+            target = Path(output_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            click.echo(f"Report written to {target}")
+            return
+        click.echo(content)
+        return
+
+    if not isinstance(framework, str) or not framework.strip():
+        raise click.ClickException(
+            "framework is required unless --agent is provided (use framework/all/cross-map)"
+        )
+    framework = framework.strip()
+
     if framework == "cross-map":
         cross = FrameworkCrossReference()
         if output_format == "json":
