@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta:__legacy__"
 
 [project]
 name = "orchesis"
-version = "0.2.0"
+version = "0.2.1"
 description = "Transparent HTTP proxy for AI agents. Block threats, cut token waste, monitor your fleet. Zero code changes. MIT license."
 readme = "README-PYPI.md"
 license = {text = "MIT"}
