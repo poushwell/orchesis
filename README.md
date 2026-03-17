@@ -36,6 +36,18 @@ pip install orchesis[integrations]
 orchesis quickstart --preset openclaw
 ```
 
+## Architecture: two services
+
+Orchesis runs two services:
+- **Proxy** (port 8080) - intercepts LLM traffic
+- **API server** (port 8090) - Overwatch, agent management, budget control
+
+Quick start:
+```bash
+orchesis proxy --config orchesis.yaml   # terminal 1
+orchesis serve --policy orchesis.yaml   # terminal 2 (optional)
+```
+
 **One line change:**
 ```python
 # Before:

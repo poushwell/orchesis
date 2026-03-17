@@ -8,6 +8,8 @@ from urllib.error import HTTPError
 from urllib.request import Request as UrlRequest, urlopen
 
 from orchesis.demo import DEMO_STATS, DemoServer
+from tests.cli_test_utils import CliRunner
+from orchesis.cli import main
 
 
 def _pick_port() -> int:
@@ -139,4 +141,67 @@ def test_demo_overview_contains_compliance() -> None:
     _wait_for_server(port)
     payload = _get_json(f"http://127.0.0.1:{port}/api/dashboard/overview")
     assert "compliance_overview" in payload
+
+
+def test_demo_starts_both_services(monkeypatch) -> None:
+    import orchesis.cli as cli_module
+    import orchesis.proxy as proxy_module
+
+    events: list[str] = []
+
+    class _FakeProxy:
+        def __init__(self, policy_path=None, config=None):
+            _ = (policy_path, config)
+            events.append("proxy_init")
+
+        def start(self, blocking: bool = False) -> None:
+            events.append(f"proxy_start:{bool(blocking)}")
+
+        def stop(self) -> None:
+            events.append("proxy_stop")
+
+    class _FakeHTTPProxyConfig:
+        def __init__(self, host: str = "127.0.0.1", port: int = 8080):
+            _ = host
+            _ = port
+
+    class _FakeUvicorn:
+        class Config:
+            def __init__(self, app, host: str, port: int, log_level: str):
+                _ = (app, host, port, log_level)
+
+        class Server:
+            def __init__(self, cfg):
+                _ = cfg
+                self.should_exit = False
+
+            def run(self) -> None:
+                events.append("api_run")
+
+    def _fake_create_api_app(policy_path: str = "policy.yaml"):
+        events.append(f"api_app:{policy_path}")
+        return object()
+
+    monkeypatch.setattr(proxy_module, "LLMHTTPProxy", _FakeProxy)
+    monkeypatch.setattr(proxy_module, "HTTPProxyConfig", _FakeHTTPProxyConfig)
+    monkeypatch.setattr(
+        cli_module,
+        "_load_server_runtime",
+        lambda: (_FakeUvicorn, _fake_create_api_app, object, object),
+    )
+
+    def _stop_loop(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_module.time, "sleep", _stop_loop)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["demo", "--port", "8080", "--api-port", "8090"])
+    assert result.exit_code == 0
+    assert "Orchesis proxy:    http://localhost:8080" in result.output
+    assert "Orchesis API:      http://localhost:8090" in result.output
+    assert "Dashboard:         http://localhost:8080/dashboard" in result.output
+    assert "Overwatch API:     http://localhost:8090/api/v1/overwatch" in result.output
+    assert "proxy_start:False" in events
+    assert "api_run" in events
 

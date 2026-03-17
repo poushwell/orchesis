@@ -14,17 +14,42 @@ class QuickstartWizard:
         "openclaw": {
             "description": "Optimized for OpenClaw (Claude Code)",
             "upstream": "https://api.anthropic.com",
-            "features": ["security", "cost", "context_optimizer", "loop_detection"],
+            "features": [
+                "security",
+                "cost",
+                "context_optimizer",
+                "loop_detection",
+                "semantic_cache",
+                "recording",
+                "adaptive_detection",
+            ],
+        },
+        "anthropic": {
+            "description": "For Anthropic API agents",
+            "upstream": "https://api.anthropic.com",
+            "features": [
+                "security",
+                "cost",
+                "loop_detection",
+                "semantic_cache",
+                "recording",
+                "adaptive_detection",
+            ],
         },
         "openai": {
             "description": "For OpenAI API agents",
             "upstream": "https://api.openai.com",
-            "features": ["security", "cost", "semantic_cache"],
+            "features": ["security", "cost", "semantic_cache", "recording", "loop_detection"],
         },
         "generic": {
             "description": "Works with any LLM provider",
             "upstream": "https://api.openai.com",
-            "features": ["security", "cost"],
+            "features": ["security", "cost", "semantic_cache", "recording", "loop_detection"],
+        },
+        "default": {
+            "description": "Recommended default preset",
+            "upstream": "https://api.openai.com",
+            "features": ["security", "cost", "semantic_cache", "recording", "loop_detection"],
         },
         "minimal": {
             "description": "Just proxy + dashboard, no detection",
@@ -119,7 +144,7 @@ class QuickstartWizard:
             "budgets:",
             f"  daily: {float(max(0.0, budget)):.2f}",
             "recording:",
-            "  enabled: false",
+            "  enabled: true",
         ]
         if "security" in enabled:
             lines.extend(["threat_intel:", "  enabled: true"])
@@ -138,9 +163,24 @@ class QuickstartWizard:
                 ]
             )
         if "loop_detection" in enabled:
-            lines.extend(["loop_detection:", "  enabled: true"])
+            lines.extend(
+                [
+                    "loop_detection:",
+                    "  enabled: true",
+                    "  warn_threshold: 3",
+                    "  block_threshold: 5",
+                ]
+            )
         if "semantic_cache" in enabled:
-            lines.extend(["semantic_cache:", "  enabled: true"])
+            lines.extend(
+                [
+                    "semantic_cache:",
+                    "  enabled: true",
+                    "  similarity_threshold: 0.85",
+                ]
+            )
+        if "adaptive_detection" in enabled:
+            lines.extend(["adaptive_detection:", "  enabled: true"])
         if preset == "minimal":
             lines = [
                 "rules: []",
@@ -164,9 +204,10 @@ class QuickstartWizard:
         print(f"[OK] Config written to {config_path}")
         print("")
         print("Next steps:")
-        print(f"  1. Start proxy:  orchesis proxy --config {config_path}")
-        print("  2. Point your agent to: http://localhost:8080")
-        print("  3. Open dashboard: http://localhost:8080/dashboard")
+        print(f"  Start proxy:   orchesis proxy --config {config_path}")
+        print(f"  Start API:     orchesis serve --policy {config_path} --port 8090")
+        print("  Dashboard:     http://localhost:8080/dashboard")
+        print("  Overwatch:     http://localhost:8090/api/v1/overwatch")
         print("")
         if preset == "openclaw":
             print("Optional for Claude Code:")

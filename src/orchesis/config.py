@@ -587,7 +587,7 @@ def _normalize_loop_detection(policy: dict[str, Any]) -> None:
     raw["similarity_check"] = bool(raw.get("similarity_check", True))
     content_loop_raw = raw.get("content_loop")
     content_loop = content_loop_raw if isinstance(content_loop_raw, dict) else {}
-    content_loop["enabled"] = bool(content_loop.get("enabled", False))
+    content_loop["enabled"] = bool(content_loop.get("enabled", raw["enabled"]))
     window = content_loop.get("window_seconds", 300)
     max_identical = content_loop.get("max_identical", 5)
     cooldown = content_loop.get("cooldown_seconds", 300)

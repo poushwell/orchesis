@@ -226,6 +226,7 @@ class ContentLoopDetector:
         self._history: dict[str, list[float]] = {}
         self._cooldowns: dict[str, float] = {}
         self._cooldown_level: dict[str, int] = {}
+        self._last_hash_by_session: dict[str, str] = {}
         self._lock = threading.Lock()
         self._stats = {"detected": 0, "blocked": 0, "total_checked": 0}
 
@@ -261,11 +262,20 @@ class ContentLoopDetector:
     def check(self, content: str, session_id: str = "") -> dict[str, Any]:
         now = time.monotonic()
         text = str(content or "")
+        safe_session = str(session_id or "default")
         content_hash = self._hash_content(text)
-        key = self._history_key(content_hash, session_id)
+        key = self._history_key(content_hash, safe_session)
         with self._lock:
             self._stats["total_checked"] += 1
             self._prune_locked(now)
+            prev_hash = self._last_hash_by_session.get(safe_session)
+            if isinstance(prev_hash, str) and prev_hash and prev_hash != content_hash:
+                prefix = f"{safe_session}:"
+                for table in (self._history, self._cooldowns, self._cooldown_level):
+                    stale = [item_key for item_key in table if str(item_key).startswith(prefix)]
+                    for stale_key in stale:
+                        table.pop(stale_key, None)
+            self._last_hash_by_session[safe_session] = content_hash
             cooldown_until = float(self._cooldowns.get(key, 0.0))
             current_count = len(self._history.get(key, []))
             if cooldown_until > now:

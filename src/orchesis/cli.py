@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import tracemalloc
 from concurrent.futures import ThreadPoolExecutor
@@ -315,7 +316,11 @@ def auth_verify(agent_id: str, tool_name: str, params_json: str, secret_key: str
 
 
 @main.command("quickstart")
-@click.option("--preset", type=click.Choice(["openclaw", "openai", "generic", "minimal"]), default=None)
+@click.option(
+    "--preset",
+    type=click.Choice(["openclaw", "anthropic", "openai", "generic", "default", "minimal"]),
+    default=None,
+)
 @click.option("--non-interactive", is_flag=True, default=False)
 @click.option("--budget", type=float, default=10.0)
 @click.option("--output", "output_path", default="orchesis.yaml")
@@ -327,12 +332,35 @@ def quickstart_command(
 ) -> None:
     """Interactive setup wizard for a working config."""
     wizard = QuickstartWizard()
-    _ = wizard.run(
+    output = wizard.run(
         non_interactive=bool(non_interactive),
         preset=preset,
         budget=float(budget),
         output_path=output_path,
     )
+    try:
+        generated = yaml.safe_load(Path(output).read_text(encoding="utf-8"))
+        if not isinstance(generated, dict):
+            generated = {}
+    except Exception:
+        generated = {}
+
+    semantic_cfg = generated.get("semantic_cache", {}) if isinstance(generated, dict) else {}
+    if isinstance(semantic_cfg, dict) and bool(semantic_cfg.get("enabled")):
+        click.echo("✓ semantic_cache: enabled")
+
+    recording_cfg = generated.get("recording", {}) if isinstance(generated, dict) else {}
+    if isinstance(recording_cfg, dict) and bool(recording_cfg.get("enabled")):
+        click.echo("✓ recording: enabled")
+
+    loop_cfg = generated.get("loop_detection", {}) if isinstance(generated, dict) else {}
+    if isinstance(loop_cfg, dict) and bool(loop_cfg.get("enabled")):
+        block_at = int(loop_cfg.get("block_threshold", 5) or 5)
+        click.echo(f"✓ loop_detection: enabled (block at {block_at} repeats)")
+
+    threat_cfg = generated.get("threat_intel", {}) if isinstance(generated, dict) else {}
+    if isinstance(threat_cfg, dict) and bool(threat_cfg.get("enabled")):
+        click.echo("✓ threat_intel: enabled")
     raise SystemExit(0)
 
 
@@ -834,7 +862,7 @@ def rollback(policy_path: str) -> None:
 
 
 @main.command()
-@click.option("--port", type=int, default=8080)
+@click.option("--port", type=int, default=8090)
 @click.option("--policy", "policy_path", type=click.Path(exists=True), default="policy.yaml")
 @click.option(
     "--plugins",
@@ -991,13 +1019,47 @@ def proxy_command(
 
 
 @main.command("demo")
-@click.option("--port", type=int, default=8080)
-def demo_command(port: int) -> None:
-    """Launch dashboard in demo mode with mock data."""
-    from orchesis.demo import DemoServer
+@click.option("--port", "proxy_port", type=int, default=8080)
+@click.option("--api-port", type=int, default=8090)
+@click.option("--policy", "policy_path", type=click.Path(), default="orchesis.yaml")
+def demo_command(proxy_port: int, api_port: int, policy_path: str) -> None:
+    """Launch local proxy + API services for a full demo."""
+    from orchesis.proxy import HTTPProxyConfig, LLMHTTPProxy
 
-    server = DemoServer()
-    server.start(port=max(1, int(port)))
+    uvicorn, create_api_app, _orchesis_proxy_cls, _proxy_config_cls = _load_server_runtime()
+    resolved_proxy_port = max(1, int(proxy_port))
+    resolved_api_port = max(1, int(api_port))
+    resolved_policy = str(Path(policy_path).expanduser())
+
+    proxy = LLMHTTPProxy(
+        policy_path=resolved_policy if Path(resolved_policy).exists() else None,
+        config=HTTPProxyConfig(host="127.0.0.1", port=resolved_proxy_port),
+    )
+    proxy.start(blocking=False)
+
+    api_app = create_api_app(policy_path=resolved_policy)
+    api_server = uvicorn.Server(
+        uvicorn.Config(api_app, host="127.0.0.1", port=resolved_api_port, log_level="warning")
+    )
+    api_thread = threading.Thread(target=api_server.run, daemon=True)
+    api_thread.start()
+
+    click.echo(f"Orchesis proxy:    http://localhost:{resolved_proxy_port}")
+    click.echo(f"Orchesis API:      http://localhost:{resolved_api_port}")
+    click.echo(f"Dashboard:         http://localhost:{resolved_proxy_port}/dashboard")
+    click.echo(f"Overwatch API:     http://localhost:{resolved_api_port}/api/v1/overwatch")
+    click.echo("")
+    click.echo("Press Ctrl+C to stop.")
+    try:
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        proxy.stop()
+        api_server.should_exit = True
+        if api_thread.is_alive():
+            api_thread.join(timeout=2.0)
 
 
 @main.command("launch")

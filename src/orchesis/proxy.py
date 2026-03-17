@@ -86,8 +86,11 @@ from orchesis.context_engine import ContextConfig, ContextEngine
 from orchesis.threat_intel import ThreatIntelConfig, ThreatMatcher
 from orchesis.semantic_cache import SemanticCache, SemanticCacheConfig
 from orchesis.spend_rate import SpendRateDetector, SpendWindow
+from orchesis.core.context_profile_logger import log_context_profile
+from orchesis.core.evidence_ledger import EvidenceLedger
 
 _HTTP_PROXY_LOGGER = logging.getLogger("orchesis.http_proxy")
+_evidence_ledger = EvidenceLedger()
 
 
 @dataclass
@@ -1850,12 +1853,20 @@ class LLMHTTPProxy:
             self._loop_detector = LoopDetector(config=self._loop_cfg)
         self._content_loop_detector: ContentLoopDetector | None = None
         content_loop_cfg = self._loop_cfg.get("content_loop")
-        if isinstance(content_loop_cfg, dict) and bool(content_loop_cfg.get("enabled", False)):
+        content_loop_enabled = False
+        if isinstance(content_loop_cfg, dict):
+            content_loop_enabled = bool(content_loop_cfg.get("enabled", False))
+        elif bool(self._loop_cfg.get("enabled", False)):
+            # Backward-compatible default: enable content-loop checks whenever
+            # loop_detection is enabled, even if content_loop subsection is absent.
+            content_loop_enabled = True
+        if content_loop_enabled:
+            safe_content_loop_cfg = content_loop_cfg if isinstance(content_loop_cfg, dict) else {}
             self._content_loop_detector = ContentLoopDetector(
-                window_seconds=int(content_loop_cfg.get("window_seconds", 300)),
-                max_identical=int(content_loop_cfg.get("max_identical", 5)),
-                cooldown_seconds=int(content_loop_cfg.get("cooldown_seconds", 300)),
-                hash_prefix_len=int(content_loop_cfg.get("hash_prefix_len", 256)),
+                window_seconds=int(safe_content_loop_cfg.get("window_seconds", self._loop_cfg.get("window_seconds", 300))),
+                max_identical=int(safe_content_loop_cfg.get("max_identical", self._loop_cfg.get("block_threshold", 5))),
+                cooldown_seconds=int(safe_content_loop_cfg.get("cooldown_seconds", 300)),
+                hash_prefix_len=int(safe_content_loop_cfg.get("hash_prefix_len", 256)),
             )
         spend_rate_cfg_raw = self._budget_cfg.get("spend_rate")
         self._spend_rate_cfg = spend_rate_cfg_raw if isinstance(spend_rate_cfg_raw, dict) else {}
@@ -3353,53 +3364,89 @@ class LLMHTTPProxy:
                 )
                 if loop_decision.action == "downgrade_model":
                     ctx.body["model"] = self._downgrade_model
-        if self._content_loop_detector is not None and isinstance(ctx.parsed_req.messages, list) and ctx.parsed_req.messages:
-            last_msg = ctx.parsed_req.messages[-1]
-            if isinstance(last_msg, dict) and str(last_msg.get("role", "")).lower() == "user":
-                content = last_msg.get("content", "")
-                if isinstance(content, str) and len(content) > 10:
-                    session_scope = (
-                        ctx.handler.headers.get("x-openclaw-session")
-                        or ctx.handler.headers.get("x-session-id")
-                        or ctx.handler.headers.get("x-orchesis-agent")
-                        or ctx.handler.headers.get("x-agent-id")
-                        or ctx.behavior_agent_id
-                        or ctx.handler.headers.get("user-agent")
-                        or "default"
+        if self._content_loop_detector is not None and "/v1/chat/completions" in str(ctx.handler.path):
+            last_user_message = self._extract_last_user_message(ctx.body)
+            if isinstance(last_user_message, str) and len(last_user_message) > 0:
+                session_scope = self._resolve_loop_session_scope(ctx)
+                result = self._content_loop_detector.check(last_user_message, session_scope)
+                ctx.content_loop_count = int(result.get("count", 0))
+                if result.get("action") == "block":
+                    self._loop_trigger_hits += 1
+                    self._inc("blocked")
+                    retry_after = int(result.get("retry_after", 300))
+                    _HTTP_PROXY_LOGGER.warning(
+                        "Loop detected: %s identical requests",
+                        int(result.get("count", 0)),
                     )
-                    result = self._content_loop_detector.check(content, str(session_scope))
-                    ctx.content_loop_count = int(result.get("count", 0))
-                    if result.get("action") == "block":
-                        self._loop_trigger_hits += 1
-                        self._inc("blocked")
-                        retry_after = int(result.get("retry_after", 300))
-                        _HTTP_PROXY_LOGGER.warning(
-                            "Loop detected: %s identical requests",
-                            int(result.get("count", 0)),
-                        )
-                        self._cost_tracker.record_loop_prevented_savings(self._estimated_avg_request_cost_usd)
-                        self._send_json(
-                            ctx.handler,
-                            429,
-                            {
-                                "error": {
-                                    "type": "content_loop_detected",
-                                    "message": (
-                                        f"Loop detected: {result.get('count', 0)} identical messages in "
-                                        f"{result.get('window_seconds', 0)}s."
-                                    ),
-                                    "retry_after": retry_after,
-                                }
-                            },
-                            extra_headers={
-                                "Retry-After": str(max(1, retry_after)),
-                                "X-Orchesis-Loop-Count": str(int(result.get("count", 0))),
-                            },
-                        )
-                        if self._alert_manager:
-                            self._alert_manager.alert(AlertEvent(severity=AlertSeverity.CRITICAL, event_type="loop_detected", title="Content loop blocked", details=f"{result.get('count', 0)} identical messages in {result.get('window_seconds', 0)}s", session_id=str(session_scope)))
-                        return False
+                    self._cost_tracker.record_loop_prevented_savings(self._estimated_avg_request_cost_usd)
+                    self._send_json(
+                        ctx.handler,
+                        429,
+                        {
+                            "error": {
+                                "type": "content_loop_detected",
+                                "message": (
+                                    f"Loop detected: {result.get('count', 0)} identical messages in "
+                                    f"{result.get('window_seconds', 0)}s."
+                                ),
+                                "retry_after": retry_after,
+                            }
+                        },
+                        extra_headers={
+                            "Retry-After": str(max(1, retry_after)),
+                            "X-Orchesis-Loop-Count": str(int(result.get("count", 0))),
+                        },
+                    )
+                    if self._alert_manager:
+                        self._alert_manager.alert(AlertEvent(severity=AlertSeverity.CRITICAL, event_type="loop_detected", title="Content loop blocked", details=f"{result.get('count', 0)} identical messages in {result.get('window_seconds', 0)}s", session_id=str(session_scope)))
+                    return False
+                content_loop_cfg = self._loop_cfg.get("content_loop")
+                content_warn_threshold = 3
+                if isinstance(content_loop_cfg, dict):
+                    content_warn_threshold = int(content_loop_cfg.get("warn_threshold", self._loop_cfg.get("warn_threshold", 3)))
+                else:
+                    content_warn_threshold = int(self._loop_cfg.get("warn_threshold", 3))
+                if int(result.get("count", 0)) >= max(1, content_warn_threshold):
+                    ctx.loop_warning_header = f"count={int(result.get('count', 0))}"
+                    ctx.was_loop_detected = True
         return True
+
+    @staticmethod
+    def _extract_last_user_message(body: dict[str, Any]) -> str | None:
+        messages = body.get("messages", [])
+        if not isinstance(messages, list):
+            return None
+        for msg in reversed(messages):
+            if not isinstance(msg, dict):
+                continue
+            if str(msg.get("role", "")).strip().lower() != "user":
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                trimmed = content.strip()
+                return trimmed or None
+        return None
+
+    @staticmethod
+    def _resolve_loop_session_scope(ctx: _RequestContext) -> str:
+        headers = ctx.handler.headers
+        stable_session = (
+            headers.get("x-openclaw-session")
+            or headers.get("x-session-id")
+            or headers.get("x-session")
+            or headers.get("x-orchesis-session-id")
+            or (ctx.session_id if isinstance(ctx.session_id, str) and ctx.session_id.strip() not in {"", "unknown"} else "")
+        )
+        if isinstance(stable_session, str) and stable_session.strip():
+            return stable_session.strip()
+        stable_agent = (
+            headers.get("x-orchesis-agent")
+            or headers.get("x-agent-id")
+            or (ctx.behavior_agent_id if isinstance(ctx.behavior_agent_id, str) else "")
+        )
+        if isinstance(stable_agent, str) and stable_agent.strip():
+            return f"agent:{stable_agent.strip()}"
+        return "default"
 
     def _phase_behavioral(self, ctx: _RequestContext) -> bool:
         if not self._behavioral_detector.enabled:
@@ -4609,6 +4656,57 @@ class LLMHTTPProxy:
                 outcome = self._experiment_manager._task_tracker.finalize_session(session_id)
                 if ctx.experiment_id and ctx.variant_name:
                     self._experiment_manager.record_task_outcome(ctx.experiment_id, ctx.variant_name, outcome)
+        tool_call_names: list[str] = []
+        for tool_call in getattr(ctx.parsed_req, "tool_calls", []):
+            name = getattr(tool_call, "name", "")
+            if isinstance(name, str) and name:
+                tool_call_names.append(name)
+
+        prompt_length = int(getattr(ctx.parsed_resp_obj, "input_tokens", 0)) if ctx.parsed_resp_obj is not None else 0
+        if prompt_length <= 0:
+            content_text = getattr(ctx.parsed_req, "content_text", "")
+            if isinstance(content_text, str):
+                prompt_length = len(content_text)
+
+        retry_count = 0
+        if isinstance(ctx.proc_result, dict):
+            retry_raw = ctx.proc_result.get("retry_count", 0)
+            if isinstance(retry_raw, int):
+                retry_count = max(0, retry_raw)
+
+        session_id_value = str(ctx.session_id or "default")
+        agent_id_value = str(ctx.behavior_agent_id or "unknown")
+        model_value = str(ctx.body.get("model", ctx.original_model))
+        latency_ms_value = (time.perf_counter() - float(ctx.request_started or 0.0)) * 1000.0
+
+        try:
+            log_context_profile(
+                session_id=session_id_value,
+                agent_id=agent_id_value,
+                prompt_length=prompt_length,
+                tool_calls=tool_call_names,
+                model=model_value,
+                latency_ms=latency_ms_value,
+                retry_count=retry_count,
+                compression_ratio=1.0,
+            )
+        except Exception:
+            pass
+
+        try:
+            _evidence_ledger.record(
+                {
+                    "agent_id": str(ctx.behavior_agent_id or "unknown"),
+                    "session_id": str(ctx.session_id or "default"),
+                    "model": str(ctx.body.get("model", ctx.original_model)),
+                    "decision": str(getattr(ctx, "final_decision", "FORWARD")),
+                    "latency_ms": round((time.perf_counter() - float(ctx.request_started or 0.0)) * 1000.0, 2),
+                    "retry_count": retry_count,
+                }
+            )
+        except Exception:
+            pass
+
         cost_value = float(ctx.proc_result.get("cost", 0.0)) if isinstance(ctx.proc_result, dict) else 0.0
         if cost_value > 0.0:
             self._cost_velocity.record(cost_value)

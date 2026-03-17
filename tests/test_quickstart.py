@@ -100,6 +100,16 @@ def test_next_steps_printed(tmp_path: Path, capsys) -> None:
     assert "orchesis proxy --config" in captured.out
 
 
+def test_quickstart_output_mentions_both_ports(tmp_path: Path, capsys) -> None:
+    out = tmp_path / "ports.yaml"
+    QuickstartWizard().run(non_interactive=True, preset="generic", output_path=out)
+    captured = capsys.readouterr()
+    assert "orchesis proxy --config" in captured.out
+    assert "orchesis serve --policy" in captured.out
+    assert "http://localhost:8080/dashboard" in captured.out
+    assert "http://localhost:8090/api/v1/overwatch" in captured.out
+
+
 def test_cli_quickstart_creates_file(tmp_path: Path) -> None:
     out = tmp_path / "cli.yaml"
     runner = CliRunner()
@@ -121,6 +131,58 @@ def test_cli_quickstart_budget(tmp_path: Path) -> None:
     assert result.exit_code == 0
     data = yaml.safe_load(out.read_text(encoding="utf-8"))
     assert float(data["budgets"]["daily"]) == 25.0
+
+
+def test_cli_quickstart_prints_feature_confirmations(tmp_path: Path) -> None:
+    out = tmp_path / "cli-confirm.yaml"
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["quickstart", "--preset", "openclaw", "--non-interactive", "--output", str(out)],
+    )
+    assert result.exit_code == 0
+    assert "✓ semantic_cache: enabled" in result.output
+    assert "✓ recording: enabled" in result.output
+    assert "✓ loop_detection: enabled (block at 5 repeats)" in result.output
+    assert "✓ threat_intel: enabled" in result.output
+
+
+def test_openclaw_preset_has_semantic_cache_enabled(tmp_path: Path) -> None:
+    out = tmp_path / "openclaw-semantic.yaml"
+    data = yaml.safe_load(
+        QuickstartWizard().run(non_interactive=True, preset="openclaw", output_path=out).read_text(encoding="utf-8")
+    )
+    assert data["semantic_cache"]["enabled"] is True
+    assert float(data["semantic_cache"]["similarity_threshold"]) == 0.85
+
+
+def test_openclaw_preset_has_recording_enabled(tmp_path: Path) -> None:
+    out = tmp_path / "openclaw-recording.yaml"
+    data = yaml.safe_load(
+        QuickstartWizard().run(non_interactive=True, preset="openclaw", output_path=out).read_text(encoding="utf-8")
+    )
+    assert data["recording"]["enabled"] is True
+
+
+def test_openclaw_preset_has_loop_detection_enabled(tmp_path: Path) -> None:
+    out = tmp_path / "openclaw-loop.yaml"
+    data = yaml.safe_load(
+        QuickstartWizard().run(non_interactive=True, preset="openclaw", output_path=out).read_text(encoding="utf-8")
+    )
+    assert data["loop_detection"]["enabled"] is True
+    assert int(data["loop_detection"]["warn_threshold"]) == 3
+    assert int(data["loop_detection"]["block_threshold"]) == 5
+
+
+def test_all_presets_have_required_fields(tmp_path: Path) -> None:
+    for preset in ("openai", "anthropic", "default"):
+        out = tmp_path / f"{preset}.yaml"
+        data = yaml.safe_load(
+            QuickstartWizard().run(non_interactive=True, preset=preset, output_path=out).read_text(encoding="utf-8")
+        )
+        assert data["semantic_cache"]["enabled"] is True
+        assert data["recording"]["enabled"] is True
+        assert data["loop_detection"]["enabled"] is True
 
 
 def test_interactive_defaults(monkeypatch, tmp_path: Path) -> None:

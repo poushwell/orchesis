@@ -556,6 +556,181 @@ loop_detection:
         upstream_server.server_close()
 
 
+def _post_chat_completion(proxy_port: int, message: str, session_id: str = "loop-session") -> tuple[int, dict[str, str], dict]:
+    req = UrlRequest(
+        f"http://127.0.0.1:{proxy_port}/v1/chat/completions",
+        data=json.dumps({"model": "gpt-4o", "messages": [{"role": "user", "content": message}]}).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer t",
+            "X-Session-Id": session_id,
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=3) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+            return int(resp.status), dict(resp.headers.items()), payload
+    except HTTPError as error:
+        payload = json.loads(error.read().decode("utf-8"))
+        return int(error.code), dict(error.headers.items()), payload
+
+
+def test_loop_detection_blocks_repeated_proxy_requests(tmp_path: Path) -> None:
+    policy = tmp_path / "policy-loop-block.yaml"
+    policy.write_text(
+        """
+rules: []
+loop_detection:
+  enabled: true
+  warn_threshold: 3
+  block_threshold: 5
+  window_seconds: 300
+  content_loop:
+    enabled: true
+    warn_threshold: 3
+    max_identical: 5
+  exact:
+    threshold: 999
+  fuzzy:
+    threshold: 999
+""".strip(),
+        encoding="utf-8",
+    )
+    _MockUpstreamHandler.response_status = 200
+    _MockUpstreamHandler.response_body = {"model": "gpt-4o-mini", "usage": {"prompt_tokens": 1, "completion_tokens": 1}, "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+    upstream_server, _ = _start_http_server(_MockUpstreamHandler)
+    port = _pick_free_port()
+    proxy = LLMHTTPProxy(
+        policy_path=str(policy),
+        config=HTTPProxyConfig(
+            host="127.0.0.1",
+            port=port,
+            upstream={
+                "openai": f"http://127.0.0.1:{upstream_server.server_address[1]}",
+                "anthropic": f"http://127.0.0.1:{upstream_server.server_address[1]}",
+            },
+        ),
+    )
+    proxy.start(blocking=False)
+    try:
+        for _ in range(4):
+            status, _, _ = _post_chat_completion(port, "Read HEARTBEAT.md")
+            assert status == 200
+        blocked_status, blocked_headers, blocked_payload = _post_chat_completion(port, "Read HEARTBEAT.md")
+        assert blocked_status == 429
+        assert blocked_payload.get("error", {}).get("type") == "content_loop_detected"
+        assert "X-Orchesis-Loop-Count" in blocked_headers
+    finally:
+        proxy.stop()
+        upstream_server.shutdown()
+        upstream_server.server_close()
+
+
+def test_loop_detection_warns_before_blocking(tmp_path: Path) -> None:
+    policy = tmp_path / "policy-loop-warn.yaml"
+    policy.write_text(
+        """
+rules: []
+loop_detection:
+  enabled: true
+  warn_threshold: 2
+  block_threshold: 4
+  window_seconds: 300
+  content_loop:
+    enabled: true
+    warn_threshold: 2
+    max_identical: 4
+  exact:
+    threshold: 999
+  fuzzy:
+    threshold: 999
+""".strip(),
+        encoding="utf-8",
+    )
+    _MockUpstreamHandler.response_status = 200
+    _MockUpstreamHandler.response_body = {"model": "gpt-4o-mini", "usage": {"prompt_tokens": 1, "completion_tokens": 1}, "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+    upstream_server, _ = _start_http_server(_MockUpstreamHandler)
+    port = _pick_free_port()
+    proxy = LLMHTTPProxy(
+        policy_path=str(policy),
+        config=HTTPProxyConfig(
+            host="127.0.0.1",
+            port=port,
+            upstream={
+                "openai": f"http://127.0.0.1:{upstream_server.server_address[1]}",
+                "anthropic": f"http://127.0.0.1:{upstream_server.server_address[1]}",
+            },
+        ),
+    )
+    proxy.start(blocking=False)
+    try:
+        status1, headers1, _ = _post_chat_completion(port, "Read HEARTBEAT.md")
+        status2, headers2, _ = _post_chat_completion(port, "Read HEARTBEAT.md")
+        status3, headers3, _ = _post_chat_completion(port, "Read HEARTBEAT.md")
+        status4, _, _ = _post_chat_completion(port, "Read HEARTBEAT.md")
+        assert status1 == 200 and "X-Orchesis-Loop-Warning" not in headers1
+        assert status2 == 200 and "X-Orchesis-Loop-Warning" in headers2
+        assert status3 == 200 and "X-Orchesis-Loop-Warning" in headers3
+        assert status4 == 429
+    finally:
+        proxy.stop()
+        upstream_server.shutdown()
+        upstream_server.server_close()
+
+
+def test_loop_detection_resets_after_different_content(tmp_path: Path) -> None:
+    policy = tmp_path / "policy-loop-reset.yaml"
+    policy.write_text(
+        """
+rules: []
+loop_detection:
+  enabled: true
+  warn_threshold: 2
+  block_threshold: 4
+  window_seconds: 300
+  content_loop:
+    enabled: true
+    warn_threshold: 2
+    max_identical: 4
+  exact:
+    threshold: 999
+  fuzzy:
+    threshold: 999
+""".strip(),
+        encoding="utf-8",
+    )
+    _MockUpstreamHandler.response_status = 200
+    _MockUpstreamHandler.response_body = {"model": "gpt-4o-mini", "usage": {"prompt_tokens": 1, "completion_tokens": 1}, "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+    upstream_server, _ = _start_http_server(_MockUpstreamHandler)
+    port = _pick_free_port()
+    proxy = LLMHTTPProxy(
+        policy_path=str(policy),
+        config=HTTPProxyConfig(
+            host="127.0.0.1",
+            port=port,
+            upstream={
+                "openai": f"http://127.0.0.1:{upstream_server.server_address[1]}",
+                "anthropic": f"http://127.0.0.1:{upstream_server.server_address[1]}",
+            },
+        ),
+    )
+    proxy.start(blocking=False)
+    try:
+        status1, _, _ = _post_chat_completion(port, "Read HEARTBEAT.md")
+        status2, headers2, _ = _post_chat_completion(port, "Read HEARTBEAT.md")
+        status3, headers3, _ = _post_chat_completion(port, "Read DIFFERENT.md")
+        status4, headers4, _ = _post_chat_completion(port, "Read HEARTBEAT.md")
+        assert status1 == 200
+        assert status2 == 200 and "X-Orchesis-Loop-Warning" in headers2
+        assert status3 == 200 and "X-Orchesis-Loop-Warning" not in headers3
+        assert status4 == 200 and "X-Orchesis-Loop-Warning" not in headers4
+    finally:
+        proxy.stop()
+        upstream_server.shutdown()
+        upstream_server.server_close()
+
+
 def test_llm_proxy_forwards_allowed_request_to_upstream() -> None:
     _MockUpstreamHandler.captured_paths = []
     _MockUpstreamHandler.captured_bodies = []

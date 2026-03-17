@@ -52,11 +52,26 @@ def get_openclaw_preset() -> dict[str, Any]:
     return {
         "default_action": "allow",
         "capabilities": capabilities,
+        "semantic_cache": {
+            "enabled": True,
+            "similarity_threshold": 0.85,
+        },
+        "recording": {
+            "enabled": True,
+        },
+        "loop_detection": {
+            "enabled": True,
+            "warn_threshold": 3,
+            "block_threshold": 5,
+        },
         "threat_intel": {
             "enabled": True,
             "disabled_threats": ["ORCH-TA-002"],
             "default_action": "warn",
             "severity_actions": {"critical": "warn", "high": "warn", "medium": "log"},
+        },
+        "adaptive_detection": {
+            "enabled": True,
         },
         "cascade": {
             "respect_client_tokens": True,
