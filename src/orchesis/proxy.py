@@ -84,6 +84,7 @@ from orchesis.compliance import ComplianceEngine, Framework, Severity
 from orchesis.connection_pool import ConnectionPool, PoolConfig, PooledConnection
 from orchesis.experiment import ExperimentConfig, ExperimentManager
 from orchesis.context_engine import ContextConfig, ContextEngine
+from orchesis.context_budget import ContextBudget
 from orchesis.threat_intel import ThreatIntelConfig, ThreatMatcher
 from orchesis.semantic_cache import SemanticCache, SemanticCacheConfig
 from orchesis.spend_rate import SpendRateDetector, SpendWindow
@@ -2055,6 +2056,10 @@ class LLMHTTPProxy:
         self._context_optimizer: ContextOptimizer | None = None
         if isinstance(context_opt_cfg, dict) and bool(context_opt_cfg.get("enabled", False)):
             self._context_optimizer = ContextOptimizer(context_opt_cfg)
+        context_budget_cfg = self._policy.get("context_budget")
+        self._context_budget: ContextBudget | None = None
+        if isinstance(context_budget_cfg, dict) and bool(context_budget_cfg.get("enabled", False)):
+            self._context_budget = ContextBudget(context_budget_cfg)
         mast_cfg = self._policy.get("mast")
         self._mast: MASTDetectors | None = None
         if isinstance(mast_cfg, dict) and bool(mast_cfg.get("enabled", False)):
@@ -2178,6 +2183,8 @@ class LLMHTTPProxy:
             payload["mast"] = self._mast.get_stats()
         if self._context_optimizer is not None:
             payload["context_optimizer"] = self._context_optimizer.get_stats()
+        if self._context_budget is not None:
+            payload["context_budget"] = self._context_budget.get_stats()
         if self._auto_healer is not None:
             payload["auto_healing"] = self._auto_healer.get_stats()
         if self._thompson is not None:
@@ -4121,6 +4128,27 @@ class LLMHTTPProxy:
                 ctx.proc_result["context_original_tokens"] = int(opt_result.original_tokens)
                 ctx.proc_result["context_optimized_tokens"] = int(opt_result.optimized_tokens)
                 ctx.proc_result["context_optimizations_applied"] = list(opt_result.optimizations_applied)
+        if self._context_budget is not None and self._context_budget.enabled:
+            messages = ctx.body.get("messages")
+            if isinstance(messages, list) and messages:
+                model = str(ctx.body.get("model", "") or "")
+                model_windows = self._context_budget.model_context_windows
+                max_window = int(model_windows.get(model, 0) or 0) if isinstance(model_windows, dict) else 0
+                used_tokens = self._context_budget.estimate_tokens(messages)
+                level = self._context_budget.check_level(used_tokens=used_tokens, max_tokens=max_window)
+                if level != "normal":
+                    degraded = self._context_budget.apply(messages=messages, level=level, max_tokens=max_window)
+                    ctx.body["messages"] = validate_tool_chain(degraded)
+                    ctx.session_headers["X-Orchesis-Context-Level"] = level
+                    ctx.proc_result["context_budget_level"] = level
+                    _HTTP_PROXY_LOGGER.info(
+                        "context budget degradation applied level=%s model=%s used_tokens=%s max_tokens=%s session_id=%s",
+                        level,
+                        model,
+                        used_tokens,
+                        max_window,
+                        ctx.session_id,
+                    )
         if self._context_engine is None or not self._context_engine.enabled:
             return True
         messages = ctx.body.get("messages")

@@ -77,6 +77,7 @@ from orchesis.mutations import MutationEngine
 from orchesis.marketplace import PolicyMarketplace
 from orchesis.structured_log import StructuredLogger
 from orchesis.templates import TEMPLATE_NAMES, load_template_text
+from orchesis.evidence_record import EvidenceRecord
 from orchesis import __version__
 
 DEFAULT_KEYS_DIR = Path(".orchesis") / "keys"
@@ -2637,6 +2638,34 @@ def audit(
             f"{verified_count} verified, {tampered_count} tampered, {unsigned_count} unsigned"
         )
     state_tracker.flush()
+
+
+@main.command("evidence")
+@click.option("--session", "session_id", required=True)
+@click.option("--format", "output_format", type=click.Choice(["json", "text"]), default="json")
+@click.option("--output", "output_path", type=click.Path(), default=None)
+def evidence_command(session_id: str, output_format: str, output_path: str | None) -> None:
+    """Export Evidence Record for one session."""
+    engine = AuditEngine(str(DEFAULT_DECISIONS_PATH))
+    decisions = engine.query(AuditQuery(session_id=session_id, limit=1_000_000))
+    record = EvidenceRecord().build(session_id=session_id, decisions_log=decisions)
+    if output_format == "text":
+        text_report = EvidenceRecord().export_text(record)
+        if isinstance(output_path, str) and output_path.strip():
+            target = Path(output_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text_report, encoding="utf-8")
+            click.echo(f"Saved: {target}")
+        else:
+            click.echo(text_report)
+        return
+    target_path = (
+        output_path
+        if isinstance(output_path, str) and output_path.strip()
+        else str(Path(".orchesis") / f"evidence_{session_id}.json")
+    )
+    saved = EvidenceRecord().export_json(record, target_path)
+    click.echo(f"Saved: {saved}")
 
 
 def _normalize_audit_entry(entry: dict[str, Any]) -> dict[str, Any] | None:

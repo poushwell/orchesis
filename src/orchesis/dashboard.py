@@ -258,6 +258,39 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       -webkit-text-fill-color: transparent;
     }
     .hero-health { --hero-accent: rgba(90,168,255,0.95); }
+    .agent-health-widget {
+      border: 1px solid rgba(90,168,255,0.35);
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, rgba(90,168,255,0.12), rgba(90,168,255,0.04));
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+    .ah-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .ah-score {
+      font-size: clamp(44px, 8vw, 68px);
+      line-height: 1;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+      color: #34d399;
+    }
+    .ah-grade {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-weight: 800;
+      font-size: 13px;
+    }
+    .ah-trend {
+      font-size: 12px;
+      color: var(--text-secondary);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+    .ah-grid { display: grid; gap: 8px; }
+    .ah-row { display: grid; gap: 4px; }
+    .ah-row-head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--text-secondary); }
+    .ah-bar { height: 8px; border-radius: 999px; background: rgba(255,255,255,0.08); overflow: hidden; }
+    .ah-bar > div { height: 100%; border-radius: inherit; background: #34d399; width: 0%; }
     .panel {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -805,6 +838,36 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     </div>
 
     <section id="shield" class="screen active">
+      <div class="agent-health-widget">
+        <div class="ah-head">
+          <div>
+            <div class="subtle">Agent Health Score</div>
+            <div id="ah-score" class="ah-score">0</div>
+          </div>
+          <div style="display:grid;justify-items:end;gap:6px;">
+            <span id="ah-grade" class="ah-grade">D</span>
+            <span id="ah-trend" class="ah-trend">→ stable</span>
+          </div>
+        </div>
+        <div class="ah-grid">
+          <div class="ah-row">
+            <div class="ah-row-head"><span>Security</span><span id="ah-security">0</span></div>
+            <div class="ah-bar"><div id="ah-bar-security"></div></div>
+          </div>
+          <div class="ah-row">
+            <div class="ah-row-head"><span>Cost Efficiency</span><span id="ah-cost-efficiency">0</span></div>
+            <div class="ah-bar"><div id="ah-bar-cost-efficiency"></div></div>
+          </div>
+          <div class="ah-row">
+            <div class="ah-row-head"><span>Context Quality</span><span id="ah-context-quality">0</span></div>
+            <div class="ah-bar"><div id="ah-bar-context-quality"></div></div>
+          </div>
+          <div class="ah-row">
+            <div class="ah-row-head"><span>Reliability</span><span id="ah-reliability">0</span></div>
+            <div class="ah-bar"><div id="ah-bar-reliability"></div></div>
+          </div>
+        </div>
+      </div>
       <div class="hero-metrics">
         <div class="hero-card hero-blocked">
           <div class="hero-number" id="blocked-count">0</div>
@@ -1061,6 +1124,21 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       <div class="panel">
         <div class="section-title"><strong>Compliance Overview</strong></div>
         <div id="cmp-overview-text" class="subtle" style="margin-top:8px;"></div>
+      </div>
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <div class="section-title"><strong>Evidence Record</strong></div>
+          <span class="badge">EU AI Act Article 12</span>
+        </div>
+        <div class="subtle" style="margin-top:8px;">
+          Record ID: <span id="evidence-record-id">--</span> ·
+          Session ID: <span id="evidence-session-id">--</span> ·
+          Integrity Hash: <span id="evidence-record-hash">--</span>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+          <button id="export-evidence-json-btn" class="tab-btn" style="padding:6px 10px;">Export Evidence Record (JSON)</button>
+          <button id="export-evidence-text-btn" class="tab-btn" style="padding:6px 10px;">Export Text Report</button>
+        </div>
       </div>
     </section>
 
@@ -1491,6 +1569,48 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       renderCostChart(Array.isArray(data.cost_timeline) ? data.cost_timeline : []);
       renderSavings(stats || {});
       renderOpenClawSavings(savings || {});
+    }
+
+    function renderAgentHealth(payload){
+      const health = (payload && typeof payload === "object") ? payload : {};
+      const score = Math.max(0, Math.min(100, Number(health.score || 0)));
+      const grade = String(health.grade || "D").toUpperCase();
+      const trend = String(health.trend || "stable").toLowerCase();
+      const breakdown = (health.breakdown && typeof health.breakdown === "object") ? health.breakdown : {};
+      const scoreEl = document.getElementById("ah-score");
+      const gradeEl = document.getElementById("ah-grade");
+      const trendEl = document.getElementById("ah-trend");
+      if (scoreEl) {
+        scoreEl.textContent = score.toFixed(0);
+        scoreEl.style.color = score >= 85 ? "#34d399" : (score >= 70 ? "#facc15" : "#f97316");
+      }
+      if (gradeEl) {
+        gradeEl.textContent = grade;
+      }
+      if (trendEl) {
+        const trendMap = {
+          improving: "↑ improving",
+          stable: "→ stable",
+          degrading: "↓ degrading",
+        };
+        trendEl.textContent = trendMap[trend] || "→ stable";
+      }
+      const keys = [
+        ["security", "ah-security", "ah-bar-security"],
+        ["cost_efficiency", "ah-cost-efficiency", "ah-bar-cost-efficiency"],
+        ["context_quality", "ah-context-quality", "ah-bar-context-quality"],
+        ["reliability", "ah-reliability", "ah-bar-reliability"],
+      ];
+      keys.forEach(([key, textId, barId])=>{
+        const value = Math.max(0, Math.min(100, Number(breakdown[key] || 0)));
+        const textEl = document.getElementById(textId);
+        const barEl = document.getElementById(barId);
+        if (textEl) textEl.textContent = value.toFixed(0);
+        if (barEl) {
+          barEl.style.width = `${value.toFixed(1)}%`;
+          barEl.style.background = value >= 85 ? "#34d399" : (value >= 70 ? "#facc15" : "#f97316");
+        }
+      });
     }
 
     function renderSavings(stats) {
@@ -2236,12 +2356,14 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     }
 
     async function pollShield(){
-      const [data, stats, savings] = await Promise.all([
+      const [data, stats, savings, health] = await Promise.all([
         fetchData("/api/dashboard/overview"),
         fetchData("/stats"),
         fetchData("/api/v1/savings"),
+        fetchData("/api/v1/agents/__global__/health"),
       ]);
       renderOverview(data, stats, savings);
+      renderAgentHealth((health && typeof health === "object") ? health : (data && data.agent_health ? data.agent_health : {}));
     }
     async function pollAgents(){
       const data = await fetchData("/api/dashboard/agents");
@@ -2351,6 +2473,35 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       if(exportBtn){
         exportBtn.addEventListener("click", ()=>{
           window.open("/api/compliance/report?format=json", "_blank");
+        });
+      }
+      const evidenceJsonBtn = document.getElementById("export-evidence-json-btn");
+      const evidenceTextBtn = document.getElementById("export-evidence-text-btn");
+      function syncEvidenceMeta(record){
+        if(!record || typeof record !== "object"){ return; }
+        const rid = document.getElementById("evidence-record-id");
+        const sid = document.getElementById("evidence-session-id");
+        const hash = document.getElementById("evidence-record-hash");
+        if(rid){ rid.textContent = String(record.record_id || "--"); }
+        if(sid){ sid.textContent = String(record.session_id || "--"); }
+        if(hash){ hash.textContent = String((record.integrity || {}).record_hash || "--"); }
+      }
+      if(evidenceJsonBtn){
+        evidenceJsonBtn.addEventListener("click", async ()=>{
+          const sid = (prompt("Session ID for Evidence Record:", "") || "").trim();
+          if(!sid){ return; }
+          try{
+            const record = await fetchData(`http://localhost:8090/api/v1/evidence/${encodeURIComponent(sid)}`);
+            syncEvidenceMeta(record);
+          }catch(_err){}
+          window.open(`http://localhost:8090/api/v1/evidence/${encodeURIComponent(sid)}/download`, "_blank");
+        });
+      }
+      if(evidenceTextBtn){
+        evidenceTextBtn.addEventListener("click", ()=>{
+          const sid = (prompt("Session ID for Evidence Record:", "") || "").trim();
+          if(!sid){ return; }
+          window.open(`http://localhost:8090/api/v1/evidence/${encodeURIComponent(sid)}/text`, "_blank");
         });
       }
       const owCards = document.getElementById("ow-view-cards");

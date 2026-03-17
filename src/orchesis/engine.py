@@ -1723,7 +1723,8 @@ def evaluate(
     evaluation_now = now if now is not None else datetime.now(timezone.utc)
     agent_id = _resolve_agent_id(request)
     session_id = _resolve_session_id(request)
-    identity = registry.get(agent_id) if registry is not None else None
+    identity_getter = getattr(registry, "get", None) if registry is not None else None
+    identity = identity_getter(agent_id) if callable(identity_getter) else None
     effective_tier_for_eval = _normalize_tier(identity)
     policy_version_hash = _policy_version_hash(policy) if (emitter is not None or debug) else ""
     policy_version = policy_version_hash if emitter is not None else None
@@ -1920,6 +1921,19 @@ def evaluate(
             return decision
 
     if not policy:
+        if registry is not None and hasattr(registry, "run_all"):
+            try:
+                evaluator_results = registry.run_all(request, safe_context)
+            except Exception as error:  # noqa: BLE001
+                evaluator_results = []
+                reasons.append(f"warning: evaluator registry unavailable ({error})")
+            for result in evaluator_results:
+                action = getattr(result, "action", "allow")
+                reason = str(getattr(result, "reason", ""))
+                if action == "deny":
+                    reasons.append(f"evaluator:{reason}")
+                elif action == "warn":
+                    reasons.append(f"warning:evaluator:{reason}")
         decision = Decision(
             allowed=len(reasons) == 0, reasons=reasons, rules_checked=rules_checked
         )
@@ -1939,6 +1953,19 @@ def evaluate(
 
     rules = policy.get("rules")
     if not isinstance(rules, list) or len(rules) == 0:
+        if registry is not None and hasattr(registry, "run_all"):
+            try:
+                evaluator_results = registry.run_all(request, safe_context)
+            except Exception as error:  # noqa: BLE001
+                evaluator_results = []
+                reasons.append(f"warning: evaluator registry unavailable ({error})")
+            for result in evaluator_results:
+                action = getattr(result, "action", "allow")
+                reason = str(getattr(result, "reason", ""))
+                if action == "deny":
+                    reasons.append(f"evaluator:{reason}")
+                elif action == "warn":
+                    reasons.append(f"warning:evaluator:{reason}")
         decision = Decision(
             allowed=len(reasons) == 0, reasons=reasons, rules_checked=rules_checked
         )
@@ -2232,6 +2259,21 @@ def evaluate(
             except Exception:
                 reasons.append("state_error: rate limit state unavailable, denying for safety")
                 allowed = False
+
+    if registry is not None and hasattr(registry, "run_all"):
+        try:
+            evaluator_results = registry.run_all(request, safe_context)
+        except Exception as error:  # noqa: BLE001
+            evaluator_results = []
+            reasons.append(f"warning: evaluator registry unavailable ({error})")
+        for result in evaluator_results:
+            action = getattr(result, "action", "allow")
+            reason = str(getattr(result, "reason", ""))
+            if action == "deny":
+                allowed = False
+                reasons.append(f"evaluator:{reason}")
+            elif action == "warn":
+                reasons.append(f"warning:evaluator:{reason}")
 
     decision = Decision(allowed=allowed, reasons=reasons, rules_checked=rules_checked)
     if decision.allowed:

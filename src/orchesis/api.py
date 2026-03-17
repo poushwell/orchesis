@@ -15,6 +15,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from orchesis.auth import AgentAuthenticator, CredentialStore
+from orchesis.agent_health import AgentHealthScore
 from orchesis.audit import AuditEngine, AuditQuery
 from orchesis.agent_store import AgentPolicyStore, build_agent_overwatch_snapshot
 from orchesis.config import load_policy, validate_policy, validate_policy_warnings
@@ -37,6 +38,7 @@ from orchesis.sync import PolicySyncServer
 from orchesis.telemetry import JsonlEmitter
 from orchesis.flow_xray import FlowAnalyzer
 from orchesis.pipeline import check_budget
+from orchesis.evidence_record import EvidenceRecord
 from orchesis import __version__
 
 
@@ -293,6 +295,11 @@ def create_api_app(
         token = hashlib.sha256(token_seed.encode("utf-8")).hexdigest()[:8]
         return {"token": token, "url": f"http://localhost:8080/flow/{token}"}
 
+    def _build_evidence_record(session_id: str) -> dict[str, Any]:
+        audit = _audit_engine()
+        decisions = audit.query(AuditQuery(session_id=session_id, limit=1_000_000))
+        return EvidenceRecord().build(session_id=session_id, decisions_log=decisions)
+
     def _record_flow_decision(payload: dict[str, Any], response: dict[str, Any]) -> None:
         session_id = _extract_session_id(payload)
         if session_id is None:
@@ -440,6 +447,35 @@ def create_api_app(
         warnings = validate_policy_warnings(loaded)
         return {"valid": len(errors) == 0, "errors": errors, "warnings": warnings}
 
+    @app.get("/api/v1/evidence/{session_id}")
+    def evidence_record_endpoint(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return _build_evidence_record(session_id)
+
+    @app.get("/api/v1/evidence/{session_id}/text")
+    def evidence_record_text_endpoint(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> Response:
+        _require_auth(authorization)
+        record = _build_evidence_record(session_id)
+        text_report = EvidenceRecord().export_text(record)
+        return Response(content=text_report, media_type="text/plain; charset=utf-8")
+
+    @app.get("/api/v1/evidence/{session_id}/download")
+    def evidence_record_download_endpoint(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> Response:
+        _require_auth(authorization)
+        record = _build_evidence_record(session_id)
+        payload = json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8")
+        headers = {"Content-Disposition": f'attachment; filename="evidence_{session_id}.json"'}
+        return Response(content=payload, media_type="application/json", headers=headers)
+
     @app.post("/api/v1/policy/reload")
     def policy_reload(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
@@ -503,6 +539,50 @@ def create_api_app(
                 "last_seen": last_seen,
             },
         }
+
+    @app.get("/api/v1/agents/{agent_id}/health")
+    def get_agent_health(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        _refresh_current_version()
+        audit = _audit_engine()
+        events = audit.query(AuditQuery(agent_id=agent_id, since_hours=48, limit=20_000))
+        now = datetime.now(timezone.utc)
+        last_24: list[Any] = []
+        previous_24: list[Any] = []
+        for event in events:
+            ts = _parse_health_ts(str(getattr(event, "timestamp", "")))
+            if ts is None:
+                continue
+            elapsed_hours = (now - ts).total_seconds() / 3600.0
+            if elapsed_hours <= 24.0:
+                last_24.append(event)
+            elif elapsed_hours <= 48.0:
+                previous_24.append(event)
+        metrics_snapshot = app.state.metrics.snapshot()
+        cache_hit_rate = _cache_hit_rate_from_metrics(metrics_snapshot)
+        scorer = AgentHealthScore()
+        current_stats = _build_health_stats(
+            events=last_24,
+            agent_id=agent_id,
+            policy_store=app.state.agent_policy_store,
+            decisions_log=app.state.decisions_log,
+            cache_hit_rate=cache_hit_rate,
+        )
+        previous_score: float | None = None
+        if previous_24:
+            previous_stats = _build_health_stats(
+                events=previous_24,
+                agent_id=agent_id,
+                policy_store=app.state.agent_policy_store,
+                decisions_log=app.state.decisions_log,
+                cache_hit_rate=cache_hit_rate,
+            )
+            previous_score = float(scorer.compute(previous_stats)["score"])
+        health = scorer.compute({**current_stats, "previous_score": previous_score})
+        return {"agent_id": agent_id, **health}
 
     @app.get("/api/v1/overwatch")
     def get_overwatch(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -1138,3 +1218,83 @@ def _parse_reason(reason: str) -> tuple[str, str, str]:
 def _reason_to_severity(reason: str) -> str:
     _, _, severity = _parse_reason(reason)
     return severity
+
+
+def _parse_health_ts(value: str) -> datetime | None:
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _cache_hit_rate_from_metrics(snapshot: dict[str, Any]) -> float:
+    if not isinstance(snapshot, dict):
+        return 0.0
+    for key in ("cache_hit_rate_percent", "semantic_cache_hit_rate_percent"):
+        value = snapshot.get(key)
+        if isinstance(value, int | float):
+            return max(0.0, min(1.0, float(value) / 100.0))
+    gauges = snapshot.get("gauges")
+    if isinstance(gauges, dict):
+        for key in ("cache_hit_rate_percent", "semantic_cache_hit_rate_percent"):
+            value = gauges.get(key)
+            if isinstance(value, int | float):
+                return max(0.0, min(1.0, float(value) / 100.0))
+    return 0.0
+
+
+def _build_health_stats(
+    *,
+    events: list[Any],
+    agent_id: str,
+    policy_store: AgentPolicyStore,
+    decisions_log: str,
+    cache_hit_rate: float,
+) -> dict[str, float]:
+    total = len(events)
+    denied = sum(1 for event in events if str(getattr(event, "decision", "")).upper() == "DENY")
+    block_rate = (denied / total) if total else 0.0
+    threat_frequency = block_rate
+    loop_signals = 0
+    error_signals = 0
+    latencies_ms: list[float] = []
+    total_cost = 0.0
+    for event in events:
+        reasons = getattr(event, "reasons", [])
+        if isinstance(reasons, list):
+            reason_text = " ".join(str(item).lower() for item in reasons)
+            if "loop" in reason_text:
+                loop_signals += 1
+            if "error" in reason_text or "timeout" in reason_text or "exception" in reason_text:
+                error_signals += 1
+        duration_us = getattr(event, "evaluation_duration_us", 0)
+        if isinstance(duration_us, int | float):
+            latencies_ms.append(max(0.0, float(duration_us) / 1000.0))
+        total_cost += float(getattr(event, "cost", 0.0) or 0.0)
+    loop_frequency = (loop_signals / total) if total else 0.0
+    error_rate = (error_signals / total) if total else 0.0
+    latency_ms = (sum(latencies_ms) / len(latencies_ms)) if latencies_ms else 0.0
+    policy = policy_store.get_policy(agent_id)
+    budget = policy.get("budget_daily")
+    if isinstance(budget, int | float) and float(budget) > 0.0:
+        budget_limit = float(budget)
+        cost_today = policy_store.get_cost_today(agent_id, decisions_log)
+        cost_budget_ratio = max(0.0, min(1.0, cost_today / budget_limit))
+        savings_rate = max(0.0, min(1.0, (budget_limit - cost_today) / budget_limit))
+    else:
+        cost_budget_ratio = max(0.0, min(1.0, total_cost / 25.0))
+        savings_rate = max(0.0, min(1.0, 1.0 - cost_budget_ratio))
+    return {
+        "block_rate": block_rate,
+        "threat_frequency": threat_frequency,
+        "cost_budget_ratio": cost_budget_ratio,
+        "savings_rate": savings_rate,
+        "cache_hit_rate": max(0.0, min(1.0, float(cache_hit_rate))),
+        "loop_frequency": loop_frequency,
+        "error_rate": error_rate,
+        "latency_ms": latency_ms,
+    }
