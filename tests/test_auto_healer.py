@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import threading
 import time
 
-from orchesis.auto_healer import AutoHealer, HealingAction
+from orchesis.auto_healer import AutoHealer, HealingAction, HealingLevel
 
 
 @dataclass
@@ -460,3 +460,74 @@ def test_empty_request_data() -> None:
     out, res = h.heal(detection_result=_Det(is_anomalous=True, risk_level="high", anomaly_score=80), request_data={}, agent_id="a")
     assert isinstance(out, dict)
     assert isinstance(res.actions_taken, list)
+
+
+def test_l1_log_only_no_side_effects() -> None:
+    h = AutoHealer({"safety_guards": {"min_interval_between_actions": 0}})
+    req = {"session_id": "s-l1", "messages": [{"role": "user", "content": "hello"}], "model": "gpt-4o"}
+    out, res = h.apply([HealingAction(HealingLevel.L1, "just log", {}, 0.9, "test")], req, "a")
+    assert out == req
+    assert any(a.action_type == HealingLevel.L1 for a in res.actions_taken)
+
+
+def test_l2_warn_header_added() -> None:
+    h = AutoHealer({"safety_guards": {"min_interval_between_actions": 0}})
+    req = {"session_id": "s-l2", "messages": [{"role": "user", "content": "hello"}], "model": "gpt-4o"}
+    out, _ = h.apply([HealingAction(HealingLevel.L2, "watch this", {}, 0.9, "test")], req, "a")
+    assert out.get("headers", {}).get("X-Orchesis-Warning") == "watch this"
+
+
+def test_l3_triggers_compression() -> None:
+    h = AutoHealer({"safety_guards": {"min_interval_between_actions": 0}})
+    req = {
+        "session_id": "s-l3",
+        "messages": [
+            {"role": "system", "content": "policy"},
+            {"role": "assistant", "content": "x" * 500},
+        ],
+        "model": "gpt-4o",
+    }
+    out, _ = h.apply([HealingAction(HealingLevel.L3, "compress", {}, 0.9, "test")], req, "a")
+    assert "[compressed]" in str(out["messages"][1]["content"])
+
+
+def test_l6_circuit_breaker_max_duration() -> None:
+    h = AutoHealer({"safety_guards": {"l6_max_duration_seconds": 300, "min_interval_between_actions": 0}})
+    req = {"session_id": "s-l6", "messages": [{"role": "user", "content": "hello"}], "model": "gpt-4o"}
+    before = time.time()
+    out, _ = h.apply([HealingAction(HealingLevel.L6, "trip", {"duration_seconds": 9999}, 1.0, "test")], req, "a")
+    assert out["session_id"] == "s-l6"
+    blocked, _ = h.heal(request_data={"session_id": "s-l6", "messages": []}, agent_id="a")
+    assert blocked.get("blocked_by_circuit") is True
+    assert float(blocked.get("circuit_until", 0)) <= before + 300.0 + 2.0
+
+
+def test_safety_guard_max_interventions() -> None:
+    h = AutoHealer({"safety_guards": {"max_interventions_per_session": 1, "min_interval_between_actions": 0}})
+    req = {"session_id": "s-guard", "messages": [{"role": "user", "content": "hello"}], "model": "gpt-4o"}
+    _out, res = h.apply(
+        [
+            HealingAction(HealingLevel.L1, "one", {}, 0.9, "test"),
+            HealingAction(HealingLevel.L2, "two", {}, 0.9, "test"),
+        ],
+        req,
+        "a",
+    )
+    assert len(res.actions_taken) == 1
+
+
+def test_intervention_budget_tracked() -> None:
+    h = AutoHealer({"safety_guards": {"max_interventions_per_session": 3, "min_interval_between_actions": 0}})
+    h.record_intervention("s-budget", HealingLevel.L1, "r1")
+    h.record_intervention("s-budget", HealingLevel.L2, "r2")
+    budget = h.get_session_budget("s-budget")
+    assert budget["interventions_used"] == 2
+    assert budget["interventions_remaining"] == 1
+    assert isinstance(budget["last_action"], dict)
+
+
+def test_cannot_intervene_when_budget_exhausted() -> None:
+    h = AutoHealer({"safety_guards": {"max_interventions_per_session": 1, "min_interval_between_actions": 0}})
+    assert h.can_intervene("s-exhausted", HealingLevel.L1) is True
+    h.record_intervention("s-exhausted", HealingLevel.L1, "r1")
+    assert h.can_intervene("s-exhausted", HealingLevel.L2) is False

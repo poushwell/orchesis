@@ -12,6 +12,8 @@ from typing import Any
 
 import yaml
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.routing import APIRoute
 from fastapi.responses import JSONResponse, Response
 
 from orchesis.auth import AgentAuthenticator, CredentialStore
@@ -54,10 +56,21 @@ def create_api_app(
     decisions_log: str = ".orchesis/decisions.jsonl",
     history_path: str = ".orchesis/policy_versions.jsonl",
     plugin_modules: list[str] | None = None,
+    api_token: str | None = None,
+    cors_origins: list[str] | None = None,
 ) -> FastAPI:
     """Create governance control-plane API."""
-    app = FastAPI(title="Orchesis Control API")
+    app = FastAPI(title="Orchesis Control API", docs_url=None, redoc_url=None)
     logger = StructuredLogger("api")
+    if isinstance(cors_origins, list) and cors_origins:
+        allow_all = "*" in cors_origins
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"] if allow_all else cors_origins,
+            allow_credentials=(not allow_all),
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     @app.exception_handler(HTTPException)
     async def _http_error_handler(request, exc: HTTPException):  # noqa: ANN001
@@ -107,6 +120,7 @@ def create_api_app(
     app.state.auth_mode = "optional"
     app.state.flow_analyzer = FlowAnalyzer({"enabled": True})
     app.state.flow_decisions = {}
+    app.state.api_token_override = api_token.strip() if isinstance(api_token, str) and api_token.strip() else None
     app.state.token_yield = TokenYieldTracker()
     app.state.dna_store = ContextDNAStore(str(policy_file.parent / ".orchesis" / "dna"))
     mcp_monitor_cfg = (
@@ -284,6 +298,9 @@ def create_api_app(
     _sync_agent_teams_from_policy(current_version.policy)
 
     def _auth_token_from_policy() -> str | None:
+        token_override = getattr(app.state, "api_token_override", None)
+        if isinstance(token_override, str) and token_override.strip():
+            return token_override.strip()
         policy = app.state.current_version.policy
         api_config = policy.get("api")
         if isinstance(api_config, dict):
@@ -335,6 +352,50 @@ def create_api_app(
         events = read_events_from_jsonl(source) if source.exists() else []
         filtered = [event for event in events if str(getattr(event, "agent_id", "")) == str(agent_id)]
         return ComplianceReportGenerator().generate(agent_id=str(agent_id), decisions_log=filtered)
+
+    def _build_context_budget_payload(session_id: str | None = None) -> dict[str, Any]:
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        target_session = session_id if isinstance(session_id, str) and session_id.strip() else None
+        level_rank = {"normal": 0, "L0": 1, "L1": 2, "L2": 3}
+        degradation_events = {"L0": 0, "L1": 0, "L2": 0}
+        tokens_saved = 0
+        current_level = "normal"
+        latest_ts: datetime | None = None
+        latest_model = "gpt-4o-mini"
+        for event in events:
+            snapshot = event.state_snapshot if isinstance(event.state_snapshot, dict) else {}
+            event_session = _extract_session_id(snapshot)
+            if target_session is not None and event_session != target_session:
+                continue
+            level_raw = snapshot.get("context_budget_level")
+            level = str(level_raw) if isinstance(level_raw, str) else "normal"
+            if level in degradation_events:
+                degradation_events[level] += 1
+            tokens_saved += int(snapshot.get("context_tokens_saved", 0) or 0)
+            event_ts = _parse_health_ts(str(event.timestamp))
+            if event_ts is not None and (latest_ts is None or event_ts > latest_ts):
+                latest_ts = event_ts
+                if isinstance(snapshot.get("model"), str) and snapshot.get("model"):
+                    latest_model = str(snapshot.get("model"))
+                if level_rank.get(level, 0) >= level_rank.get(current_level, 0):
+                    current_level = level
+        context_cfg = app.state.current_version.policy.get("context_budget")
+        model_windows = (
+            context_cfg.get("model_context_windows")
+            if isinstance(context_cfg, dict) and isinstance(context_cfg.get("model_context_windows"), dict)
+            else {}
+        )
+        context_window = int(model_windows.get(latest_model, 128000))
+        session_name = target_session if target_session is not None else "global"
+        return {
+            "session_id": session_name,
+            "current_level": current_level if current_level in {"normal", "L0", "L1", "L2"} else "normal",
+            "degradation_events": degradation_events,
+            "tokens_saved_by_degradation": int(tokens_saved),
+            "model": latest_model,
+            "context_window": context_window,
+        }
 
     def _record_flow_decision(payload: dict[str, Any], response: dict[str, Any]) -> None:
         session_id = _extract_session_id(payload)
@@ -400,6 +461,43 @@ def create_api_app(
         if isinstance(decision_header, str):
             response.headers["X-Orchesis-Decision"] = decision_header
         return response
+
+    @app.get("/health")
+    def health() -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "version": __version__,
+            "uptime_seconds": int(max(0.0, time.perf_counter() - started_at)),
+        }
+
+    @app.get("/docs")
+    def docs_index() -> Response:
+        rows: list[str] = []
+        for route in app.routes:
+            if not isinstance(route, APIRoute):
+                continue
+            methods = sorted(method for method in route.methods if method not in {"HEAD", "OPTIONS"})
+            if not methods:
+                continue
+            rows.append(
+                "<tr>"
+                f"<td>{', '.join(methods)}</td>"
+                f"<td><code>{route.path}</code></td>"
+                "</tr>"
+            )
+        rows.sort()
+        html = (
+            "<!doctype html><html><head><meta charset='utf-8'><title>Orchesis API Docs</title>"
+            "<style>body{font-family:Arial,sans-serif;padding:24px;background:#0b0f14;color:#e6edf3}"
+            "table{border-collapse:collapse;width:100%}th,td{border:1px solid #30363d;padding:8px;text-align:left}"
+            "th{background:#161b22}code{color:#7ee787}</style></head><body>"
+            "<h1>Orchesis API Endpoints</h1>"
+            "<p>Use <code>Authorization: Bearer &lt;token&gt;</code> for protected routes.</p>"
+            "<table><thead><tr><th>Method</th><th>Path</th></tr></thead><tbody>"
+            + "".join(rows)
+            + "</tbody></table></body></html>"
+        )
+        return Response(content=html, media_type="text/html; charset=utf-8")
 
     @app.on_event("shutdown")
     async def _shutdown_monitor() -> None:
@@ -542,6 +640,21 @@ def create_api_app(
         report = _build_compliance_report(agent_id)
         text_report = ComplianceReportGenerator().export_text(report)
         return Response(content=text_report, media_type="text/plain; charset=utf-8")
+
+    @app.get("/api/v1/context-budget/stats")
+    def context_budget_stats_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return _build_context_budget_payload(None)
+
+    @app.get("/api/v1/context-budget/{session_id}")
+    def context_budget_session_endpoint(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return _build_context_budget_payload(session_id)
 
     @app.post("/api/v1/policy/reload")
     def policy_reload(authorization: str | None = Header(default=None)) -> dict[str, Any]:

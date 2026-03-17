@@ -61,6 +61,11 @@ DIAGNOSIS_RULES: dict[str, list[str]] = {
 }
 
 _DEFAULT_ACTION_ORDER = (
+    "log_only",
+    "warn_header",
+    "compress_context",
+    "model_downgrade",
+    "circuit_break",
     "strip_content",
     "reset_context",
     "retry_model",
@@ -68,6 +73,23 @@ _DEFAULT_ACTION_ORDER = (
     "rate_limit",
     "escalate",
 )
+
+
+class HealingLevel:
+    L1 = "log_only"
+    L2 = "warn_header"
+    L3 = "compress_context"
+    L4 = "rate_limit"
+    L5 = "model_downgrade"
+    L6 = "circuit_break"
+
+
+SAFETY_GUARDS = {
+    "never_modify_user_content": True,
+    "max_interventions_per_session": 3,
+    "min_interval_between_actions": 3,
+    "l6_max_duration_seconds": 300,
+}
 
 
 @dataclass
@@ -156,6 +178,14 @@ class AutoHealer:
         self.rate_limiter = AgentRateLimiter()
         self._lock = threading.Lock()
         self._agent_history: dict[str, list[dict[str, Any]]] = {}
+        self._session_interventions: dict[str, list[dict[str, Any]]] = {}
+        self._session_request_counter: dict[str, int] = {}
+        self._session_last_action_index: dict[str, int] = {}
+        self._session_circuit_until: dict[str, float] = {}
+        self._safety_guards = dict(SAFETY_GUARDS)
+        guards_cfg = cfg.get("safety_guards")
+        if isinstance(guards_cfg, dict):
+            self._safety_guards.update(guards_cfg)
         self._stats = {
             "total_diagnoses": 0,
             "total_actions_taken": 0,
@@ -175,6 +205,59 @@ class AutoHealer:
     def _action_cfg(self, action_type: str) -> dict[str, Any]:
         section = self._actions_cfg.get(action_type)
         return section if isinstance(section, dict) else {}
+
+    @staticmethod
+    def _session_key(session_id: str | None) -> str:
+        return str(session_id or "unknown")
+
+    def can_intervene(self, session_id: str, level: str) -> bool:
+        """Check safety guards before intervening."""
+        sid = self._session_key(session_id)
+        _ = level
+        with self._lock:
+            used = len(self._session_interventions.get(sid, []))
+            max_int = int(self._safety_guards.get("max_interventions_per_session", 3) or 3)
+            if used >= max(0, max_int):
+                return False
+            min_interval = int(self._safety_guards.get("min_interval_between_actions", 3) or 3)
+            if min_interval > 0:
+                current_idx = int(self._session_request_counter.get(sid, 0))
+                last_idx = int(self._session_last_action_index.get(sid, -10_000))
+                if (current_idx - last_idx) < min_interval:
+                    return False
+            return True
+
+    def record_intervention(self, session_id: str, level: str, reason: str) -> None:
+        """Record intervention for budget tracking."""
+        sid = self._session_key(session_id)
+        now = time.time()
+        with self._lock:
+            current_idx = int(self._session_request_counter.get(sid, 0))
+            self._session_interventions.setdefault(sid, []).append(
+                {
+                    "timestamp": now,
+                    "level": str(level),
+                    "reason": str(reason),
+                    "request_index": current_idx,
+                }
+            )
+            self._session_last_action_index[sid] = current_idx
+            if len(self._session_interventions[sid]) > 100:
+                self._session_interventions[sid] = self._session_interventions[sid][-100:]
+
+    def get_session_budget(self, session_id: str) -> dict:
+        """Returns: interventions_used, interventions_remaining, last_action."""
+        sid = self._session_key(session_id)
+        with self._lock:
+            used = len(self._session_interventions.get(sid, []))
+            max_int = int(self._safety_guards.get("max_interventions_per_session", 3) or 3)
+            remaining = max(0, max_int - used)
+            last = self._session_interventions.get(sid, [])[-1] if self._session_interventions.get(sid) else None
+            return {
+                "interventions_used": used,
+                "interventions_remaining": remaining,
+                "last_action": copy.deepcopy(last),
+            }
 
     def _collect_signals(self, detection_result: Any, mast_findings: Any, request_data: dict[str, Any]) -> list[str]:
         signals: list[str] = []
@@ -374,6 +457,54 @@ class AutoHealer:
         window_seconds = int(action.parameters.get("window_seconds", 60))
         self.rate_limiter.set_limit(agent_id, max_requests=max_requests, window_seconds=window_seconds)
 
+    @staticmethod
+    def _apply_warn_header(data: dict[str, Any], reason: str) -> None:
+        headers = data.get("headers")
+        if not isinstance(headers, dict):
+            headers = {}
+            data["headers"] = headers
+        headers["X-Orchesis-Warning"] = str(reason or "auto-healing warning")
+
+    @staticmethod
+    def _apply_compress_context(data: dict[str, Any], result: HealingResult) -> None:
+        messages = data.get("messages")
+        if not isinstance(messages, list):
+            return
+        out: list[dict[str, Any]] = []
+        changed = False
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            copied = dict(msg)
+            content = copied.get("content")
+            role = str(copied.get("role", "")).lower()
+            if isinstance(content, str) and len(content) > 240:
+                if role == "user":
+                    # Safety guard: never alter user-authored content.
+                    pass
+                else:
+                    copied["content"] = f"{content[:220]} ...[compressed]"
+                    changed = True
+            out.append(copied)
+        if changed:
+            data["messages"] = validate_tool_chain(out)
+            result.messages_modified = True
+
+    def _apply_model_downgrade(self, data: dict[str, Any], action: HealingAction, result: HealingResult) -> None:
+        current_model = str(data.get("model", "") or "")
+        target = str(action.parameters.get("downgrade_model", "gpt-4o-mini") or "gpt-4o-mini")
+        if target and target != current_model:
+            data["model"] = target
+            result.model_switched = True
+
+    def _apply_circuit_break(self, session_id: str, action: HealingAction) -> None:
+        sid = self._session_key(session_id)
+        requested = int(action.parameters.get("duration_seconds", 60) or 60)
+        hard_cap = int(self._safety_guards.get("l6_max_duration_seconds", 300) or 300)
+        duration = max(1, min(requested, max(1, hard_cap)))
+        with self._lock:
+            self._session_circuit_until[sid] = time.time() + float(duration)
+
     def _apply_inject_guardrail(self, data: dict[str, Any], action: HealingAction, result: HealingResult) -> None:
         messages = data.get("messages")
         if not isinstance(messages, list):
@@ -421,6 +552,9 @@ class AutoHealer:
     def apply(self, actions: list[HealingAction], request_data: dict, agent_id: str) -> tuple[dict, HealingResult]:
         started = time.perf_counter()
         data = self._copy_request(request_data)
+        session_id = self._session_key(data.get("session_id") if isinstance(data, dict) else None)
+        with self._lock:
+            self._session_request_counter[session_id] = int(self._session_request_counter.get(session_id, 0)) + 1
         result = HealingResult(
             actions_taken=[],
             original_issue=",".join([a.source_detection for a in actions]) if actions else "",
@@ -438,9 +572,43 @@ class AutoHealer:
                 break
             attempts += 1
             a_type = action.action_type
+            level_action = {
+                HealingLevel.L1,
+                HealingLevel.L2,
+                HealingLevel.L3,
+                HealingLevel.L4,
+                HealingLevel.L5,
+                HealingLevel.L6,
+            }
+            if a_type in level_action:
+                if not self.can_intervene(session_id=session_id, level=a_type):
+                    continue
             if a_type == "pass":
                 result.actions_taken.append(action)
                 continue
+            if a_type == HealingLevel.L1:
+                self.record_intervention(session_id, HealingLevel.L1, action.reason)
+                result.actions_taken.append(action)
+            elif a_type == HealingLevel.L2:
+                self._apply_warn_header(data, action.reason)
+                self.record_intervention(session_id, HealingLevel.L2, action.reason)
+                result.actions_taken.append(action)
+            elif a_type == HealingLevel.L3:
+                self._apply_compress_context(data, result)
+                self.record_intervention(session_id, HealingLevel.L3, action.reason)
+                result.actions_taken.append(action)
+            elif a_type == HealingLevel.L4:
+                self._apply_rate_limit(str(agent_id or "unknown"), HealingAction("rate_limit", action.reason, {"window_seconds": 60, "max_requests": 10}, action.confidence, action.source_detection))
+                self.record_intervention(session_id, HealingLevel.L4, action.reason)
+                result.actions_taken.append(action)
+            elif a_type == HealingLevel.L5:
+                self._apply_model_downgrade(data, action, result)
+                self.record_intervention(session_id, HealingLevel.L5, action.reason)
+                result.actions_taken.append(action)
+            elif a_type == HealingLevel.L6:
+                self._apply_circuit_break(session_id, action)
+                self.record_intervention(session_id, HealingLevel.L6, action.reason)
+                result.actions_taken.append(action)
             if a_type == "retry_model":
                 self._apply_retry_model(data, action, result)
                 result.actions_taken.append(action)
@@ -502,6 +670,19 @@ class AutoHealer:
         context: Any = None,
     ) -> tuple[dict, HealingResult]:
         req = self._copy_request(request_data if isinstance(request_data, dict) else {})
+        session_id = self._session_key(req.get("session_id") if isinstance(req, dict) else None)
+        with self._lock:
+            until = float(self._session_circuit_until.get(session_id, 0.0) or 0.0)
+        if until > time.time():
+            blocked = HealingResult(
+                actions_taken=[HealingAction(HealingLevel.L6, "circuit open", {"until": until}, 1.0, "circuit_break")],
+                original_issue="circuit_break",
+                resolution="mitigated",
+                latency_added_ms=0.0,
+            )
+            req["blocked_by_circuit"] = True
+            req["circuit_until"] = until
+            return req, blocked
         actions = self.diagnose(
             detection_result=detection_result,
             mast_findings=mast_findings,
@@ -590,10 +771,18 @@ class AutoHealer:
             key = str(agent_id or "unknown")
             with self._lock:
                 self._agent_history.pop(key, None)
+                self._session_interventions.pop(key, None)
+                self._session_request_counter.pop(key, None)
+                self._session_last_action_index.pop(key, None)
+                self._session_circuit_until.pop(key, None)
             self.rate_limiter.remove_limit(key)
             return
         with self._lock:
             self._agent_history = {}
+            self._session_interventions = {}
+            self._session_request_counter = {}
+            self._session_last_action_index = {}
+            self._session_circuit_until = {}
             self._stats = {
                 "total_diagnoses": 0,
                 "total_actions_taken": 0,

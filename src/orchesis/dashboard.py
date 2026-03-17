@@ -308,6 +308,34 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       border-bottom: 1px solid var(--border);
       font-variant-numeric: tabular-nums;
     }
+    .context-budget-widget {
+      border: 1px solid rgba(245,158,11,0.35);
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, rgba(245,158,11,0.12), rgba(245,158,11,0.04));
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+    .cbg-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    .cbg-pill {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-weight: 800;
+      font-size: 12px;
+      letter-spacing: 0.2px;
+    }
+    .cbg-pill.normal { color: #34d399; border-color: rgba(52,211,153,0.4); }
+    .cbg-pill.l0 { color: #facc15; border-color: rgba(250,204,21,0.45); }
+    .cbg-pill.l1 { color: #fb923c; border-color: rgba(251,146,60,0.45); }
+    .cbg-pill.l2 { color: #ef4444; border-color: rgba(239,68,68,0.45); }
+    .cbg-counters { display: grid; grid-template-columns: repeat(3, minmax(80px, 1fr)); gap: 8px; }
+    .cbg-counter { border: 1px solid rgba(255,255,255,0.08); border-radius: var(--radius-sm); padding: 6px 8px; }
+    .cbg-counter .k { font-size: 11px; color: var(--text-secondary); }
+    .cbg-counter .v { font-weight: 800; font-variant-numeric: tabular-nums; }
+    .cbg-progress { display: grid; gap: 6px; }
+    .cbg-bar { height: 10px; border-radius: 999px; background: rgba(255,255,255,0.08); overflow: hidden; }
+    .cbg-bar > div { height: 100%; border-radius: inherit; width: 0%; background: #34d399; }
     .agent-health-widget {
       border: 1px solid rgba(90,168,255,0.35);
       border-radius: var(--radius);
@@ -962,6 +990,24 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
           <tbody id="ty-iterations"><tr><td colspan="2" class="subtle">No data</td></tr></tbody>
         </table>
       </div>
+      <div class="context-budget-widget">
+        <div class="cbg-head">
+          <div>
+            <div class="subtle">Context Budget</div>
+            <div id="cbg-pressure" class="subtle">Context window pressure</div>
+          </div>
+          <span id="cbg-level" class="cbg-pill normal">normal</span>
+        </div>
+        <div class="cbg-counters">
+          <div class="cbg-counter"><div class="k">L0</div><div id="cbg-l0" class="v">0</div></div>
+          <div class="cbg-counter"><div class="k">L1</div><div id="cbg-l1" class="v">0</div></div>
+          <div class="cbg-counter"><div class="k">L2</div><div id="cbg-l2" class="v">0</div></div>
+        </div>
+        <div class="cbg-progress">
+          <div class="subtle">Used / Max tokens: <span id="cbg-used-max">0 / 0</span></div>
+          <div class="cbg-bar"><div id="cbg-used-bar"></div></div>
+        </div>
+      </div>
       <div class="grid-4">
         <div class="panel panel-primary">
           <div class="subtle">📥 Total Requests</div>
@@ -1582,7 +1628,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       document.getElementById("health-score").textContent = val.toFixed(2);
     }
 
-    function renderOverview(data, stats, savings, tokenYield){
+    function renderOverview(data, stats, savings, tokenYield, contextBudget){
       if(!data){ return; }
       lastOverview = data;
       setStatus(data.status || "clear");
@@ -1683,6 +1729,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       renderSavings(stats || {});
       renderOpenClawSavings(savings || {});
       renderTokenYield(tokenYield || {});
+      renderContextBudget(contextBudget || {});
     }
 
     function renderTokenYield(payload){
@@ -1723,6 +1770,39 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
             return `<tr><td>#${rowNumber}</td><td>${fmtNum(Number(item || 0))}</td></tr>`;
           }).join("");
         }
+      }
+    }
+
+    function renderContextBudget(payload){
+      const model = (payload && typeof payload === "object") ? payload : {};
+      const levelRaw = String(model.current_level || "normal").toLowerCase();
+      const level = ["normal", "l0", "l1", "l2"].includes(levelRaw) ? levelRaw : "normal";
+      const levelEl = document.getElementById("cbg-level");
+      const l0El = document.getElementById("cbg-l0");
+      const l1El = document.getElementById("cbg-l1");
+      const l2El = document.getElementById("cbg-l2");
+      const usedMaxEl = document.getElementById("cbg-used-max");
+      const barEl = document.getElementById("cbg-used-bar");
+      const pressureEl = document.getElementById("cbg-pressure");
+      const events = (model.degradation_events && typeof model.degradation_events === "object") ? model.degradation_events : {};
+      const saved = Math.max(0, Number(model.tokens_saved_by_degradation || 0));
+      const maxTokens = Math.max(1, Number(model.context_window || 128000));
+      const used = Math.max(0, Math.min(maxTokens, maxTokens - saved));
+      const pressurePct = Math.max(0, Math.min(100, (used / maxTokens) * 100));
+      if (levelEl) {
+        levelEl.textContent = level === "normal" ? "normal" : level.toUpperCase();
+        levelEl.className = `cbg-pill ${level}`;
+      }
+      if (l0El) l0El.textContent = fmtNum(Number(events.L0 || 0));
+      if (l1El) l1El.textContent = fmtNum(Number(events.L1 || 0));
+      if (l2El) l2El.textContent = fmtNum(Number(events.L2 || 0));
+      if (usedMaxEl) usedMaxEl.textContent = `${fmtNum(used)} / ${fmtNum(maxTokens)}`;
+      if (barEl) {
+        barEl.style.width = `${pressurePct.toFixed(1)}%`;
+        barEl.style.background = pressurePct >= 98 ? "#ef4444" : (pressurePct >= 90 ? "#fb923c" : (pressurePct >= 80 ? "#facc15" : "#34d399"));
+      }
+      if (pressureEl) {
+        pressureEl.textContent = `Context window pressure: ${pressurePct.toFixed(1)}% (${String(model.model || "gpt-4o-mini")})`;
       }
     }
 
@@ -2583,14 +2663,15 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     }
 
     async function pollShield(){
-      const [data, stats, savings, health, tokenYield] = await Promise.all([
+      const [data, stats, savings, health, tokenYield, contextBudget] = await Promise.all([
         fetchData("/api/dashboard/overview"),
         fetchData("/stats"),
         fetchData("/api/v1/savings"),
         fetchData("/api/v1/agents/__global__/health"),
         fetchData("/api/v1/token-yield/global"),
+        fetchData("/api/v1/context-budget/stats"),
       ]);
-      renderOverview(data, stats, savings, tokenYield);
+      renderOverview(data, stats, savings, tokenYield, contextBudget);
       renderAgentHealth((health && typeof health === "object") ? health : (data && data.agent_health ? data.agent_health : {}));
     }
     async function pollAgents(){

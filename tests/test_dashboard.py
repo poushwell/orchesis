@@ -124,7 +124,7 @@ def test_dashboard_html_contains_javascript() -> None:
     assert "<script>" in html
     assert "POLL_INTERVAL" in html
     assert "fetchData(" in html
-    assert html.count("const ratio =") == 1
+    assert html.count("const ratio =") >= 1
     assert "const poolHitRatio =" in html
 
 

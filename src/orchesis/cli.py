@@ -869,12 +869,32 @@ def rollback(policy_path: str) -> None:
 @click.option("--port", type=int, default=8090)
 @click.option("--policy", "policy_path", type=click.Path(exists=True), default="policy.yaml")
 @click.option(
+    "--cors",
+    "cors_value",
+    type=str,
+    default=None,
+    help='Allowed CORS origin(s), e.g. "https://app.example.com" or "*" or comma-separated list',
+)
+@click.option(
+    "--token",
+    "api_token",
+    type=str,
+    default=None,
+    help="Custom API token for Authorization: Bearer <token>",
+)
+@click.option(
     "--plugins",
     "plugin_modules",
     multiple=True,
     help="Plugin module path(s), e.g. orchesis.contrib.pii_detector",
 )
-def serve(port: int, policy_path: str, plugin_modules: tuple[str, ...]) -> None:
+def serve(
+    port: int,
+    policy_path: str,
+    cors_value: str | None,
+    api_token: str | None,
+    plugin_modules: tuple[str, ...],
+) -> None:
     """Run Orchesis control API server."""
     uvicorn, create_api_app, _orchesis_proxy_cls, _proxy_config_cls = _load_server_runtime()
     try:
@@ -885,15 +905,34 @@ def serve(port: int, policy_path: str, plugin_modules: tuple[str, ...]) -> None:
     store = PolicyStore()
     version = store.load(policy_path)
     registry = load_agent_registry(policy)
-    click.echo(f"Orchesis Control API running on http://0.0.0.0:{port}")
+    policy_api_cfg = policy.get("api") if isinstance(policy, dict) and isinstance(policy.get("api"), dict) else {}
+    policy_token = policy_api_cfg.get("token") if isinstance(policy_api_cfg.get("token"), str) else None
+    token_to_use = (
+        api_token.strip()
+        if isinstance(api_token, str) and api_token.strip()
+        else (policy_token.strip() if isinstance(policy_token, str) and policy_token.strip() else "")
+    )
+    if not token_to_use:
+        token_to_use = f"orchesis-{hashlib.sha256(str(time.time()).encode('utf-8')).hexdigest()[:6]}"
+    cors_origins: list[str] | None = None
+    if isinstance(cors_value, str) and cors_value.strip():
+        parts = [item.strip() for item in cors_value.split(",") if item.strip()]
+        cors_origins = parts if parts else None
+
+    click.echo("✓ Orchesis API server running")
+    click.echo(f"  URL:   http://localhost:{port}")
+    click.echo(f"  Token: {token_to_use}  ← copy this")
+    click.echo(f"  Docs:  http://localhost:{port}/docs")
     click.echo(f"Policy: {policy_path} (version {version.version_id[:12]})")
     click.echo(
         f"Agents: {len(registry.agents)} registered, default tier: {registry.default_tier.name.lower()}"
     )
-    click.echo("Endpoints: /api/v1/policy, /api/v1/agents, /api/v1/evaluate, /api/v1/status")
+    click.echo("Endpoints: /health, /docs, /api/v1/policy, /api/v1/agents, /api/v1/evaluate, /api/v1/status")
     OPERATIONS_LOG.info("starting api server", port=port, policy_path=policy_path)
     app = create_api_app(
         policy_path=policy_path,
+        api_token=token_to_use,
+        cors_origins=cors_origins,
         plugin_modules=_normalize_plugin_modules(plugin_modules),
     )
     uvicorn.run(app, host="0.0.0.0", port=port)
