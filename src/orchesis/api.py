@@ -53,10 +53,12 @@ from orchesis.agent_profile import AgentIntelligenceProfile
 from orchesis.pipeline import check_budget
 from orchesis.evidence_record import EvidenceRecord
 from orchesis.cost_analytics import CostAnalytics
+from orchesis.budget_advisor import BudgetAdvisor
 from orchesis.session_replay import SessionReplay
 from orchesis.community_intel import CommunityIntel
 from orchesis.token_yield import TokenYieldTracker
 from orchesis.threat_feed import ThreatFeed
+from orchesis.signature_editor import SignatureEditor
 from orchesis import __version__
 
 
@@ -138,6 +140,7 @@ def create_api_app(
         else {}
     )
     app.state.threat_feed = ThreatFeed(feed_cfg)
+    app.state.signature_editor = SignatureEditor(str(policy_file.parent / ".orchesis" / "signatures.json"))
     app.state.benchmark_results = {}
     app.state.dna_store = ContextDNAStore(str(policy_file.parent / ".orchesis" / "dna"))
     community_cfg = (
@@ -477,6 +480,21 @@ def create_api_app(
         source = Path(app.state.decisions_log)
         events = read_events_from_jsonl(source) if source.exists() else []
         return CostAnalytics().compute(events, period_hours=period_hours)
+
+    def _build_budget_advice_payload() -> dict[str, Any]:
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        policy = app.state.current_version.policy
+        budgets_cfg = (
+            policy.get("budgets", {})
+            if isinstance(policy, dict) and isinstance(policy.get("budgets"), dict)
+            else {}
+        )
+        budget_daily = policy.get("budget_daily", 0.0) if isinstance(policy, dict) else 0.0
+        current_budget = {
+            "daily_limit_usd": float(budgets_cfg.get("daily", budget_daily) or 0.0),
+        }
+        return BudgetAdvisor().analyze(events, current_budget)
 
     def _build_current_stats_by_agent(since_hours: int = 24) -> dict[str, dict[str, float]]:
         source = Path(app.state.decisions_log)
@@ -1316,6 +1334,17 @@ def create_api_app(
         safe_period = max(1, min(24 * 7, int(period)))
         return _build_cost_analytics_payload(safe_period)
 
+    @app.get("/api/v1/budget/advice")
+    def budget_advice(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return _build_budget_advice_payload()
+
+    @app.get("/api/v1/budget/quick-wins")
+    def budget_quick_wins(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        analysis = _build_budget_advice_payload()
+        return {"quick_wins": BudgetAdvisor().get_quick_wins(analysis)}
+
     @app.get("/api/v1/anomaly/alerts")
     def anomaly_alerts(
         since: float | None = None,
@@ -1422,6 +1451,73 @@ def create_api_app(
     def threat_feed_signatures(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
         return {"signatures": list(app.state.threat_feed._signatures)}
+
+    @app.get("/api/v1/signatures")
+    def list_signatures(
+        category: str | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {"signatures": app.state.signature_editor.list_all(category=category)}
+
+    @app.post("/api/v1/signatures")
+    def create_signature(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        try:
+            return app.state.signature_editor.create(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @app.post("/api/v1/signatures/test-pattern")
+    def test_signature_pattern(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        pattern = str(payload.get("pattern", ""))
+        test_text = str(payload.get("test_text", ""))
+        return app.state.signature_editor.test_pattern(pattern, test_text)
+
+    @app.get("/api/v1/signatures/{sig_id}")
+    def get_signature(
+        sig_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        rows = app.state.signature_editor.list_all()
+        for row in rows:
+            if str(row.get("id", "")) == str(sig_id):
+                return row
+        raise HTTPException(status_code=404, detail={"error": "signature not found"})
+
+    @app.put("/api/v1/signatures/{sig_id}")
+    def update_signature(
+        sig_id: str,
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        try:
+            return app.state.signature_editor.update(sig_id, body)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail={"error": "signature not found"}) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @app.delete("/api/v1/signatures/{sig_id}")
+    def delete_signature(
+        sig_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        deleted = app.state.signature_editor.delete(sig_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail={"error": "signature not found"})
+        return {"deleted": True, "id": sig_id}
 
     @app.get("/api/v1/community/status")
     def community_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -1642,6 +1738,77 @@ def create_api_app(
                 "duration_ms": duration_ms,
             },
             "share_url": share["url"],
+        }
+
+    @app.get("/api/v1/flow/timeline")
+    def flow_timeline(
+        session_id: str,
+        limit: int = 50,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        safe_limit = max(1, min(500, int(limit)))
+        decisions_raw = app.state.flow_decisions.get(session_id, [])
+        decisions = [dict(item) for item in decisions_raw if isinstance(item, dict)][-safe_limit:]
+        phase_order = [
+            "parse",
+            "flow_xray",
+            "cascade",
+            "circuit_breaker",
+            "loop_detection",
+            "behavioral",
+            "mast_request",
+            "auto_healing",
+            "budget",
+            "policy",
+            "threat_intel",
+            "model_router",
+            "secrets",
+            "context",
+            "upstream",
+            "post_upstream",
+            "send",
+        ]
+        color_map = {"pass": "#00FF41", "warn": "#fbbf24", "block": "#ef4444"}
+        requests: list[dict[str, Any]] = []
+        for idx, item in enumerate(decisions):
+            allowed = bool(item.get("allowed", False))
+            reasons = item.get("reasons", [])
+            reason_list = list(reasons) if isinstance(reasons, list) else []
+            if not allowed:
+                decision_state = "block"
+            elif reason_list:
+                decision_state = "warn"
+            else:
+                decision_state = "pass"
+            phase_cells = [
+                {
+                    "phase": phase,
+                    "phase_index": i + 1,
+                    "decision": decision_state,
+                    "color": color_map[decision_state],
+                    "tool_name": str(item.get("tool_name", "")),
+                    "reasons": reason_list,
+                }
+                for i, phase in enumerate(phase_order)
+            ]
+            requests.append(
+                {
+                    "request_index": idx,
+                    "timestamp": str(item.get("timestamp", "")),
+                    "decision": str(item.get("decision", "ALLOW")),
+                    "allowed": allowed,
+                    "tool_name": str(item.get("tool_name", "")),
+                    "phases": phase_cells,
+                }
+            )
+        return {
+            "session_id": session_id,
+            "limit": safe_limit,
+            "phase_count": len(phase_order),
+            "phase_order": phase_order,
+            "decision_colors": color_map,
+            "requests": requests,
         }
 
     def _evaluate_payload(body: dict[str, Any], trace: TraceContext) -> dict[str, Any]:

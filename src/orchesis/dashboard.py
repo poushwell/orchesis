@@ -1607,6 +1607,20 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         <div id="patterns-empty" class="empty" style="display:none;">No data yet.</div>
         <div id="patterns"></div>
       </div>
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <strong>Timeline View</strong>
+          <div style="display:flex;gap:8px;">
+            <button id="flow-view-list" class="tab-btn" style="padding:6px 10px;">List view</button>
+            <button id="flow-view-timeline" class="tab-btn" style="padding:6px 10px;">Timeline view</button>
+          </div>
+        </div>
+        <div id="flow-list-view" style="margin-top:10px;"></div>
+        <div id="flow-timeline-view" style="margin-top:10px;display:none;">
+          <svg id="flow-timeline-svg" width="100%" height="360" class="flow-graph"></svg>
+          <div id="flow-timeline-details" class="subtle" style="margin-top:8px;">Click a cell to inspect phase details.</div>
+        </div>
+      </div>
     </section>
 
     <section id="compliance" class="screen">
@@ -2709,12 +2723,66 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       });
     }
 
-    function renderFlowAnalysis(analysis, graph){
+    let flowViewMode = "list";
+    let flowTimelinePayload = null;
+
+    function renderFlowTimeline(payload) {
+      const svg = document.getElementById("flow-timeline-svg");
+      const details = document.getElementById("flow-timeline-details");
+      if(!svg){ return; }
+      const requests = (payload && Array.isArray(payload.requests)) ? payload.requests : [];
+      const phases = (payload && Array.isArray(payload.phase_order)) ? payload.phase_order : [];
+      if(requests.length === 0 || phases.length === 0){
+        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" fill="var(--text-secondary)">No timeline data</text>`;
+        if(details){ details.textContent = "No timeline data available for selected session."; }
+        return;
+      }
+      const cell = 14;
+      const gap = 3;
+      const leftPad = 160;
+      const topPad = 16;
+      const width = leftPad + (requests.length * (cell + gap)) + 30;
+      const height = topPad + (phases.length * (cell + gap)) + 40;
+      svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+      svg.setAttribute("height", String(Math.max(280, height)));
+      let html = "";
+      phases.forEach((phase, i) => {
+        const y = topPad + i * (cell + gap) + 11;
+        html += `<text x="8" y="${y}" fill="var(--text-secondary)" font-size="10">${i+1}. ${phase}</text>`;
+      });
+      requests.forEach((req, xIndex) => {
+        const x = leftPad + xIndex * (cell + gap);
+        html += `<text x="${x + 2}" y="${height - 10}" fill="var(--text-secondary)" font-size="9">${xIndex + 1}</text>`;
+        const phaseCells = Array.isArray(req.phases) ? req.phases : [];
+        phaseCells.forEach((phaseCell, yIndex) => {
+          const y = topPad + yIndex * (cell + gap);
+          const fill = String(phaseCell.color || "#00FF41");
+          const phaseName = String(phaseCell.phase || "");
+          const decision = String(phaseCell.decision || "");
+          const timestamp = String(req.timestamp || "");
+          const tool = String(req.tool_name || "");
+          const reasons = Array.isArray(phaseCell.reasons) ? phaseCell.reasons.join("; ") : "";
+          const tip = `#${xIndex + 1} ${phaseName} ${decision.toUpperCase()} ${tool} ${timestamp} ${reasons}`;
+          html += `<rect class="flow-node flow-timeline-cell" data-tip="${escapeHtml(tip)}" x="${x}" y="${y}" width="${cell}" height="${cell}" rx="2" fill="${fill}" stroke="rgba(255,255,255,0.12)" stroke-width="1"></rect>`;
+        });
+      });
+      svg.innerHTML = html;
+      svg.querySelectorAll(".flow-timeline-cell").forEach((el)=>{
+        el.addEventListener("click", ()=>{
+          if(details){ details.textContent = el.getAttribute("data-tip") || ""; }
+        });
+      });
+    }
+
+    function renderFlowAnalysis(analysis, graph, timeline){
       if(!analysis){
         document.getElementById("patterns").innerHTML = "";
         document.getElementById("patterns-empty").style.display = "block";
         document.getElementById("patterns-empty").textContent = "Select a session above";
         renderFlowGraph(null);
+        const listView = document.getElementById("flow-list-view");
+        if(listView){ listView.innerHTML = ""; }
+        renderFlowTimeline(null);
         return;
       }
       const topo = analysis.topology || {};
@@ -2738,7 +2806,12 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       const phaseState = blocked > 0 ? "block" : (warned > 0 ? "warn" : "pass");
       const phaseStateClass = phaseState === "block" ? "high" : (phaseState === "warn" ? "medium" : "low");
       const phaseRows = phaseKeys.map((p)=> `<div class="event event-item"><span class="sev ${phaseStateClass}">${phaseState.toUpperCase()}</span><span>${p}</span></div>`).join("");
-      box.innerHTML = `<div class="panel" style="margin-bottom:10px;"><strong>Pipeline Phases</strong><div style="margin-top:8px;">${phaseRows}</div></div>`;
+      const listView = document.getElementById("flow-list-view");
+      if(listView){
+        listView.innerHTML = `<div class="panel" style="margin-bottom:10px;"><strong>Pipeline Phases</strong><div style="margin-top:8px;">${phaseRows}</div></div>`;
+      }
+      flowTimelinePayload = timeline || null;
+      renderFlowTimeline(flowTimelinePayload);
       if(patterns.length === 0){
         document.getElementById("patterns-empty").style.display = "block";
         document.getElementById("patterns-empty").textContent = "No data yet";
@@ -3127,6 +3200,57 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         : `<div class="empty">No session cost data.</div>`;
     }
 
+    function renderBudgetAdvice(advice, quickWinsPayload){
+      const model = (advice && typeof advice === "object") ? advice : {};
+      const winsPayload = (quickWinsPayload && typeof quickWinsPayload === "object") ? quickWinsPayload : {};
+      const wins = Array.isArray(winsPayload.quick_wins) ? winsPayload.quick_wins : [];
+      const recommendations = Array.isArray(model.recommendations) ? model.recommendations : [];
+      const waste = (model.waste_detected && typeof model.waste_detected === "object") ? model.waste_detected : {};
+
+      const projectedEl = document.getElementById("budget-projected-monthly");
+      if(projectedEl){
+        projectedEl.textContent = fmtMoney(Number(model.projected_monthly || 0));
+      }
+
+      const wasteEl = document.getElementById("budget-waste");
+      if(wasteEl){
+        wasteEl.innerHTML = `
+          <div>Loop waste: <strong>${fmtMoney(Number(waste.loop_waste || 0))}</strong></div>
+          <div>Cache miss waste: <strong>${fmtMoney(Number(waste.cache_miss_waste || 0))}</strong></div>
+          <div style="margin-top:4px;">Total waste: <strong>${fmtMoney(Number(waste.total_waste || 0))}</strong></div>
+        `;
+      }
+
+      const winsEl = document.getElementById("budget-quick-wins");
+      if(winsEl){
+        winsEl.innerHTML = wins.length
+          ? `<ul class="profile-list">${wins.slice(0, 3).map((item)=> `<li>${String(item || "")}</li>`).join("")}</ul>`
+          : `<div class="empty">No quick wins available.</div>`;
+      }
+
+      const recEl = document.getElementById("budget-recommendations");
+      if(recEl){
+        recEl.innerHTML = recommendations.length
+          ? recommendations.map((item, idx)=> {
+              const type = String(item.type || "recommendation");
+              const reason = String(item.reason || "-");
+              const suggested = Number(item.suggested_value || 0);
+              const savings = Number(item.estimated_savings || 0);
+              const priority = String(item.priority || "low");
+              return `<div class="event-item" style="border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:8px;">
+                <div><strong>${type}</strong> <span class="subtle">(${priority})</span></div>
+                <div class="subtle" style="margin-top:4px;">${reason}</div>
+                <div style="margin-top:6px;">Suggested: ${suggested.toFixed(2)} · Est. savings: ${fmtMoney(savings)}</div>
+                <button class="ow-btn" data-budget-apply="${idx}" style="margin-top:8px;">Apply recommendation</button>
+              </div>`;
+            }).join("")
+          : `<div class="empty">No recommendations yet.</div>`;
+        recEl.querySelectorAll("[data-budget-apply]").forEach((btn)=>{
+          btn.addEventListener("click", ()=> showToast("Recommendation applied (preview)"));
+        });
+      }
+    }
+
     function renderCompliance(summary, coverage, findings, overview){
       const fw = (summary && summary.frameworks) ? summary.frameworks : {};
       const owasp = fw["owasp_llm_top10_2025"] || { percent: 0 };
@@ -3504,11 +3628,16 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       if(current && sessions.some((s)=>s.id === current)){ select.value = current; }
       const sid = select.value || (sessions[0] ? sessions[0].id : "");
       if(!sid){ renderFlowAnalysis(null, null); return; }
+      let timelinePromise = fetchData(`/api/v1/flow/timeline?session_id=${encodeURIComponent(sid)}&limit=40`);
       const [analysis, graph] = await Promise.all([
         fetchData(`/api/flow/analyze/${encodeURIComponent(sid)}`),
         fetchData(`/api/flow/graph/${encodeURIComponent(sid)}`)
       ]);
-      renderFlowAnalysis(analysis, graph);
+      let timeline = await timelinePromise;
+      if(!timeline){
+        timeline = await fetchData(`/api/flow/timeline?session_id=${encodeURIComponent(sid)}&limit=40`);
+      }
+      renderFlowAnalysis(analysis, graph, timeline);
     }
     async function pollCompliance(){
       const [summary, coverage, findings, overview] = await Promise.all([
@@ -3551,8 +3680,13 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     }
 
     async function pollCost(){
-      const analytics = await fetchData("/api/v1/cost-analytics?period=24");
+      const [analytics, advice, quickWins] = await Promise.all([
+        fetchData("/api/v1/cost-analytics?period=24"),
+        fetchData("/api/v1/budget/advice"),
+        fetchData("/api/v1/budget/quick-wins"),
+      ]);
       renderCost(analytics);
+      renderBudgetAdvice(advice, quickWins);
     }
 
     async function pollCurrent(){
@@ -3607,6 +3741,28 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         });
       }
       document.getElementById("flow-session-select").addEventListener("change", ()=> pollFlow());
+      const flowListBtn = document.getElementById("flow-view-list");
+      const flowTimelineBtn = document.getElementById("flow-view-timeline");
+      function applyFlowViewMode(){
+        const listView = document.getElementById("flow-list-view");
+        const timelineView = document.getElementById("flow-timeline-view");
+        if(listView){ listView.style.display = flowViewMode === "list" ? "block" : "none"; }
+        if(timelineView){ timelineView.style.display = flowViewMode === "timeline" ? "block" : "none"; }
+      }
+      if(flowListBtn){
+        flowListBtn.addEventListener("click", ()=>{
+          flowViewMode = "list";
+          applyFlowViewMode();
+        });
+      }
+      if(flowTimelineBtn){
+        flowTimelineBtn.addEventListener("click", ()=>{
+          flowViewMode = "timeline";
+          applyFlowViewMode();
+          renderFlowTimeline(flowTimelinePayload);
+        });
+      }
+      applyFlowViewMode();
       const flowShareBtn = document.getElementById("flow-share-btn");
       if(flowShareBtn){
         flowShareBtn.addEventListener("click", async ()=>{

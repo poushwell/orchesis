@@ -72,6 +72,7 @@ from orchesis.community import CommunityClient
 from orchesis.mast_detectors import MASTDetectors
 from orchesis.message_chain import validate_tool_chain
 from orchesis.context_optimizer import ContextOptimizer
+from orchesis.context_router import ContextStrategyRouter
 from orchesis.auto_healer import AutoHealer
 from orchesis.thompson_router import ThompsonRouter
 from orchesis.agent_discovery import AgentDiscovery
@@ -2065,6 +2066,7 @@ class LLMHTTPProxy:
         self._context_optimizer: ContextOptimizer | None = None
         if isinstance(context_opt_cfg, dict) and bool(context_opt_cfg.get("enabled", False)):
             self._context_optimizer = ContextOptimizer(context_opt_cfg)
+        self._context_router = ContextStrategyRouter()
         context_budget_cfg = self._policy.get("context_budget")
         self._context_budget: ContextBudget | None = None
         if isinstance(context_budget_cfg, dict) and bool(context_budget_cfg.get("enabled", False)):
@@ -4183,6 +4185,28 @@ class LLMHTTPProxy:
 
     def _phase_context(self, ctx: _RequestContext) -> bool:
         """Optimize context window before sending to LLM."""
+        messages = ctx.body.get("messages")
+        if isinstance(messages, list) and messages:
+            tools_used: list[str] = []
+            tools = ctx.body.get("tools")
+            if isinstance(tools, list):
+                for item in tools:
+                    if not isinstance(item, dict):
+                        continue
+                    fn = item.get("function")
+                    if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+                        tools_used.append(str(fn.get("name")))
+                    elif isinstance(item.get("name"), str):
+                        tools_used.append(str(item.get("name")))
+            task_type = self._context_router.classify(messages=messages, tools_used=tools_used)
+            strategy = self._context_router.get_strategy(task_type)
+            max_tokens = int(
+                ctx.body.get("max_completion_tokens", ctx.body.get("max_tokens", 0)) or 0
+            )
+            routed_messages = self._context_router.apply_strategy(messages, strategy, max_tokens)
+            ctx.body["messages"] = validate_tool_chain(routed_messages)
+            ctx.proc_result["context_task_type"] = task_type
+            ctx.proc_result["context_strategy"] = strategy
         if self._context_optimizer is not None:
             messages = ctx.body.get("messages")
             if isinstance(messages, list):

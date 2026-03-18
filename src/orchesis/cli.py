@@ -646,9 +646,25 @@ def doctor(config_path: str, attempt_fix: bool, json_output: bool) -> None:
 
 
 @main.command()
-def init() -> None:
-    """Initialize sample policy and request files."""
-    policy_content = """rules:
+@click.option(
+    "--preset",
+    type=click.Choice(["openclaw", "claude", "codex", "other"]),
+    default=None,
+)
+@click.option("--non-interactive", is_flag=True, default=False)
+@click.option("--dir", "project_dir", type=click.Path(), default=".")
+@click.option("--budget", "budget_override", default=None)
+def init(
+    preset: str | None,
+    non_interactive: bool,
+    project_dir: str,
+    budget_override: str | None,
+) -> None:
+    """Interactive project setup wizard."""
+    target_dir = Path(project_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    legacy_policy_content = """rules:
   - name: budget_limit
     max_cost_per_call: 0.50
     daily_budget: 50.00
@@ -675,7 +691,7 @@ def init() -> None:
   - name: rate_limit
     max_requests_per_minute: 100
 """
-    request_content = """{
+    legacy_request_content = """{
   "tool": "sql_query",
   "params": {
     "query": "DROP TABLE users",
@@ -689,9 +705,81 @@ def init() -> None:
 }
 """
 
-    Path("policy.yaml").write_text(policy_content, encoding="utf-8")
-    Path("request.json").write_text(request_content, encoding="utf-8")
+    defaults = {
+        "openclaw": {"budget": "20", "semantic_cache": True, "recording": True, "team": ""},
+        "claude": {"budget": "15", "semantic_cache": True, "recording": True, "team": ""},
+        "codex": {"budget": "15", "semantic_cache": True, "recording": True, "team": ""},
+        "other": {"budget": "10", "semantic_cache": True, "recording": True, "team": ""},
+    }
+    selected_agent = preset or "openclaw"
+    selected_defaults = defaults.get(selected_agent, defaults["openclaw"])
+
+    is_effectively_non_interactive = bool(non_interactive or not sys.stdin.isatty())
+    if is_effectively_non_interactive:
+        budget_raw = str(budget_override or selected_defaults["budget"])
+        semantic_cache_enabled = bool(selected_defaults["semantic_cache"])
+        recording_enabled = bool(selected_defaults["recording"])
+        team_name = str(selected_defaults["team"])
+    else:
+        selected_agent = click.prompt(
+            "Which AI agent are you using?",
+            type=click.Choice(["openclaw", "claude", "codex", "other"]),
+            default=selected_agent,
+            show_choices=True,
+        )
+        budget_raw = click.prompt(
+            "What's your daily budget limit? ($ or 'unlimited')",
+            default=str(budget_override or selected_defaults["budget"]),
+        )
+        semantic_cache_enabled = click.confirm("Enable semantic cache?", default=True)
+        recording_enabled = click.confirm("Enable compliance recording?", default=True)
+        team_name = click.prompt("Your team name (optional)", default="", show_default=False).strip()
+
+    if isinstance(budget_override, str) and budget_override.strip():
+        budget_raw = budget_override.strip()
+
+    budget_unlimited = str(budget_raw).strip().lower() == "unlimited"
+    daily_budget: float | None
+    if budget_unlimited:
+        daily_budget = None
+    else:
+        try:
+            daily_budget = float(str(budget_raw).replace("$", "").strip())
+        except (TypeError, ValueError):
+            daily_budget = 10.0
+
+    orchesis_config: dict[str, Any] = {
+        "agent": {"type": selected_agent},
+        "threat_intel": {"enabled": True},
+        "loop_detection": {"enabled": True, "block_threshold": 5},
+        "semantic_cache": {"enabled": bool(semantic_cache_enabled)},
+        "recording": {"enabled": bool(recording_enabled)},
+        "budgets": {
+            "daily": "unlimited" if budget_unlimited else float(daily_budget or 0.0),
+            "on_hard_limit": "warn" if budget_unlimited else "block",
+        },
+    }
+    if isinstance(team_name, str) and team_name.strip():
+        orchesis_config["team"] = {"name": team_name.strip()}
+
+    (target_dir / "orchesis.yaml").write_text(
+        yaml.safe_dump(orchesis_config, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    (target_dir / ".orchesis").mkdir(parents=True, exist_ok=True)
+
+    # Backward compatibility for existing users/tests relying on these files.
+    (target_dir / "policy.yaml").write_text(legacy_policy_content, encoding="utf-8")
+    (target_dir / "request.json").write_text(legacy_request_content, encoding="utf-8")
     click.echo("Created policy.yaml and request.json. Edit them, then run: orchesis verify")
+
+    click.echo("✓ orchesis.yaml created")
+    click.echo("✓ .orchesis/ directory ready")
+    click.echo("")
+    click.echo("Next steps:")
+    click.echo("  orchesis proxy --config orchesis.yaml")
+    click.echo(f"  orchesis launch {selected_agent if selected_agent != 'other' else 'openclaw'}")
+    click.echo("  http://localhost:8080/dashboard")
 
 
 @main.command()
