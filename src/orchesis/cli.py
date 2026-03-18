@@ -25,7 +25,10 @@ from yaml import YAMLError
 
 from orchesis.auth import AgentAuthenticator, CredentialStore
 from orchesis.audit import AuditEngine, AuditQuery
-from orchesis.audit_export import AuditTrailExporter
+try:
+    from orchesis.audit_export import AuditTrailExporter
+except ImportError:
+    AuditTrailExporter = None  # type: ignore[assignment]
 from orchesis.compliance import ComplianceEngine, FRAMEWORK_CHECKS, FrameworkCrossReference
 from orchesis.compliance_report import ComplianceReportGenerator
 from orchesis.ari import AgentReadinessIndex
@@ -71,6 +74,7 @@ from orchesis.scanner_server import run_scanner_http_server
 from orchesis.scenarios import AdversarialScenarios
 from orchesis.experiment_runner import NLCEExperimentRunner
 from orchesis.nlce_exporter import NLCEPaperExporter
+from orchesis.vibe_audit import VibeCodeAuditor
 from orchesis.integrity import IntegrityMonitor, build_integrity_alert_callback
 from orchesis.hooks import ClaudeCodeHooks, evaluate_hook_tool, log_hook_tool
 from orchesis.quickstart import QuickstartWizard
@@ -367,6 +371,16 @@ def quickstart_command(
     output_path: str,
 ) -> None:
     """Interactive setup wizard for a working config."""
+    def _echo_ok(message: str) -> None:
+        marker = "✓"
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        try:
+            marker.encode(encoding)
+        except UnicodeEncodeError:
+            click.echo(f"[OK] {message}")
+            return
+        click.echo(f"{marker} {message}")
+
     wizard = QuickstartWizard()
     output = wizard.run(
         non_interactive=bool(non_interactive),
@@ -383,20 +397,20 @@ def quickstart_command(
 
     semantic_cfg = generated.get("semantic_cache", {}) if isinstance(generated, dict) else {}
     if isinstance(semantic_cfg, dict) and bool(semantic_cfg.get("enabled")):
-        click.echo("✓ semantic_cache: enabled")
+        _echo_ok("semantic_cache: enabled")
 
     recording_cfg = generated.get("recording", {}) if isinstance(generated, dict) else {}
     if isinstance(recording_cfg, dict) and bool(recording_cfg.get("enabled")):
-        click.echo("✓ recording: enabled")
+        _echo_ok("recording: enabled")
 
     loop_cfg = generated.get("loop_detection", {}) if isinstance(generated, dict) else {}
     if isinstance(loop_cfg, dict) and bool(loop_cfg.get("enabled")):
         block_at = int(loop_cfg.get("block_threshold", 5) or 5)
-        click.echo(f"✓ loop_detection: enabled (block at {block_at} repeats)")
+        _echo_ok(f"loop_detection: enabled (block at {block_at} repeats)")
 
     threat_cfg = generated.get("threat_intel", {}) if isinstance(generated, dict) else {}
     if isinstance(threat_cfg, dict) and bool(threat_cfg.get("enabled")):
-        click.echo("✓ threat_intel: enabled")
+        _echo_ok("threat_intel: enabled")
     raise SystemExit(0)
 
 
@@ -3266,6 +3280,9 @@ def export_command(
     decisions_log_path: str,
 ) -> None:
     """Export full decision audit trail with optional filters."""
+    if AuditTrailExporter is None:
+        print("Audit export unavailable: missing orchesis.audit_export")
+        return
     exporter = AuditTrailExporter(decisions_log_path)
     filters = {
         "agent_id": agent_id,
@@ -3743,6 +3760,67 @@ def nlce_export_command(output_dir: str, section: str | None) -> None:
         return
     files = exporter.export_all(str(target))
     click.echo(json.dumps(files, ensure_ascii=False, indent=2))
+
+
+@main.command("vibe-audit")
+@click.option("--code", "inline_code", default=None, help="Inline code to audit")
+@click.option("--file", "file_path", type=click.Path(exists=True), default=None, help="Single file to audit")
+@click.option("--dir", "dir_path", type=click.Path(exists=True, file_okay=False), default=None, help="Directory to audit")
+@click.option("--ext", "extensions_csv", default=None, help="Comma-separated file extensions (e.g. py,js,ts)")
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text", show_default=True)
+@click.option("--output", "output_path", type=click.Path(), default=None, help="Write report to file")
+def vibe_audit_command(
+    inline_code: str | None,
+    file_path: str | None,
+    dir_path: str | None,
+    extensions_csv: str | None,
+    output_format: str,
+    output_path: str | None,
+) -> None:
+    """Audit generated code for security and quality issues."""
+    auditor = VibeCodeAuditor()
+
+    sources = [inline_code is not None, file_path is not None, dir_path is not None]
+    if sum(1 for item in sources if item) != 1:
+        raise click.ClickException("Use exactly one source: --code OR --file OR --dir")
+
+    report: dict[str, Any]
+    if inline_code is not None:
+        report = auditor.audit_code(inline_code, language="python")
+    elif file_path is not None:
+        report = auditor.audit_file(file_path)
+    else:
+        extensions = None
+        if isinstance(extensions_csv, str) and extensions_csv.strip():
+            extensions = [item.strip() for item in extensions_csv.split(",") if item.strip()]
+        report = auditor.audit_directory(str(dir_path), extensions=extensions)
+
+    text_output = ""
+    if output_format == "json":
+        text_output = json.dumps(report, ensure_ascii=False, indent=2)
+    else:
+        if "findings" in report:
+            text_output = (
+                f"Vibe audit: score {report.get('score', 0):.1f}/100 ({report.get('grade', 'D')})\n"
+                f"Findings: {len(report.get('findings', []))} "
+                f"(critical={report.get('critical_count', 0)}, high={report.get('high_count', 0)})\n"
+                f"Summary: {report.get('summary', '')}"
+            )
+        else:
+            text_output = (
+                f"Vibe audit directory report\n"
+                f"Files scanned: {report.get('files_scanned', 0)}\n"
+                f"Total findings: {report.get('total_findings', 0)}\n"
+                f"Average score: {report.get('avg_score', 0)}"
+            )
+
+    if output_path:
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text_output + "\n", encoding="utf-8")
+        click.echo(str(target))
+        return
+    click.echo(text_output)
 
 
 @main.command("benchmark")
