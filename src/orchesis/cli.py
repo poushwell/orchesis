@@ -91,6 +91,7 @@ from orchesis.marketplace import PolicyMarketplace
 from orchesis.structured_log import StructuredLogger
 from orchesis.templates import TEMPLATE_NAMES, load_template_text
 from orchesis.policy_templates import PolicyTemplateManager, POLICY_TEMPLATES
+from orchesis.policy_diff import PolicyDiff
 from orchesis.evidence_record import EvidenceRecord
 from orchesis import __version__
 
@@ -3764,6 +3765,38 @@ def template_command(
 
     manager.apply_template(template_name, output_path)
     click.echo(f"Applied template '{template_name}' to {output_path}")
+
+
+@main.command("diff")
+@click.argument("policy_a", type=click.Path(exists=True))
+@click.argument("policy_b", type=click.Path(exists=True))
+@click.option("--format", "output_format", type=click.Choice(["text", "yaml"]), default="text")
+@click.option("--breaking-only", is_flag=True, default=False)
+def diff_command(policy_a: str, policy_b: str, output_format: str, breaking_only: bool) -> None:
+    """Compare two policy versions and print change summary."""
+    left = load_policy(policy_a)
+    right = load_policy(policy_b)
+    engine = PolicyDiff()
+    result = engine.compare(left, right)
+
+    if breaking_only:
+        keys = set(result["summary"].get("breaking_changes", []))
+        result = {
+            "added": {k: v for k, v in result.get("added", {}).items() if k in keys},
+            "removed": {k: v for k, v in result.get("removed", {}).items() if k in keys},
+            "changed": {k: v for k, v in result.get("changed", {}).items() if k in keys},
+            "unchanged": [],
+            "summary": {
+                "total_changes": len(keys),
+                "breaking_changes": sorted(keys),
+                "risk_level": result.get("summary", {}).get("risk_level", "low"),
+            },
+        }
+
+    if output_format == "yaml":
+        click.echo(engine.format_yaml(result))
+        return
+    click.echo(engine.format_text(result))
 
 
 @main.command("readiness")

@@ -291,6 +291,19 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     #theme-toggle:hover {
       border-color: var(--accent);
     }
+    #perf-toggle {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--text);
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 14px;
+      opacity: 0.4;
+    }
+    #perf-toggle:hover {
+      border-color: var(--accent);
+    }
     .search-wrap {
       position: relative;
       min-width: 320px;
@@ -1201,7 +1214,9 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
           </div>
         </div>
         <span class="badge"><span id="conn-dot" class="conn-dot"></span><span id="conn-text">Connected</span></span>
+        <span class="badge" id="perf-indicator">[⚡ Standard mode] | Orchesis v0.2.1 | Connected</span>
         <span class="badge" id="status-badge">Status: --</span>
+        <button id="perf-toggle" onclick="togglePerfMode()" title="Performance mode">⚡</button>
         <button id="theme-toggle" onclick="toggleTheme()">☀️</button>
         <div id="notif-bell" onclick="toggleNotifications()">🔔 <span id="notif-count" class="badge">0</span></div>
       </div>
@@ -1639,6 +1654,22 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
           <div id="flow-timeline-details" class="subtle" style="margin-top:8px;">Click a cell to inspect phase details.</div>
         </div>
       </div>
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+          <strong>Request Inspector</strong>
+          <input id="request-inspector-search" type="text" placeholder="Search request id..." style="min-width:220px;padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);">
+        </div>
+        <div class="grid-2" style="margin-top:10px;">
+          <div>
+            <div class="subtle">Recent requests (20)</div>
+            <div id="request-inspector-list" style="margin-top:8px;display:grid;gap:6px;"></div>
+          </div>
+          <div>
+            <div id="request-inspector-meta" class="subtle">Select a request to inspect all 17 phases.</div>
+            <div id="request-inspector-pipeline" style="margin-top:8px;display:grid;grid-template-columns:repeat(6,minmax(80px,1fr));gap:6px;"></div>
+          </div>
+        </div>
+      </div>
     </section>
 
     <section id="compliance" class="screen">
@@ -1778,7 +1809,25 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
 
   <script>
     const POLL_INTERVAL = 3000;
+    const POLL_INTERVALS = {
+      normal: {
+        shield: 3000,
+        threats: 3000,
+        cache: 5000,
+        overwatch: 3000,
+        cost: 10000,
+      },
+      performance: {
+        shield: 30000,
+        threats: 30000,
+        cache: 60000,
+        overwatch: 60000,
+        cost: 120000,
+      }
+    };
     const RATE_LIMIT_REFRESH_MS = 10000;
+    let perfMode = localStorage.getItem('orchesis-perf') === 'true';
+    const loadedTabs = new Set(['shield']);
     let currentTab = "shield";
     let pollTimer = null;
     let selectedAgentProfileId = "";
@@ -2211,6 +2260,43 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         dot.classList.add("lost");
         text.textContent = "Connection lost";
       }
+      renderPerfIndicator();
+    }
+
+    function renderPerfIndicator(){
+      const indicator = document.getElementById("perf-indicator");
+      const conn = document.getElementById("conn-text");
+      const perfToggle = document.getElementById("perf-toggle");
+      const connectionText = conn ? String(conn.textContent || "Connected") : "Connected";
+      if(indicator){
+        indicator.textContent = perfMode
+          ? `[⚡ Performance mode] | Orchesis v0.2.1 | ${connectionText}`
+          : `[⚡ Standard mode] | Orchesis v0.2.1 | ${connectionText}`;
+      }
+      if(perfToggle){
+        perfToggle.style.opacity = perfMode ? "1" : "0.4";
+      }
+    }
+
+    function pollIntervalForTab(tab){
+      const mode = perfMode ? "performance" : "normal";
+      const intervals = POLL_INTERVALS[mode] || {};
+      const fallback = perfMode ? 30000 : POLL_INTERVAL;
+      return Number(intervals[tab] || fallback);
+    }
+
+    function applyPollIntervals(){
+      if(pollTimer){ clearInterval(pollTimer); }
+      pollTimer = setInterval(()=>{ pollCurrent(); }, pollIntervalForTab(currentTab));
+      renderPerfIndicator();
+    }
+
+    function togglePerfMode() {
+      perfMode = !perfMode;
+      localStorage.setItem('orchesis-perf', perfMode);
+      applyPollIntervals();
+      document.getElementById('perf-toggle').style.opacity = perfMode ? '1' : '0.4';
+      showToast(perfMode ? 'Performance mode ON' : 'Performance mode OFF');
     }
 
     function setStatus(status){
@@ -2765,6 +2851,79 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
 
     let flowViewMode = "list";
     let flowTimelinePayload = null;
+    let requestInspectorItems = [];
+    let requestInspectorActiveId = "";
+
+    function renderRequestInspectorList() {
+      const root = document.getElementById("request-inspector-list");
+      if(!root){ return; }
+      const searchEl = document.getElementById("request-inspector-search");
+      const q = String((searchEl && searchEl.value) || "").trim().toLowerCase();
+      const rows = requestInspectorItems.filter((item)=>{
+        const rid = String(item.request_id || "").toLowerCase();
+        const aid = String(item.agent_id || "").toLowerCase();
+        const tool = String(item.tool || "").toLowerCase();
+        if(!q){ return true; }
+        return rid.includes(q) || aid.includes(q) || tool.includes(q);
+      });
+      if(rows.length === 0){
+        root.innerHTML = `<div class="empty">No requests found.</div>`;
+        return;
+      }
+      root.innerHTML = rows.map((item)=>{
+        const rid = String(item.request_id || "");
+        const active = rid === requestInspectorActiveId;
+        const decision = String(item.final_decision || "ALLOW").toUpperCase();
+        const sevClass = decision === "DENY" ? "high" : "low";
+        return `<button class="tab-btn ${active ? "active" : ""}" data-request-inspect="${rid}" style="text-align:left;">
+          <div><strong>${rid.slice(0, 12)}</strong> <span class="sev ${sevClass}" style="margin-left:6px;">${decision}</span></div>
+          <div class="subtle">${String(item.tool || "-")} · ${String(item.agent_id || "-")}</div>
+        </button>`;
+      }).join("");
+      root.querySelectorAll("[data-request-inspect]").forEach((btn)=>{
+        btn.addEventListener("click", ()=> {
+          const rid = String(btn.getAttribute("data-request-inspect") || "");
+          if(rid){ loadRequestInspection(rid); }
+        });
+      });
+    }
+
+    function renderRequestInspection(inspection){
+      const meta = document.getElementById("request-inspector-meta");
+      const pipeline = document.getElementById("request-inspector-pipeline");
+      if(!meta || !pipeline){ return; }
+      if(!inspection || typeof inspection !== "object"){
+        meta.textContent = "Select a request to inspect all 17 phases.";
+        pipeline.innerHTML = "";
+        return;
+      }
+      const blocking = (inspection.blocking_phase && typeof inspection.blocking_phase === "object") ? inspection.blocking_phase : null;
+      const phases = Array.isArray(inspection.phases) ? inspection.phases : [];
+      const colors = { pass: "#00E5A0", warn: "#fbbf24", block: "#ef4444", skip: "#6b7280" };
+      const finalDecision = String(inspection.final_decision || "ALLOW").toUpperCase();
+      meta.innerHTML = `Request <strong>${String(inspection.request_id || "").slice(0, 16)}</strong> · ${String(inspection.tool || "-")} · ${String(inspection.agent_id || "-")} · <span class="sev ${finalDecision === "DENY" ? "high" : "low"}">${finalDecision}</span>`;
+      pipeline.innerHTML = phases.map((phase)=>{
+        const result = String(phase.result || "skip");
+        const phaseName = String(phase.phase_name || "");
+        const number = Number(phase.phase_number || 0);
+        const duration = Number(phase.duration_us || 0);
+        const isBlocking = blocking && String(blocking.phase_name || "") === phaseName;
+        const border = isBlocking ? "2px solid #ef4444" : "1px solid var(--border)";
+        return `<div style="border:${border};border-radius:8px;padding:6px;background:color-mix(in srgb, ${colors[result] || "#6b7280"} 18%, var(--surface));">
+          <div class="subtle">#${number}</div>
+          <div style="font-weight:700;font-size:12px;">${phaseName}</div>
+          <div class="subtle">${result.toUpperCase()} · ${duration}us</div>
+        </div>`;
+      }).join("");
+    }
+
+    async function loadRequestInspection(requestId){
+      if(!requestId){ return; }
+      requestInspectorActiveId = requestId;
+      renderRequestInspectorList();
+      const inspection = await fetchData(`/api/v1/requests/${encodeURIComponent(requestId)}/inspect`);
+      renderRequestInspection(inspection);
+    }
 
     function renderFlowTimeline(payload) {
       const svg = document.getElementById("flow-timeline-svg");
@@ -3778,7 +3937,10 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       select.innerHTML = sessions.map((s)=> `<option value="${s.id}">${s.id}</option>`).join("");
       if(current && sessions.some((s)=>s.id === current)){ select.value = current; }
       const sid = select.value || (sessions[0] ? sessions[0].id : "");
-      if(!sid){ renderFlowAnalysis(null, null); return; }
+      const recent = await fetchData("/api/v1/requests/recent?limit=20");
+      requestInspectorItems = (recent && Array.isArray(recent.requests)) ? recent.requests : [];
+      renderRequestInspectorList();
+      if(!sid){ renderFlowAnalysis(null, null, null); return; }
       let timelinePromise = fetchData(`/api/v1/flow/timeline?session_id=${encodeURIComponent(sid)}&limit=40`);
       const [analysis, graph] = await Promise.all([
         fetchData(`/api/flow/analyze/${encodeURIComponent(sid)}`),
@@ -3789,6 +3951,9 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         timeline = await fetchData(`/api/flow/timeline?session_id=${encodeURIComponent(sid)}&limit=40`);
       }
       renderFlowAnalysis(analysis, graph, timeline);
+      if(!requestInspectorActiveId && requestInspectorItems.length > 0){
+        loadRequestInspection(String(requestInspectorItems[0].request_id || ""));
+      }
     }
     async function pollCompliance(){
       const [summary, coverage, findings, overview] = await Promise.all([
@@ -3840,18 +4005,22 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       renderBudgetAdvice(advice, quickWins);
     }
 
+    async function pollTab(tab){
+      if(tab === "shield") return pollShield();
+      if(tab === "agents") return pollAgents();
+      if(tab === "sessions") return pollSessions();
+      if(tab === "flow") return pollFlow();
+      if(tab === "experiments") return pollExperiments();
+      if(tab === "threats") return pollThreats();
+      if(tab === "cache") return pollCache();
+      if(tab === "cost") return pollCost();
+      if(tab === "compliance") return pollCompliance();
+      if(tab === "overwatch") return pollOverwatch();
+      if(tab === "approvals") return pollApprovals();
+    }
+
     async function pollCurrent(){
-      if(currentTab === "shield") return pollShield();
-      if(currentTab === "agents") return pollAgents();
-      if(currentTab === "sessions") return pollSessions();
-      if(currentTab === "flow") return pollFlow();
-      if(currentTab === "experiments") return pollExperiments();
-      if(currentTab === "threats") return pollThreats();
-      if(currentTab === "cache") return pollCache();
-      if(currentTab === "cost") return pollCost();
-      if(currentTab === "compliance") return pollCompliance();
-      if(currentTab === "overwatch") return pollOverwatch();
-      if(currentTab === "approvals") return pollApprovals();
+      return pollTab(currentTab);
     }
 
     function switchTab(tab){
@@ -3862,7 +4031,13 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       document.querySelectorAll(".screen").forEach((el)=>{
         el.classList.toggle("active", el.id === tab);
       });
-      pollCurrent();
+      if (!loadedTabs.has(tab)) {
+        loadedTabs.add(tab);
+        pollTab(tab);
+      } else {
+        pollCurrent();
+      }
+      applyPollIntervals();
     }
 
     function bindUI(){
@@ -3892,6 +4067,10 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         });
       }
       document.getElementById("flow-session-select").addEventListener("change", ()=> pollFlow());
+      const requestSearch = document.getElementById("request-inspector-search");
+      if(requestSearch){
+        requestSearch.addEventListener("input", ()=> renderRequestInspectorList());
+      }
       const flowListBtn = document.getElementById("flow-view-list");
       const flowTimelineBtn = document.getElementById("flow-view-timeline");
       function applyFlowViewMode(){
@@ -4047,10 +4226,10 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       applyTheme(savedTheme);
       bindUI();
       renderNotifications();
+      renderPerfIndicator();
       await pollShield();
       await pollNotifications();
-      if(pollTimer){ clearInterval(pollTimer); }
-      pollTimer = setInterval(()=>{ pollCurrent(); }, POLL_INTERVAL);
+      applyPollIntervals();
       if(notifTimer){ clearInterval(notifTimer); }
       notifTimer = setInterval(()=>{ pollNotifications(); }, NOTIF_POLL_INTERVAL);
     }

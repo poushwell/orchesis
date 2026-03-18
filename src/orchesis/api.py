@@ -57,11 +57,13 @@ from orchesis.cost_forecast import CostForecaster
 from orchesis.budget_advisor import BudgetAdvisor
 from orchesis.session_replay import SessionReplay
 from orchesis.community_intel import CommunityIntel
+from orchesis.request_inspector import RequestInspector
 from orchesis.token_yield import TokenYieldTracker
 from orchesis.threat_feed import ThreatFeed
 from orchesis.signature_editor import SignatureEditor
 from orchesis.alert_rules import AlertRule, AlertRulesEngine
 from orchesis.agent_graph import AgentCollaborationGraph
+from orchesis.tenants import TenantManager
 from orchesis import __version__
 
 
@@ -144,6 +146,7 @@ def create_api_app(
     )
     app.state.threat_feed = ThreatFeed(feed_cfg)
     app.state.signature_editor = SignatureEditor(str(policy_file.parent / ".orchesis" / "signatures.json"))
+    app.state.tenant_manager = TenantManager(str(policy_file.parent / ".orchesis" / "tenants"))
     raw_alert_rules = (
         current_version.policy.get("alert_rules")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("alert_rules"), list)
@@ -540,6 +543,18 @@ def create_api_app(
             "daily_limit_usd": float(budgets_cfg.get("daily", budget_daily) or 0.0),
         }
         return BudgetAdvisor().analyze(events, current_budget)
+
+    def _build_request_inspection(request_id: str) -> dict[str, Any]:
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        inspector = RequestInspector()
+        inspection = inspector.inspect(request_id=request_id, decisions_log=events)
+        if not inspection:
+            return {}
+        payload = dict(inspection)
+        payload["blocking_phase"] = inspector.find_blocking_phase(inspection)
+        payload["timeline"] = inspector.get_timeline(inspection)
+        return payload
 
     def _build_current_stats_by_agent(since_hours: int = 24) -> dict[str, dict[str, float]]:
         source = Path(app.state.decisions_log)
@@ -1533,6 +1548,44 @@ def create_api_app(
         analysis = _build_budget_advice_payload()
         return {"quick_wins": BudgetAdvisor().get_quick_wins(analysis)}
 
+    @app.get("/api/v1/requests/{request_id}/inspect")
+    def request_inspect(
+        request_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = _build_request_inspection(request_id)
+        if not payload:
+            raise HTTPException(status_code=404, detail={"error": "request not found"})
+        return payload
+
+    @app.get("/api/v1/requests/recent")
+    def request_recent(
+        limit: int = 20,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        safe_limit = max(1, min(200, int(limit)))
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        rows: list[dict[str, Any]] = []
+        for event in reversed(events):
+            event_id = str(getattr(event, "event_id", "") or "")
+            if not event_id:
+                continue
+            rows.append(
+                {
+                    "request_id": event_id,
+                    "timestamp": str(getattr(event, "timestamp", "")),
+                    "agent_id": str(getattr(event, "agent_id", "__global__") or "__global__"),
+                    "tool": str(getattr(event, "tool", "")),
+                    "final_decision": str(getattr(event, "decision", "ALLOW") or "ALLOW"),
+                }
+            )
+            if len(rows) >= safe_limit:
+                break
+        return {"requests": rows, "count": len(rows)}
+
     @app.get("/api/v1/anomaly/alerts")
     def anomaly_alerts(
         since: float | None = None,
@@ -1747,6 +1800,67 @@ def create_api_app(
         metric_values = metrics_input if isinstance(metrics_input, dict) else _default_alert_metrics()
         fired = app.state.alert_rules_engine.evaluate(metric_values)
         return {"fired": fired, "count": len(fired), "metrics": metric_values}
+
+    @app.get("/api/v1/tenants")
+    def list_tenants(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        rows = app.state.tenant_manager.list_tenants()
+        return {"tenants": rows, "count": len(rows)}
+
+    @app.post("/api/v1/tenants")
+    def create_tenant(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        tenant_id = payload.get("tenant_id")
+        policy = payload.get("policy")
+        try:
+            row = app.state.tenant_manager.create_tenant(str(tenant_id or ""), policy)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        return row
+
+    @app.get("/api/v1/tenants/{tenant_id}")
+    def get_tenant(
+        tenant_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        policy = app.state.tenant_manager.get_policy(tenant_id)
+        if policy is None:
+            raise HTTPException(status_code=404, detail={"error": "tenant not found"})
+        resolved = app.state.tenant_manager.resolve_policy(tenant_id, app.state.current_version.policy)
+        return {"tenant_id": tenant_id, "policy": policy, "resolved_policy": resolved}
+
+    @app.put("/api/v1/tenants/{tenant_id}/policy")
+    def update_tenant_policy(
+        tenant_id: str,
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        policy = payload.get("policy")
+        try:
+            row = app.state.tenant_manager.update_policy(tenant_id, policy)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail={"error": "tenant not found"}) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        return row
+
+    @app.delete("/api/v1/tenants/{tenant_id}")
+    def delete_tenant(
+        tenant_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        ok = app.state.tenant_manager.delete_tenant(tenant_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail={"error": "tenant not found"})
+        return {"deleted": True, "tenant_id": tenant_id}
 
     @app.get("/api/v1/community/status")
     def community_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
