@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable
 
 
@@ -12,6 +13,7 @@ class ShadowModeRunner:
         self.shadow_policy = shadow_policy if isinstance(shadow_policy, dict) else {}
         self.engine = engine
         self._results: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
 
     def shadow_evaluate(self, request: dict, real_decision: dict) -> dict:
         """Evaluate against shadow policy, compare with real decision."""
@@ -33,24 +35,27 @@ class ShadowModeRunner:
             "match": bool(match),
             "divergence_reason": divergence_reason,
         }
-        self._results.append(row)
-        if len(self._results) > 5000:
-            del self._results[:-5000]
+        with self._lock:
+            self._results.append(row)
+            if len(self._results) > 5000:
+                del self._results[:-5000]
         return row
 
     def get_divergence_report(self) -> dict:
-        total = len(self._results)
-        matches = sum(1 for item in self._results if bool(item.get("match", False)))
+        with self._lock:
+            rows = list(self._results)
+        total = len(rows)
+        matches = sum(1 for item in rows if bool(item.get("match", False)))
         divergences = total - matches
         false_positives = sum(
             1
-            for item in self._results
+            for item in rows
             if str(item.get("real_decision", "")).upper() == "ALLOW"
             and str(item.get("shadow_decision", "")).upper() == "DENY"
         )
         false_negatives = sum(
             1
-            for item in self._results
+            for item in rows
             if str(item.get("real_decision", "")).upper() == "DENY"
             and str(item.get("shadow_decision", "")).upper() == "ALLOW"
         )
@@ -63,6 +68,12 @@ class ShadowModeRunner:
             "false_positives": int(false_positives),
             "false_negatives": int(false_negatives),
         }
+
+    def get_divergences(self, limit: int = 100) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 1000))
+        with self._lock:
+            rows = [item for item in self._results if not bool(item.get("match", False))]
+        return rows[-safe_limit:]
 
     def get_recommendation(self) -> str:
         """Should shadow policy replace real policy?"""

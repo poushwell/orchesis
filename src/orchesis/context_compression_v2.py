@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 
@@ -27,6 +28,7 @@ class ContextCompressionV2:
             "quality_sum": 0.0,
             "last_algorithm": self.algorithm,
         }
+        self._lock = threading.Lock()
 
     @staticmethod
     def _content_text(message: dict[str, Any]) -> str:
@@ -145,11 +147,12 @@ class ContextCompressionV2:
         compression_ratio = float(len(compressed)) / float(original_count)
         quality_score = max(0.0, min(1.0, 1.0 - ((1.0 - compression_ratio) * 0.4)))
 
-        self._stats["runs"] = int(self._stats.get("runs", 0)) + 1
-        self._stats["tokens_saved_total"] = int(self._stats.get("tokens_saved_total", 0)) + int(tokens_saved)
-        self._stats["ratio_sum"] = float(self._stats.get("ratio_sum", 0.0)) + compression_ratio
-        self._stats["quality_sum"] = float(self._stats.get("quality_sum", 0.0)) + float(quality_score)
-        self._stats["last_algorithm"] = self.algorithm
+        with self._lock:
+            self._stats["runs"] = int(self._stats.get("runs", 0)) + 1
+            self._stats["tokens_saved_total"] = int(self._stats.get("tokens_saved_total", 0)) + int(tokens_saved)
+            self._stats["ratio_sum"] = float(self._stats.get("ratio_sum", 0.0)) + compression_ratio
+            self._stats["quality_sum"] = float(self._stats.get("quality_sum", 0.0)) + float(quality_score)
+            self._stats["last_algorithm"] = self.algorithm
 
         return {
             "compressed_messages": compressed,
@@ -162,13 +165,15 @@ class ContextCompressionV2:
 
     def get_stats(self) -> dict:
         """Compression stats: avg ratio, tokens saved, quality."""
-        runs = max(0, int(self._stats.get("runs", 0)))
-        avg_ratio = float(self._stats.get("ratio_sum", 0.0)) / float(runs) if runs > 0 else 0.0
-        avg_quality = float(self._stats.get("quality_sum", 0.0)) / float(runs) if runs > 0 else 0.0
+        with self._lock:
+            snapshot = dict(self._stats)
+        runs = max(0, int(snapshot.get("runs", 0)))
+        avg_ratio = float(snapshot.get("ratio_sum", 0.0)) / float(runs) if runs > 0 else 0.0
+        avg_quality = float(snapshot.get("quality_sum", 0.0)) / float(runs) if runs > 0 else 0.0
         return {
             "runs": runs,
-            "algorithm": str(self._stats.get("last_algorithm", self.algorithm)),
+            "algorithm": str(snapshot.get("last_algorithm", self.algorithm)),
             "avg_ratio": round(avg_ratio, 4),
-            "tokens_saved_total": int(self._stats.get("tokens_saved_total", 0)),
+            "tokens_saved_total": int(snapshot.get("tokens_saved_total", 0)),
             "avg_quality": round(avg_quality, 4),
         }

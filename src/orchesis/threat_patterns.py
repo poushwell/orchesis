@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from copy import deepcopy
 
 
@@ -48,6 +49,7 @@ class ThreatPatternLibrary:
 
     def __init__(self) -> None:
         self._counts: dict[str, int] = {key: 0 for key in self.PATTERNS.keys()}
+        self._lock = threading.Lock()
 
     def match(self, text: str) -> list[dict]:
         """Returns matched patterns with confidence score."""
@@ -87,7 +89,8 @@ class ThreatPatternLibrary:
             if length_match:
                 row["length"] = len(text)
             matched.append(row)
-            self._counts[pattern_id] = int(self._counts.get(pattern_id, 0) or 0) + 1
+            with self._lock:
+                self._counts[pattern_id] = int(self._counts.get(pattern_id, 0) or 0) + 1
         return matched
 
     def get_pattern(self, pattern_id: str) -> dict | None:
@@ -113,5 +116,7 @@ class ThreatPatternLibrary:
 
     def get_stats(self) -> dict:
         """Match counts per pattern."""
-        total = sum(int(v) for v in self._counts.values())
-        return {"matches": dict(self._counts), "total_matches": int(total)}
+        with self._lock:
+            counts = dict(self._counts)
+        total = sum(int(v) for v in counts.values())
+        return {"matches": counts, "total_matches": int(total)}

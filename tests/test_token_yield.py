@@ -91,3 +91,27 @@ async def test_api_endpoint_returns_yield(tmp_path: Path) -> None:
     assert payload["session_id"] == "session-1"
     assert payload["total_tokens"] == 200
     assert payload["cache_savings"] == 200
+
+
+@pytest.mark.asyncio
+async def test_api_endpoint_global_is_not_shadowed_by_session_route(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(_policy_yaml(), encoding="utf-8")
+    app = create_api_app(
+        policy_path=str(policy_path),
+        state_persist=str(tmp_path / "state.jsonl"),
+        decisions_log=str(tmp_path / "decisions.jsonl"),
+        history_path=str(tmp_path / "policy_versions.jsonl"),
+    )
+    app.state.token_yield.record(
+        "session-a",
+        prompt_tokens=20,
+        completion_tokens=10,
+        cache_hit=False,
+        unique_content_ratio=0.5,
+    )
+    async with await _client(app) as client:
+        res = await client.get("/api/v1/token-yield/global", headers=_auth())
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["sessions"] >= 1

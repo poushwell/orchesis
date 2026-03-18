@@ -2605,7 +2605,10 @@ def create_api_app(
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_auth(authorization)
-        if str(session_id).strip().lower() == "report":
+        token = str(session_id).strip().lower()
+        if token == "global":
+            return app.state.token_yield.get_global_stats()
+        if token == "report":
             period = str(request.query_params.get("period", "24h"))
             return _build_token_yield_report(period)
         return app.state.token_yield.get_yield(session_id)
@@ -3040,12 +3043,10 @@ def create_api_app(
         runner = getattr(app.state, "shadow_runner", None)
         if not isinstance(runner, ShadowModeRunner):
             return {"enabled": False, "report": {}, "items": []}
-        safe_limit = max(1, min(int(limit), 1000))
-        rows = [item for item in runner._results if not bool(item.get("match", False))]  # noqa: SLF001
         return {
             "enabled": True,
             "report": runner.get_divergence_report(),
-            "items": rows[-safe_limit:],
+            "items": runner.get_divergences(limit=limit),
         }
 
     @app.post("/api/v1/shadow/enable")
