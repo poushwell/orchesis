@@ -7,7 +7,11 @@ import time
 from types import SimpleNamespace
 from urllib.error import URLError
 
+from fastapi.testclient import TestClient
+
+from orchesis.api import create_api_app
 from orchesis.community import CommunityClient
+from orchesis.community_intel import CommunityIntel
 from orchesis.privacy_filter import CommunitySignal, PrivacyFilter
 
 
@@ -388,3 +392,107 @@ def test_invalid_signature_format_skipped(tmp_path, monkeypatch) -> None:
     payload = {"signatures": [{"signature_type": "injection"}]}
     monkeypatch.setattr(c, "_get_json", lambda *_a, **_k: (200, payload))
     assert c._poll_signatures() == 0  # noqa: SLF001
+
+
+def _policy_yaml_for_community() -> str:
+    return """
+api:
+  token: "orch_sk_test"
+community:
+  enabled: false
+  share_signatures: true
+  share_patterns: false
+rules: []
+"""
+
+
+def test_community_disabled_by_default() -> None:
+    intel = CommunityIntel({})
+    assert intel.enabled is False
+    stats = intel.get_stats()
+    assert stats["enabled"] is False
+
+
+def test_anonymize_removes_pii() -> None:
+    intel = CommunityIntel({"enabled": True})
+    payload = intel.anonymize(
+        {
+            "agent_id": "agent-1",
+            "session_id": "sess-1",
+            "content": "secret prompt",
+            "api_key": "sk-secret",
+            "threat_type": "prompt_injection",
+            "severity": "high",
+            "pattern": "ignore all rules",
+            "timestamp": 1700000000,
+        }
+    )
+    assert "agent_id" not in payload
+    assert "session_id" not in payload
+    assert "content" not in payload
+    assert "api_key" not in payload
+    assert "pattern_hash" in payload
+
+
+def test_anonymize_keeps_threat_type() -> None:
+    intel = CommunityIntel({"enabled": True})
+    payload = intel.anonymize({"threat_type": "tool_abuse", "severity": "medium", "timestamp": 1700000000})
+    assert payload["threat_type"] == "tool_abuse"
+
+
+def test_submit_threat_anonymized() -> None:
+    intel = CommunityIntel({"enabled": True, "share_signatures": True})
+    ok = intel.submit_threat(
+        {
+            "threat_type": "prompt_injection",
+            "severity": "high",
+            "signature": "ignore all previous instructions",
+            "agent_id": "agent-1",
+            "session_id": "sess-1",
+            "content": "raw prompt",
+            "timestamp": 1700000000,
+        }
+    )
+    assert ok is True
+    stats = intel.get_stats()
+    assert stats["threats_submitted"] == 1
+    stored = intel._submitted[0]  # noqa: SLF001
+    assert "agent_id" not in stored
+    assert "session_id" not in stored
+    assert "content" not in stored
+    assert stored["threat_type"] == "prompt_injection"
+
+
+def test_enable_disable_toggle(tmp_path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(_policy_yaml_for_community(), encoding="utf-8")
+    app = create_api_app(policy_path=str(policy_path), decisions_log=str(tmp_path / "decisions.jsonl"))
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer orch_sk_test"}
+    status = client.get("/api/v1/community/status", headers=headers)
+    assert status.status_code == 200
+    assert status.json()["enabled"] is False
+    enabled = client.post("/api/v1/community/enable", headers=headers)
+    assert enabled.status_code == 200
+    assert enabled.json()["enabled"] is True
+    disabled = client.post("/api/v1/community/disable", headers=headers)
+    assert disabled.status_code == 200
+    assert disabled.json()["enabled"] is False
+
+
+def test_stats_tracked() -> None:
+    intel = CommunityIntel(
+        {
+            "enabled": True,
+            "seed_updates": [
+                {"threat_type": "prompt_injection", "pattern_hash": "abc", "severity": "high", "timestamp": 1700000001}
+            ],
+        }
+    )
+    intel.submit_threat({"threat_type": "tool_abuse", "severity": "medium", "signature": "rm -rf", "timestamp": 1700000000})
+    updates = intel.pull_updates()
+    stats = intel.get_stats()
+    assert len(updates) == 1
+    assert stats["threats_submitted"] == 1
+    assert stats["updates_pulled"] == 1
+    assert stats["community_signatures"] == 1

@@ -291,6 +291,115 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     #theme-toggle:hover {
       border-color: var(--accent);
     }
+    .search-wrap {
+      position: relative;
+      min-width: 320px;
+      max-width: 560px;
+      width: min(48vw, 560px);
+    }
+    #global-search {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--text);
+      padding: 8px 10px;
+      font-size: 13px;
+      outline: none;
+    }
+    #global-search:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 28%, transparent);
+    }
+    .search-dropdown {
+      position: absolute;
+      top: 40px;
+      right: 0;
+      width: min(560px, calc(100vw - 32px));
+      max-height: 380px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+      z-index: 10000;
+      padding: 6px;
+    }
+    .search-dropdown.hidden {
+      display: none;
+    }
+    .modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.55);
+      display: grid;
+      place-items: center;
+      z-index: 10001;
+      padding: 16px;
+    }
+    .modal.hidden { display: none; }
+    .modal-content {
+      width: min(560px, 100%);
+      max-height: min(80vh, 640px);
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: 0 12px 36px rgba(0,0,0,0.45);
+      padding: 14px;
+    }
+    .shortcuts-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+    .shortcuts-table td {
+      border-bottom: 1px solid var(--border);
+      padding: 8px 6px;
+    }
+    .shortcuts-table td:first-child {
+      width: 120px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      color: var(--ok);
+      font-weight: 700;
+    }
+    .shortcuts-hint {
+      margin: 0 auto;
+      max-width: 1400px;
+      color: var(--text-secondary);
+      font-size: 12px;
+      padding: 0 20px 16px;
+    }
+    kbd {
+      border: 1px solid var(--border);
+      border-bottom-width: 2px;
+      border-radius: 6px;
+      padding: 1px 6px;
+      background: color-mix(in srgb, var(--surface) 92%, var(--bg));
+      color: var(--text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 11px;
+    }
+    .search-section {
+      color: var(--text-secondary);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 8px 10px 6px;
+      font-weight: 700;
+    }
+    .search-item {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 8px 10px;
+      margin-bottom: 6px;
+      cursor: pointer;
+      background: color-mix(in srgb, var(--surface) 92%, var(--bg));
+    }
+    .search-item:hover {
+      border-color: var(--accent);
+    }
     .toast {
       position: fixed;
       right: 18px;
@@ -466,6 +575,31 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     .rl-status-ok { color: #34d399; }
     .rl-status-warning { color: #facc15; }
     .rl-status-throttled { color: #ef4444; }
+    .community-widget {
+      border: 1px solid rgba(90, 168, 255, 0.35);
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, rgba(90, 168, 255, 0.1), rgba(90, 168, 255, 0.03));
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+    .community-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .community-toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); }
+    .community-toggle input { accent-color: #34d399; width: 16px; height: 16px; }
+    .community-stats { display: grid; grid-template-columns: repeat(2, minmax(160px, 1fr)); gap: 8px; }
+    .community-stat { border: 1px solid rgba(255,255,255,0.08); border-radius: var(--radius-sm); padding: 6px 8px; }
+    .community-stat .k { font-size: 11px; color: var(--text-secondary); }
+    .community-stat .v { font-size: 16px; font-weight: 800; font-variant-numeric: tabular-nums; }
+    .privacy-badge {
+      display: inline-block;
+      border: 1px solid rgba(52, 211, 153, 0.5);
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #34d399;
+      background: rgba(52, 211, 153, 0.1);
+    }
     .agent-health-widget {
       border: 1px solid rgba(90,168,255,0.35);
       border-radius: var(--radius);
@@ -1040,6 +1174,14 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     <div class="topbar">
       <div class="brand"><span class="logo">🛡️ Orchesis</span><span class="subtle">Dashboard MVP</span></div>
       <div class="badges">
+        <div class="search-wrap">
+          <input id="global-search" type="text" placeholder="Search agents, sessions, threats..." oninput="debounceSearch(this.value)" />
+          <div id="search-results" class="search-dropdown hidden">
+            <div class="search-section">Agents</div>
+            <div class="search-section">Sessions</div>
+            <div class="search-section">Threats</div>
+          </div>
+        </div>
         <span class="badge"><span id="conn-dot" class="conn-dot"></span><span id="conn-text">Connected</span></span>
         <span class="badge" id="status-badge">Status: --</span>
         <button id="theme-toggle" onclick="toggleTheme()">☀️</button>
@@ -1062,6 +1204,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       <button class="tab-btn" data-tab="experiments">🧪 Experiments</button>
       <button class="tab-btn" data-tab="threats">🛡️ Threats</button>
       <button class="tab-btn" data-tab="cache">⚡ Cache</button>
+      <button class="tab-btn" data-tab="cost">💰 Cost</button>
       <button class="tab-btn" data-tab="compliance">📘 Compliance</button>
       <button class="tab-btn" data-tab="overwatch">🛰️ Overwatch</button>
       <button class="tab-btn" data-tab="approvals">✅ Approvals</button>
@@ -1159,6 +1302,25 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         </div>
         <div id="rl-agent-rows" class="rl-rows">
           <div class="empty">No rate limit data.</div>
+        </div>
+      </div>
+      <div class="community-widget">
+        <div class="community-head">
+          <div>
+            <div class="subtle">Community Intel</div>
+            <div id="community-last-sync" class="subtle">Last sync: --</div>
+          </div>
+          <label class="community-toggle">
+            <input id="community-enabled-toggle" type="checkbox">
+            <span>Opt-in sharing</span>
+          </label>
+        </div>
+        <div class="community-stats">
+          <div class="community-stat"><div class="k">Threats shared</div><div id="community-threats-shared" class="v">0</div></div>
+          <div class="community-stat"><div class="k">Updates received</div><div id="community-updates-received" class="v">0</div></div>
+        </div>
+        <div>
+          <span class="privacy-badge">Privacy: zero PII shared</span>
         </div>
       </div>
       <div class="grid-4">
@@ -1318,6 +1480,39 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       <div class="panel">
         <div class="section-title"><strong>Context Engine</strong></div>
         <div id="c-context"></div>
+      </div>
+    </section>
+
+    <section id="cost" class="screen">
+      <div class="grid-4">
+        <div class="panel"><div class="subtle">Total Cost (period)</div><div id="cost-total" class="metric-value">$0.00</div></div>
+        <div class="panel"><div class="subtle">24h Forecast</div><div id="cost-forecast" class="metric-value">$0.00</div></div>
+        <div class="panel"><div class="subtle">Top Model</div><div id="cost-top-model" class="metric-value">--</div></div>
+        <div class="panel"><div class="subtle">Top Agent</div><div id="cost-top-agent" class="metric-value">--</div></div>
+      </div>
+      <div class="grid-2">
+        <div class="panel panel-primary">
+          <div class="section-title"><strong>Cost by Model</strong></div>
+          <div id="cost-by-model"></div>
+        </div>
+        <div class="panel panel-primary">
+          <div class="section-title"><strong>Cost by Agent</strong></div>
+          <div id="cost-by-agent"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="section-title"><strong>Hourly Cost Timeline</strong></div>
+        <div id="cost-hourly"></div>
+      </div>
+      <div class="grid-2">
+        <div class="panel">
+          <div class="section-title"><strong>Savings Breakdown</strong></div>
+          <div id="cost-savings"></div>
+        </div>
+        <div class="panel">
+          <div class="section-title"><strong>Top Expensive Sessions</strong></div>
+          <div id="cost-top-sessions"></div>
+        </div>
       </div>
     </section>
 
@@ -1518,6 +1713,28 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       </div>
     </section>
   </div>
+  <div class="shortcuts-hint">Press <kbd>?</kbd> for keyboard shortcuts</div>
+  <div id="shortcuts-modal" class="modal hidden">
+    <div class="modal-content">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        <h3 style="margin:0;">Keyboard Shortcuts</h3>
+        <button id="shortcuts-close-btn" class="tab-btn" style="padding:4px 8px;">Close</button>
+      </div>
+      <table class="shortcuts-table">
+        <tbody>
+          <tr><td>g s</td><td>Go to Shield</td></tr>
+          <tr><td>g a</td><td>Go to Agents</td></tr>
+          <tr><td>g t</td><td>Go to Threats</td></tr>
+          <tr><td>g c</td><td>Go to Cache</td></tr>
+          <tr><td>g o</td><td>Go to Overwatch</td></tr>
+          <tr><td>g p</td><td>Go to Compliance</td></tr>
+          <tr><td>r</td><td>Refresh current tab</td></tr>
+          <tr><td>?</td><td>Show this help</td></tr>
+          <tr><td>Esc</td><td>Close modal/panel</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
   <div id="toast" class="toast"></div>
 
   <script>
@@ -1535,6 +1752,20 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     let notifLastTs = 0;
     let rateLimitSnapshot = null;
     let lastRateLimitFetchMs = 0;
+    let searchTimer = null;
+    const SHORTCUTS = {
+      "g s": "shield",
+      "g a": "agents",
+      "g t": "threats",
+      "g c": "cache",
+      "g o": "overwatch",
+      "g p": "compliance",
+      "?": "shortcuts",
+      "r": "refresh",
+      "Escape": "close",
+    };
+    let keySequence = [];
+    let keyTimer = null;
     const notifications = [];
     const NOTIF_LIMIT = 50;
     const NOTIF_POLL_INTERVAL = 5000;
@@ -1798,6 +2029,123 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         return null;
       }
     }
+    function hideSearchResults() {
+      const box = document.getElementById("search-results");
+      if (box) box.classList.add("hidden");
+    }
+    function openShortcutsModal(){
+      const modal = document.getElementById("shortcuts-modal");
+      if(modal){ modal.classList.remove("hidden"); }
+    }
+    function closeShortcutsModal(){
+      const modal = document.getElementById("shortcuts-modal");
+      if(modal){ modal.classList.add("hidden"); }
+    }
+    function resetKeySequence(){
+      keySequence = [];
+      if(keyTimer){ clearTimeout(keyTimer); keyTimer = null; }
+    }
+    function isTypingTarget(target){
+      if(!target){ return false; }
+      const tag = String(target.tagName || "").toUpperCase();
+      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || Boolean(target.isContentEditable);
+    }
+    function handleKeydown(e) {
+      if (isTypingTarget(e.target)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const key = String(e.key || "");
+      if (key === "Escape") {
+        closeShortcutsModal();
+        const panel = document.getElementById("notif-panel");
+        if(panel && !panel.classList.contains("hidden")){ panel.classList.add("hidden"); }
+        resetKeySequence();
+        return;
+      }
+      if (key === "?") {
+        e.preventDefault();
+        openShortcutsModal();
+        resetKeySequence();
+        return;
+      }
+      if (key.toLowerCase() === "r" && key.length === 1) {
+        e.preventDefault();
+        pollCurrent();
+        showToast("Refreshed");
+        resetKeySequence();
+        return;
+      }
+      if (key.length !== 1) return;
+      keySequence.push(key.toLowerCase());
+      if (keySequence.length > 2) keySequence = keySequence.slice(-2);
+      if (keyTimer) clearTimeout(keyTimer);
+      keyTimer = setTimeout(()=>{ keySequence = []; }, 900);
+      const seq = keySequence.join(" ");
+      const targetTab = SHORTCUTS[seq];
+      if (typeof targetTab === "string" && ["shield", "agents", "threats", "cache", "overwatch", "compliance"].includes(targetTab)) {
+        e.preventDefault();
+        switchTab(targetTab);
+        resetKeySequence();
+      }
+    }
+    function navigateTo(tab, id){
+      switchTab(String(tab || "shield"));
+      if (tab === "agents" && id) {
+        const select = document.getElementById("agent-profile-select");
+        if (select) {
+          select.value = String(id);
+          selectedAgentProfileId = String(id);
+          loadAgentProfile(String(id));
+        }
+      }
+      hideSearchResults();
+    }
+    function renderSearchResults(data){
+      const root = document.getElementById("search-results");
+      if (!root) return;
+      const results = (data && data.results && typeof data.results === "object") ? data.results : {};
+      const agents = Array.isArray(results.agents) ? results.agents : [];
+      const sessions = Array.isArray(results.sessions) ? results.sessions : [];
+      const threats = Array.isArray(results.threats) ? results.threats : [];
+      function escapeHtml(v){
+        return String(v || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+      }
+      function item(tab, id, text, sub){
+        const encoded = encodeURIComponent(String(id || ""));
+        return `<div class="search-item" onclick="navigateTo('${tab}', decodeURIComponent('${encoded}'))"><div>${escapeHtml(text)}</div><div class="subtle">${escapeHtml(sub)}</div></div>`;
+      }
+      const html = [
+        `<div class="search-section">Agents</div>`,
+        agents.length
+          ? agents.map((row)=> item("agents", row.id, row.id, `status: ${row.status || "unknown"}`)).join("")
+          : `<div class="search-item"><div>No agent matches</div></div>`,
+        `<div class="search-section">Sessions</div>`,
+        sessions.length
+          ? sessions.map((row)=> item("sessions", row.id, row.id, `agent: ${row.agent || "unknown"}`)).join("")
+          : `<div class="search-item"><div>No session matches</div></div>`,
+        `<div class="search-section">Threats</div>`,
+        threats.length
+          ? threats.map((row)=> item("threats", row.type, row.type, row.timestamp || "--")).join("")
+          : `<div class="search-item"><div>No threat matches</div></div>`,
+      ].join("");
+      root.innerHTML = html;
+      root.classList.remove("hidden");
+    }
+    function debounceSearch(query) {
+      if(searchTimer){ clearTimeout(searchTimer); }
+      searchTimer = setTimeout(()=> performSearch(query), 300);
+    }
+    async function performSearch(query) {
+      const q = String(query || "").trim();
+      if (q.length < 2) { hideSearchResults(); return; }
+      try{
+        const resp = await fetch(`/api/v1/search?q=${encodeURIComponent(q)}&limit=8`, { cache: "no-store" });
+        if(!resp.ok){ hideSearchResults(); return; }
+        const data = await resp.json();
+        renderSearchResults(data);
+      }catch(_err){
+        hideSearchResults();
+      }
+    }
 
     function setConnection(ok){
       const dot = document.getElementById("conn-dot");
@@ -1923,6 +2271,40 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
           <div class="rl-bar"><div style="width:${width.toFixed(1)}%;background:${color};"></div></div>
         </div>`;
       }).join("");
+    }
+
+    function renderCommunityIntel(statusPayload, statsPayload){
+      const status = (statusPayload && typeof statusPayload === "object") ? statusPayload : {};
+      const stats = (statsPayload && typeof statsPayload === "object") ? statsPayload : {};
+      const enabled = Boolean((typeof status.enabled === "boolean" ? status.enabled : stats.enabled));
+      const toggle = document.getElementById("community-enabled-toggle");
+      if(toggle){ toggle.checked = enabled; }
+      const threatsEl = document.getElementById("community-threats-shared");
+      if(threatsEl){ threatsEl.textContent = fmtNum(Number(stats.threats_submitted || 0)); }
+      const updatesEl = document.getElementById("community-updates-received");
+      if(updatesEl){ updatesEl.textContent = fmtNum(Number(stats.updates_pulled || 0)); }
+      const syncEl = document.getElementById("community-last-sync");
+      if(syncEl){
+        const stamp = status.last_sync || stats.last_sync || "";
+        syncEl.textContent = stamp ? `Last sync: ${fmtTs((new Date(stamp).getTime() / 1000))}` : "Last sync: --";
+      }
+    }
+
+    async function toggleCommunityIntel(enabled){
+      const endpoint = enabled ? "/api/v1/community/enable" : "/api/v1/community/disable";
+      try{
+        const response = await fetch(endpoint, { method: "POST", cache: "no-store" });
+        if(!response.ok){ throw new Error("toggle failed"); }
+        const [status, stats] = await Promise.all([
+          fetchData("/api/v1/community/status"),
+          fetchData("/api/v1/community/stats"),
+        ]);
+        renderCommunityIntel(status || {}, stats || {});
+      }catch(_err){
+        const toggle = document.getElementById("community-enabled-toggle");
+        if(toggle){ toggle.checked = !enabled; }
+        showToast("Community toggle failed");
+      }
     }
 
     function renderOverview(data, stats, savings, tokenYield, contextBudget, rateLimits){
@@ -2686,6 +3068,65 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       }
     }
 
+    function renderCost(analytics){
+      const data = (analytics && typeof analytics === "object") ? analytics : {};
+      const total = Number(data.total_cost || 0);
+      const forecast = Number(data.forecast_24h || 0);
+      const byModel = (data.cost_by_model && typeof data.cost_by_model === "object") ? data.cost_by_model : {};
+      const byAgent = (data.cost_by_agent && typeof data.cost_by_agent === "object") ? data.cost_by_agent : {};
+      const byHour = Array.isArray(data.cost_by_hour) ? data.cost_by_hour : [];
+      const savings = (data.savings && typeof data.savings === "object") ? data.savings : {};
+      const topSessions = Array.isArray(data.top_expensive_sessions) ? data.top_expensive_sessions : [];
+
+      document.getElementById("cost-total").textContent = fmtMoney(total);
+      document.getElementById("cost-forecast").textContent = fmtMoney(forecast);
+
+      const modelEntries = Object.entries(byModel);
+      const agentEntries = Object.entries(byAgent);
+      document.getElementById("cost-top-model").textContent = modelEntries.length ? String(modelEntries[0][0]) : "--";
+      document.getElementById("cost-top-agent").textContent = agentEntries.length ? String(agentEntries[0][0]) : "--";
+
+      const maxModel = Math.max(...modelEntries.map((row)=> Number(row[1] || 0)), 1);
+      document.getElementById("cost-by-model").innerHTML = modelEntries.length
+        ? modelEntries.map(([name, value])=> {
+            const pct = (Number(value || 0) / maxModel * 100).toFixed(0);
+            return `<div class="h-bar"><div class="h-bar-fill" style="width:${pct}%;min-width:40px;"></div><span>${name}: ${fmtMoney(value)}</span></div>`;
+          }).join("")
+        : `<div class="empty">No model cost data.</div>`;
+
+      const maxAgent = Math.max(...agentEntries.map((row)=> Number(row[1] || 0)), 1);
+      document.getElementById("cost-by-agent").innerHTML = agentEntries.length
+        ? agentEntries.map(([name, value])=> {
+            const pct = (Number(value || 0) / maxAgent * 100).toFixed(0);
+            return `<div class="h-bar"><div class="h-bar-fill" style="width:${pct}%;min-width:40px;"></div><span>${name}: ${fmtMoney(value)}</span></div>`;
+          }).join("")
+        : `<div class="empty">No agent cost data.</div>`;
+
+      const maxHour = Math.max(...byHour.map((row)=> Number((row && row.cost) || 0)), 1);
+      document.getElementById("cost-hourly").innerHTML = byHour.length
+        ? byHour.map((row)=> {
+            const c = Number((row && row.cost) || 0);
+            const pct = (c / maxHour * 100).toFixed(0);
+            return `<div class="h-bar"><div class="h-bar-fill" style="width:${pct}%;min-width:24px;"></div><span>${String((row && row.hour) || "--")}: ${fmtMoney(c)}</span></div>`;
+          }).join("")
+        : `<div class="empty">No hourly data.</div>`;
+
+      const cacheSaved = Number(savings.cache || 0);
+      const loopSaved = Number(savings.loop_prevention || 0);
+      const compressionSaved = Number(savings.compression || 0);
+      const totalSaved = Number(savings.total || (cacheSaved + loopSaved + compressionSaved));
+      document.getElementById("cost-savings").innerHTML = `
+        <div>Cache: <strong>${fmtMoney(cacheSaved)}</strong></div>
+        <div>Loop prevention: <strong>${fmtMoney(loopSaved)}</strong></div>
+        <div>Compression: <strong>${fmtMoney(compressionSaved)}</strong></div>
+        <div style="margin-top:6px;">Total: <strong>${fmtMoney(totalSaved)}</strong></div>
+      `;
+
+      document.getElementById("cost-top-sessions").innerHTML = topSessions.length
+        ? topSessions.map((item)=> `<div class="event-item">${String(item.session_id || "__default__")} <span class="subtle">(${fmtMoney(item.cost || 0)})</span></div>`).join("")
+        : `<div class="empty">No session cost data.</div>`;
+    }
+
     function renderCompliance(summary, coverage, findings, overview){
       const fw = (summary && summary.frameworks) ? summary.frameworks : {};
       const owasp = fw["owasp_llm_top10_2025"] || { percent: 0 };
@@ -3024,13 +3465,15 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     }
 
     async function pollShield(){
-      const [data, stats, savings, health, tokenYield, contextBudget] = await Promise.all([
+      const [data, stats, savings, health, tokenYield, contextBudget, communityStatus, communityStats] = await Promise.all([
         fetchData("/api/dashboard/overview"),
         fetchData("/stats"),
         fetchData("/api/v1/savings"),
         fetchData("/api/v1/agents/__global__/health"),
         fetchData("/api/v1/token-yield/global"),
         fetchData("/api/v1/context-budget/stats"),
+        fetchData("/api/v1/community/status"),
+        fetchData("/api/v1/community/stats"),
       ]);
       const now = Date.now();
       if (!rateLimitSnapshot || (now - lastRateLimitFetchMs) >= RATE_LIMIT_REFRESH_MS) {
@@ -3042,6 +3485,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       }
       renderOverview(data, stats, savings, tokenYield, contextBudget, rateLimitSnapshot || {});
       renderAgentHealth((health && typeof health === "object") ? health : (data && data.agent_health ? data.agent_health : {}));
+      renderCommunityIntel(communityStatus || {}, communityStats || {});
     }
     async function pollAgents(){
       const data = await fetchData("/api/dashboard/agents");
@@ -3106,6 +3550,11 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       renderCache(stats);
     }
 
+    async function pollCost(){
+      const analytics = await fetchData("/api/v1/cost-analytics?period=24");
+      renderCost(analytics);
+    }
+
     async function pollCurrent(){
       if(currentTab === "shield") return pollShield();
       if(currentTab === "agents") return pollAgents();
@@ -3114,6 +3563,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       if(currentTab === "experiments") return pollExperiments();
       if(currentTab === "threats") return pollThreats();
       if(currentTab === "cache") return pollCache();
+      if(currentTab === "cost") return pollCost();
       if(currentTab === "compliance") return pollCompliance();
       if(currentTab === "overwatch") return pollOverwatch();
       if(currentTab === "approvals") return pollApprovals();
@@ -3131,8 +3581,23 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     }
 
     function bindUI(){
+      document.addEventListener("keydown", handleKeydown);
       document.querySelectorAll(".tab-btn[data-tab]").forEach((btn)=>{
         btn.addEventListener("click", ()=> switchTab(btn.dataset.tab));
+      });
+      const shortcutsCloseBtn = document.getElementById("shortcuts-close-btn");
+      if(shortcutsCloseBtn){
+        shortcutsCloseBtn.addEventListener("click", ()=> closeShortcutsModal());
+      }
+      const shortcutsModal = document.getElementById("shortcuts-modal");
+      if(shortcutsModal){
+        shortcutsModal.addEventListener("click", (event)=>{
+          if(event.target === shortcutsModal){ closeShortcutsModal(); }
+        });
+      }
+      document.addEventListener("click", (event)=>{
+        const root = document.querySelector(".search-wrap");
+        if(root && event && !root.contains(event.target)){ hideSearchResults(); }
       });
       const profileSelect = document.getElementById("agent-profile-select");
       if(profileSelect){
@@ -3155,6 +3620,10 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
             showToast("Link copied!");
           }
         });
+      }
+      const communityToggle = document.getElementById("community-enabled-toggle");
+      if(communityToggle){
+        communityToggle.addEventListener("change", ()=> toggleCommunityIntel(Boolean(communityToggle.checked)));
       }
       const exportBtn = document.getElementById("export-compliance-btn");
       if(exportBtn){

@@ -25,6 +25,7 @@ from yaml import YAMLError
 
 from orchesis.auth import AgentAuthenticator, CredentialStore
 from orchesis.audit import AuditEngine, AuditQuery
+from orchesis.audit_export import AuditTrailExporter
 from orchesis.compliance import ComplianceEngine, FRAMEWORK_CHECKS, FrameworkCrossReference
 from orchesis.compliance_report import ComplianceReportGenerator
 from orchesis.ari import AgentReadinessIndex
@@ -57,6 +58,7 @@ from orchesis.llm_config import load_llm_config
 from orchesis.llm_judge import LLMJudge
 from orchesis.rules_generator import generate_security_rules_from_policy
 from orchesis.policy_validator import PolicyAsCodeValidator
+from orchesis.publisher import FindingsPublisher
 from orchesis.threat_feed import ThreatFeed
 from orchesis.scanner_server import run_scanner_http_server
 from orchesis.scenarios import AdversarialScenarios
@@ -82,6 +84,7 @@ from orchesis.mutations import MutationEngine
 from orchesis.marketplace import PolicyMarketplace
 from orchesis.structured_log import StructuredLogger
 from orchesis.templates import TEMPLATE_NAMES, load_template_text
+from orchesis.policy_templates import PolicyTemplateManager, POLICY_TEMPLATES
 from orchesis.evidence_record import EvidenceRecord
 from orchesis import __version__
 
@@ -94,6 +97,20 @@ DEFAULT_FUZZ_RUNS_PATH = Path(".orchesis") / "fuzz_runs.jsonl"
 DEFAULT_MUTATION_RUNS_PATH = Path(".orchesis") / "mutation_runs.jsonl"
 DEFAULT_REPLAY_RUNS_PATH = Path(".orchesis") / "replay_runs.jsonl"
 OPERATIONS_LOG = StructuredLogger("cli")
+DOCTOR_CHECKS = [
+    "python_version",
+    "pyyaml_installed",
+    "config_exists",
+    "config_valid",
+    "proxy_running",
+    "api_running",
+    "disk_space",
+    "log_rotation",
+    "api_key_configured",
+    "semantic_cache_enabled",
+    "loop_detection_enabled",
+    "recording_enabled",
+]
 AGENT_COMMANDS: dict[str, list[str] | None] = {
     "openclaw": ["openclaw", "--base-url", "http://localhost:8080/v1"],
     "claude": ["claude", "--api-base", "http://localhost:8080/v1"],
@@ -424,111 +441,208 @@ def new_project(target: str, template_name: str, force: bool) -> None:
 
 @main.command("doctor")
 @click.option("--config", "--policy", "config_path", type=click.Path(), default="policy.yaml")
-def doctor(config_path: str) -> None:
+@click.option("--fix", "attempt_fix", is_flag=True, default=False)
+@click.option("--json", "json_output", is_flag=True, default=False)
+def doctor(config_path: str, attempt_fix: bool, json_output: bool) -> None:
     """Run environment and project diagnostics."""
-    checks: list[tuple[str, bool, str, bool]] = []
+    checks: list[dict[str, Any]] = []
     import importlib.util
-    import socket
     import sys
 
-    py_ok = (sys.version_info.major, sys.version_info.minor) >= (3, 12)
-    checks.append(("python_version", py_ok, f"{sys.version_info.major}.{sys.version_info.minor}", True))
-    checks.append(("package_installed", importlib.util.find_spec("orchesis") is not None, "importable", True))
+    def _add_check(name: str, ok: bool, severity: str, detail: str, fix_suggestion: str = "") -> None:
+        checks.append(
+            {
+                "name": name,
+                "ok": bool(ok),
+                "severity": severity,
+                "detail": detail,
+                "fix": fix_suggestion,
+            }
+        )
 
-    policy_file = Path(config_path)
+    def _http_responding(url: str, timeout: float = 1.0) -> tuple[bool, str]:
+        try:
+            req = UrlRequest(url, method="GET")
+            with urlopen(req, timeout=timeout) as resp:
+                return True, f"http {int(resp.status)}"
+        except HTTPError as error:
+            return True, f"http {int(error.code)}"
+        except Exception as error:  # noqa: BLE001
+            return False, error.__class__.__name__
+
+    def _dir_size_bytes(path: Path) -> int:
+        if not path.exists() or not path.is_dir():
+            return 0
+        total = 0
+        for item in path.rglob("*"):
+            if item.is_file():
+                try:
+                    total += item.stat().st_size
+                except OSError:
+                    continue
+        return total
+
+    py_ok = (sys.version_info.major, sys.version_info.minor) >= (3, 12)
+    _add_check(
+        "python_version",
+        py_ok,
+        "ERROR",
+        f"{sys.version_info.major}.{sys.version_info.minor}",
+        "Use Python 3.12 or newer.",
+    )
+
+    has_pyyaml = importlib.util.find_spec("yaml") is not None
+    _add_check(
+        "pyyaml_installed",
+        has_pyyaml,
+        "ERROR",
+        "importable" if has_pyyaml else "missing",
+        "Install dependency: pip install pyyaml>=6.0",
+    )
+
+    policy_file = Path(config_path).expanduser()
     loaded_policy: dict[str, Any] | None = None
     if policy_file.exists():
         try:
             loaded_policy = load_policy(policy_file)
             errors = validate_policy(loaded_policy)
-            checks.append(("config_found", True, str(policy_file), True))
-            checks.append(
-                (
-                    "config_validate",
-                    len(errors) == 0,
-                    "OK" if not errors else "; ".join(errors[:2]),
-                    True,
-                )
+            _add_check("config_exists", True, "ERROR", str(policy_file))
+            _add_check(
+                "config_valid",
+                len(errors) == 0,
+                "ERROR",
+                "OK" if not errors else "; ".join(errors[:2]),
+                "Run: orchesis validate --policy <path>",
             )
-            checks.append(
-                (
-                    "policy_validate",
-                    len(errors) == 0,
-                    "OK" if not errors else "; ".join(errors[:2]),
-                    True,
-                )
+            _add_check(
+                "policy_validate",
+                len(errors) == 0,
+                "ERROR",
+                "OK" if not errors else "; ".join(errors[:2]),
+                "Run: orchesis validate --policy <path>",
             )
         except Exception as error:  # noqa: BLE001
-            checks.append(("config_found", True, str(policy_file), True))
-            checks.append(("config_validate", False, str(error), True))
-            checks.append(("policy_validate", False, str(error), True))
+            _add_check("config_exists", True, "ERROR", str(policy_file))
+            _add_check("config_valid", False, "ERROR", str(error), "Fix YAML syntax and required fields.")
+            _add_check("policy_validate", False, "ERROR", str(error), "Fix YAML syntax and required fields.")
     else:
-        checks.append(("config_found", False, f"missing: {policy_file}", True))
-        checks.append(("config_validate", False, "policy file not found", True))
-        checks.append(("policy_validate", False, "policy file not found", True))
-
-    template_ok = all(
-        (Path(__file__).resolve().parent / "templates" / f"{name}.yaml").exists()
-        for name in TEMPLATE_NAMES
-    )
-    checks.append(("templates", template_ok, ", ".join(TEMPLATE_NAMES), True))
+        if attempt_fix:
+            policy_file.write_text("rules: []\n", encoding="utf-8")
+        _add_check(
+            "config_exists",
+            policy_file.exists(),
+            "ERROR",
+            str(policy_file) if policy_file.exists() else f"missing: {policy_file}",
+            "Create config file, e.g. orchesis.yaml with at least `rules: []`.",
+        )
+        _add_check(
+            "config_valid",
+            policy_file.exists(),
+            "ERROR",
+            "autocreated default config" if policy_file.exists() else "policy file not found",
+            "Run: orchesis validate --policy <path>",
+        )
+        _add_check(
+            "policy_validate",
+            policy_file.exists(),
+            "ERROR",
+            "autocreated default config" if policy_file.exists() else "policy file not found",
+            "Run: orchesis validate --policy <path>",
+        )
 
     runtime_dir = Path(".orchesis")
-    runtime_dir.mkdir(parents=True, exist_ok=True)
-    writable_probe = runtime_dir / ".doctor_probe"
-    try:
-        writable_probe.write_text("ok", encoding="utf-8")
-        writable_probe.unlink()
-        checks.append(("runtime_writable", True, str(runtime_dir), True))
-    except OSError as error:
-        checks.append(("runtime_writable", False, str(error), True))
+    if attempt_fix:
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+    runtime_bytes = _dir_size_bytes(runtime_dir)
+    _add_check(
+        "disk_space",
+        runtime_bytes < 1024 * 1024 * 1024,
+        "WARNING",
+        f"{runtime_bytes} bytes in {runtime_dir}",
+        "Clean old sessions/artifacts in .orchesis/.",
+    )
 
-    # Optional diagnostics: network and ecosystem readiness.
-    upstream_url = ""
+    decisions_log = Path("decisions.jsonl")
+    max_log_bytes = 100 * 1024 * 1024
+    if attempt_fix and decisions_log.exists() and decisions_log.stat().st_size >= max_log_bytes:
+        backup = decisions_log.with_suffix(".jsonl.1")
+        backup.write_text(decisions_log.read_text(encoding="utf-8"), encoding="utf-8")
+        decisions_log.write_text("", encoding="utf-8")
+    current_log_size = decisions_log.stat().st_size if decisions_log.exists() else 0
+    _add_check(
+        "log_rotation",
+        current_log_size < max_log_bytes,
+        "WARNING",
+        f"{current_log_size} bytes",
+        "Rotate/compress decisions.jsonl.",
+    )
+
+    proxy_ok, proxy_detail = _http_responding("http://127.0.0.1:8080")
+    _add_check("proxy_running", proxy_ok, "WARNING", proxy_detail, "Start proxy: orchesis proxy --config <path>")
+
+    api_ok, api_detail = _http_responding("http://127.0.0.1:8090/health")
+    _add_check("api_running", api_ok, "WARNING", api_detail, "Start API: orchesis serve --policy <path>")
+
+    api_key_set = bool(os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY"))
+    _add_check(
+        "api_key_configured",
+        api_key_set,
+        "WARNING",
+        "set" if api_key_set else "not set",
+        "Set OPENAI_API_KEY or ANTHROPIC_API_KEY.",
+    )
+
     if isinstance(loaded_policy, dict):
-        upstream_cfg = loaded_policy.get("upstream")
-        if isinstance(upstream_cfg, dict):
-            url_value = upstream_cfg.get("url")
-            if isinstance(url_value, str):
-                upstream_url = url_value
-    if not upstream_url:
-        upstream_url = "https://api.openai.com"
-    try:
-        req = UrlRequest(upstream_url, method="GET")
-        with urlopen(req, timeout=2) as resp:
-            checks.append(("upstream_reachable", True, f"{upstream_url} ({int(resp.status)})", False))
-    except Exception as error:  # noqa: BLE001
-        checks.append(("upstream_reachable", False, f"{upstream_url} ({error.__class__.__name__})", False))
+        semantic_cache_cfg = loaded_policy.get("semantic_cache", {})
+        loop_cfg = loaded_policy.get("loop_detection", {})
+        recording_cfg = loaded_policy.get("recording", {})
+    else:
+        semantic_cache_cfg = {}
+        loop_cfg = {}
+        recording_cfg = {}
+    semantic_enabled = bool(semantic_cache_cfg.get("enabled")) if isinstance(semantic_cache_cfg, dict) else False
+    loop_enabled = bool(loop_cfg.get("enabled")) if isinstance(loop_cfg, dict) else False
+    recording_enabled = bool(recording_cfg.get("enabled")) if isinstance(recording_cfg, dict) else False
+    _add_check("semantic_cache_enabled", semantic_enabled, "INFO", "enabled" if semantic_enabled else "disabled")
+    _add_check("loop_detection_enabled", loop_enabled, "INFO", "enabled" if loop_enabled else "disabled")
+    _add_check("recording_enabled", recording_enabled, "INFO", "enabled" if recording_enabled else "disabled")
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.bind(("127.0.0.1", 8080))
-        checks.append(("dashboard_port_8080", True, "available", True))
-    except OSError as error:
-        checks.append(("dashboard_port_8080", False, str(error), True))
-    finally:
-        sock.close()
+    checks_by_name = {item["name"]: item for item in checks}
+    ordered_checks = [checks_by_name[name] for name in DOCTOR_CHECKS if name in checks_by_name]
+    for item in checks:
+        if item["name"] not in DOCTOR_CHECKS:
+            ordered_checks.append(item)
+    all_error_checks_ok = all(item["ok"] for item in ordered_checks if item["severity"] == "ERROR")
+    warning_failures = [item for item in ordered_checks if item["severity"] == "WARNING" and not item["ok"]]
 
-    checks.append(("OPENAI_API_KEY", bool(os.environ.get("OPENAI_API_KEY")), "set" if os.environ.get("OPENAI_API_KEY") else "not set", False))
-    checks.append(("ANTHROPIC_API_KEY", bool(os.environ.get("ANTHROPIC_API_KEY")), "set" if os.environ.get("ANTHROPIC_API_KEY") else "not set", False))
-
-    hooks_status = ClaudeCodeHooks().status()
-    hooks_installed = bool(hooks_status.get("installed", False))
-    checks.append(("claude_hooks", hooks_installed, "installed" if hooks_installed else "not installed", False))
+    if json_output:
+        payload = {
+            "version": __version__,
+            "config_path": str(policy_file),
+            "checks": ordered_checks,
+            "summary": {
+                "errors": sum(1 for item in ordered_checks if item["severity"] == "ERROR" and not item["ok"]),
+                "warnings": len(warning_failures),
+                "info": sum(1 for item in ordered_checks if item["severity"] == "INFO"),
+                "ok": all_error_checks_ok,
+                "fix_attempted": bool(attempt_fix),
+            },
+        }
+        click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        raise SystemExit(0 if all_error_checks_ok else 1)
 
     click.echo(f"Orchesis Doctor v{__version__}")
     click.echo("=====================")
     click.echo("Doctor checks:")
-    all_ok = True
-    for name, ok, detail, required in checks:
-        marker = "[OK]" if ok else "[FAIL]"
-        click.echo(f"  {marker} {name}: {detail}")
-        if required:
-            all_ok = all_ok and ok
-    if all_ok:
+    for item in ordered_checks:
+        marker = "[OK]" if item["ok"] else "[FAIL]"
+        click.echo(f"  {marker} [{item['severity']}] {item['name']}: {item['detail']}")
+        if not item["ok"] and item["fix"]:
+            click.echo(f"           suggestion: {item['fix']}")
+    if all_error_checks_ok:
         click.echo("")
         click.echo(f"Ready to start: orchesis proxy --config {config_path}")
-    raise SystemExit(0 if all_ok else 1)
+    raise SystemExit(0 if all_error_checks_ok else 1)
 
 
 @main.command()
@@ -1254,6 +1368,135 @@ def _get_proxy_stats(port: int) -> dict[str, Any]:
     except Exception:
         return {}
     return {}
+
+
+@main.command("status")
+@click.option("--json", "json_output", is_flag=True, default=False, help="Output machine-readable JSON")
+@click.option("--watch", "watch_mode", is_flag=True, default=False, help="Refresh every 5 seconds")
+def status_command(json_output: bool, watch_mode: bool) -> None:
+    """Show quick Orchesis system health overview."""
+
+    def _fetch_json(url: str, timeout: float = 1.5) -> dict[str, Any]:
+        try:
+            req = UrlRequest(url, method="GET")
+            with urlopen(req, timeout=timeout) as response:
+                parsed = json.loads(response.read().decode("utf-8"))
+                return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+    def _status_snapshot() -> dict[str, Any]:
+        proxy_stats = _fetch_json("http://127.0.0.1:8080/api/v1/stats")
+        if not proxy_stats:
+            proxy_stats = _fetch_json("http://127.0.0.1:8080/stats")
+        api_health = _fetch_json("http://127.0.0.1:8090/api/v1/health")
+        if not api_health:
+            api_health = _fetch_json("http://127.0.0.1:8090/health")
+
+        requests_total = int(proxy_stats.get("requests_total", proxy_stats.get("requests", 0)) or 0)
+        cost_today = float(proxy_stats.get("cost_today", proxy_stats.get("cost", 0.0)) or 0.0)
+        blocked = int(proxy_stats.get("requests_blocked", proxy_stats.get("blocked", 0)) or 0)
+        block_rate = float(proxy_stats.get("block_rate", 0.0) or 0.0)
+        cache_hit_rate = float(proxy_stats.get("cache_hit_rate", 0.0) or 0.0)
+        tokens_saved = int(proxy_stats.get("tokens_saved", 0) or 0)
+        money_saved = float(proxy_stats.get("money_saved_usd", 0.0) or 0.0)
+        budget_spent = float(proxy_stats.get("budget_spent_usd", cost_today) or cost_today)
+        budget_limit = proxy_stats.get("budget_limit_usd", "unlimited")
+        loops_today = int(proxy_stats.get("loops_detected_today", proxy_stats.get("loops_detected", 0)) or 0)
+        active_agents = int(proxy_stats.get("active_agents", proxy_stats.get("agents_discovered", 0)) or 0)
+        agent_errors = int(proxy_stats.get("agent_errors", 0) or 0)
+        approvals_pending = int(proxy_stats.get("approvals_pending", 0) or 0)
+        uptime_seconds = int(api_health.get("uptime_seconds", 0) or 0)
+        uptime_hours, rem = divmod(max(0, uptime_seconds), 3600)
+        uptime_minutes = rem // 60
+
+        return {
+            "version": __version__,
+            "proxy_running": bool(proxy_stats),
+            "api_running": bool(api_health),
+            "dashboard_url": "http://localhost:8080/dashboard",
+            "requests_total": requests_total,
+            "cost_today_usd": cost_today,
+            "blocked": blocked,
+            "block_rate": block_rate,
+            "cache_hit_rate": cache_hit_rate,
+            "tokens_saved": tokens_saved,
+            "money_saved_usd": money_saved,
+            "budget_spent_usd": budget_spent,
+            "budget_limit": budget_limit,
+            "loops_today": loops_today,
+            "active_agents": active_agents,
+            "agent_errors": agent_errors,
+            "approvals_pending": approvals_pending,
+            "api_uptime_seconds": uptime_seconds,
+            "api_uptime_human": f"{uptime_hours}h {uptime_minutes}m",
+            "raw": {"proxy": proxy_stats, "api": api_health},
+        }
+
+    def _render_text(snapshot: dict[str, Any]) -> None:
+        proxy_mark = "✓" if snapshot["proxy_running"] else "✗"
+        api_mark = "✓" if snapshot["api_running"] else "✗"
+        dashboard_mark = "✓" if snapshot["proxy_running"] else "✗"
+        security_mark = "✓" if snapshot["proxy_running"] else "✗"
+        cache_mark = "✓" if snapshot["proxy_running"] else "✗"
+        budget_mark = "✓" if snapshot["proxy_running"] else "✗"
+        loop_mark = "✓" if snapshot["proxy_running"] else "✗"
+
+        click.echo(f"Orchesis v{snapshot['version']} — System Status")
+        click.echo("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        click.echo("")
+        if snapshot["proxy_running"]:
+            click.echo(
+                "Proxy        "
+                f"{proxy_mark} running  :8080   {snapshot['requests_total']:,} requests  ${snapshot['cost_today_usd']:.2f} today"
+            )
+        else:
+            click.echo("Proxy        ✗ not running")
+        if snapshot["api_running"]:
+            click.echo(f"API          {api_mark} running  :8090   uptime {snapshot['api_uptime_human']}")
+        else:
+            click.echo("API          ✗ not running")
+        click.echo(f"Dashboard    {dashboard_mark} {snapshot['dashboard_url']}")
+        click.echo("")
+        click.echo(
+            "Security     "
+            f"{security_mark} {snapshot['blocked']} threats blocked  ({snapshot['block_rate'] * 100:.2f}% block rate)"
+        )
+        click.echo(
+            "Cache        "
+            f"{cache_mark} {snapshot['cache_hit_rate'] * 100:.1f}% hit rate  {snapshot['tokens_saved']:,} tokens saved  ${snapshot['money_saved_usd']:.2f}"
+        )
+        click.echo(
+            "Budget       "
+            f"{budget_mark} ${snapshot['budget_spent_usd']:.2f} / {snapshot['budget_limit']}"
+        )
+        click.echo(f"Loop         {loop_mark} {snapshot['loops_today']} loops detected today")
+        click.echo("")
+        click.echo(
+            "Agents       "
+            f"{snapshot['active_agents']} active  {snapshot['agent_errors']} error  {snapshot['approvals_pending']} pending approval"
+        )
+
+    if watch_mode:
+        try:
+            while True:
+                snap = _status_snapshot()
+                if json_output:
+                    click.echo(json.dumps(snap, ensure_ascii=False, indent=2))
+                else:
+                    click.clear()
+                    _render_text(snap)
+                time.sleep(5)
+        except KeyboardInterrupt:
+            click.echo("\nStopped.")
+            raise SystemExit(0)
+
+    snap = _status_snapshot()
+    if json_output:
+        click.echo(json.dumps(snap, ensure_ascii=False, indent=2))
+        raise SystemExit(0)
+    _render_text(snap)
+    raise SystemExit(0)
 
 
 @main.command("audit-openclaw")
@@ -2787,6 +3030,58 @@ def audit(
     state_tracker.flush()
 
 
+@main.command("export")
+@click.option("--format", "output_format", type=click.Choice(["json", "csv", "jsonl"]), default="json")
+@click.option("--output", "output_path", type=click.Path(), default=None)
+@click.option("--agent", "agent_id", default=None)
+@click.option("--session", "session_id", default=None)
+@click.option("--date-from", "date_from", default=None)
+@click.option("--date-to", "date_to", default=None)
+@click.option("--decision", "decision_name", type=click.Choice(["ALLOW", "DENY"], case_sensitive=False), default=None)
+@click.option("--log", "decisions_log_path", default=str(DEFAULT_DECISIONS_PATH), type=click.Path())
+def export_command(
+    output_format: str,
+    output_path: str | None,
+    agent_id: str | None,
+    session_id: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    decision_name: str | None,
+    decisions_log_path: str,
+) -> None:
+    """Export full decision audit trail with optional filters."""
+    exporter = AuditTrailExporter(decisions_log_path)
+    filters = {
+        "agent_id": agent_id,
+        "session_id": session_id,
+        "date_from": date_from,
+        "date_to": date_to,
+        "decision": decision_name.upper() if isinstance(decision_name, str) else None,
+    }
+    target = (
+        str(Path(".orchesis") / f"audit_export.{output_format}")
+        if not isinstance(output_path, str) or not output_path.strip()
+        else output_path
+    )
+    if output_format == "csv":
+        count = exporter.export_csv(target, filters=filters)
+    elif output_format == "jsonl":
+        count = exporter.export_jsonl(target, filters=filters)
+    else:
+        count = exporter.export_json(target, filters=filters)
+    summary = exporter.get_summary(
+        exporter.filter_by(
+            agent_id=agent_id,
+            session_id=session_id,
+            date_from=date_from,
+            date_to=date_to,
+            decision=decision_name.upper() if isinstance(decision_name, str) else None,
+        )
+    )
+    click.echo(f"Exported {count} records to {target}")
+    click.echo(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
 @main.command("evidence")
 @click.option("--session", "session_id", required=True)
 @click.option("--format", "output_format", type=click.Choice(["json", "text"]), default="json")
@@ -3175,6 +3470,89 @@ def benchmark_command(category: str | None, export_path: str | None) -> None:
         click.echo(f"\nExported report to {export_path}")
 
 
+@main.command("publish")
+@click.option("--period", "period_days", type=int, default=7, show_default=True)
+@click.option("--output", "output_path", type=click.Path(), default=None)
+@click.option("--upload", "do_upload", is_flag=True, default=False)
+@click.option("--preview", "preview_only", is_flag=True, default=False)
+@click.option("--decisions", "decisions_path", type=click.Path(), default=str(DEFAULT_DECISIONS_PATH))
+def publish_command(
+    period_days: int,
+    output_path: str | None,
+    do_upload: bool,
+    preview_only: bool,
+    decisions_path: str,
+) -> None:
+    """Build and share an anonymized public findings report."""
+    source = Path(decisions_path)
+    rows = read_decisions(source) if source.exists() else []
+    decisions = [entry for entry in rows if isinstance(entry, dict)]
+    publisher = FindingsPublisher()
+    report = publisher.build_report(decisions, period_days=max(1, int(period_days)))
+
+    if preview_only:
+        click.echo(json.dumps(report, ensure_ascii=False, indent=2))
+        return
+
+    target = (
+        output_path
+        if isinstance(output_path, str) and output_path.strip()
+        else str(Path(".orchesis") / "public_findings_report.json")
+    )
+    publisher.export_local(report, target)
+    click.echo(f"Saved report to {target}")
+
+    if do_upload:
+        public_url = publisher.publish(report)
+        click.echo(f"Published report: {public_url}")
+
+
+@main.command("template")
+@click.option("--list", "list_only", is_flag=True, default=False)
+@click.option(
+    "--use",
+    "template_name",
+    type=click.Choice(sorted(POLICY_TEMPLATES.keys())),
+    default=None,
+)
+@click.option("--output", "output_path", type=click.Path(), default="orchesis.yaml")
+@click.option("--merge", "merge_path", type=click.Path(), default=None)
+def template_command(
+    list_only: bool,
+    template_name: str | None,
+    output_path: str,
+    merge_path: str | None,
+) -> None:
+    """List or apply policy templates."""
+    manager = PolicyTemplateManager()
+    if list_only:
+        click.echo("Available templates:")
+        for item in manager.list_templates():
+            click.echo(f"- {item['name']}: {item['description']} ({item['use_case']})")
+        return
+    if not isinstance(template_name, str) or not template_name.strip():
+        raise click.ClickException("--use is required unless --list is provided")
+
+    if isinstance(merge_path, str) and merge_path.strip():
+        target = Path(merge_path)
+        existing: dict[str, Any] = {}
+        if target.exists():
+            loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing = loaded
+        merged = manager.merge_template(template_name, existing)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            yaml.safe_dump(merged, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        click.echo(f"Merged template '{template_name}' into {target}")
+        return
+
+    manager.apply_template(template_name, output_path)
+    click.echo(f"Applied template '{template_name}' to {output_path}")
+
+
 @main.command("readiness")
 @click.option("--agent", "agent_id", required=True)
 @click.option("--config", "config_path", default="orchesis.yaml")
@@ -3240,6 +3618,37 @@ def readiness_command(agent_id: str, config_path: str) -> None:
     if not config_exists:
         click.echo("")
         click.echo(f"Note: config not found at {config_path}; evaluated using defaults.")
+
+
+@main.command("ari-check")
+@click.option("--agent", "agent_id", required=True)
+@click.option("--min-score", type=int, default=75, show_default=True)
+@click.option("--config", "config_path", default="orchesis.yaml", show_default=True)
+def ari_check_command(agent_id: str, min_score: int, config_path: str) -> None:
+    """CI/CD gate for Agent Readiness Index."""
+    policy: dict[str, Any] = {}
+    if Path(config_path).exists():
+        try:
+            policy = load_policy(config_path)
+        except Exception:
+            policy = {}
+    readiness_cfg = policy.get("agent_readiness", {}) if isinstance(policy, dict) else {}
+    weights = readiness_cfg.get("weights") if isinstance(readiness_cfg, dict) else None
+    thresholds = readiness_cfg.get("thresholds") if isinstance(readiness_cfg, dict) else None
+    metrics: dict[str, Any] = {}
+    metrics_store = readiness_cfg.get("metrics", {}) if isinstance(readiness_cfg, dict) else {}
+    if isinstance(metrics_store, dict):
+        selected = metrics_store.get(agent_id, {})
+        if isinstance(selected, dict):
+            metrics = selected
+    ari = AgentReadinessIndex(weights=weights, thresholds=thresholds)
+    result = ari.evaluate(agent_id=agent_id, metrics=metrics)
+    score = int(round(float(result.index)))
+    if score >= int(min_score):
+        click.echo(f"✓ ARI score: {score}/100 — {result.verdict}")
+        raise SystemExit(0)
+    click.echo(f"✗ ARI score: {score}/100 — {result.verdict}")
+    raise SystemExit(1)
 
 
 @main.command("threat-feed")

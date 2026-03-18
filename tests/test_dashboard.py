@@ -188,6 +188,21 @@ def test_notification_types_defined() -> None:
     assert "Loop detected for" in html
 
 
+def test_search_bar_present() -> None:
+    html = get_dashboard_html()
+    assert 'id="global-search"' in html
+    assert "debounceSearch(this.value)" in html
+    assert "Search agents, sessions, threats" in html
+
+
+def test_search_results_markup() -> None:
+    html = get_dashboard_html()
+    assert 'id="search-results"' in html
+    assert "search-dropdown" in html
+    assert "search-section" in html
+    assert "navigateTo(" in html
+
+
 def test_dashboard_html_size_reasonable() -> None:
     html = get_dashboard_html()
     assert len(html) > 5_000
@@ -260,6 +275,37 @@ def test_dashboard_variant_card_css() -> None:
     html = get_dashboard_html()
     assert "variant-card" in html
     assert "variant-pair" in html
+
+
+def test_keyboard_shortcuts_defined() -> None:
+    html = get_dashboard_html()
+    assert "const SHORTCUTS =" in html
+    assert '"g s": "shield"' in html
+    assert '"g a": "agents"' in html
+    assert '"g t": "threats"' in html
+    assert '"g c": "cache"' in html
+    assert '"g o": "overwatch"' in html
+    assert '"g p": "compliance"' in html
+    assert '"?": "shortcuts"' in html
+    assert '"r": "refresh"' in html
+    assert '"Escape": "close"' in html
+    assert "function handleKeydown(e)" in html
+
+
+def test_shortcuts_modal_markup() -> None:
+    html = get_dashboard_html()
+    assert 'id="shortcuts-modal"' in html
+    assert "Keyboard Shortcuts" in html
+    assert "Go to Shield" in html
+    assert "Go to Agents" in html
+    assert "Go to Threats" in html
+    assert "Show this help" in html
+
+
+def test_shortcuts_hint_present() -> None:
+    html = get_dashboard_html()
+    assert 'class="shortcuts-hint"' in html
+    assert "Press <kbd>?</kbd> for keyboard shortcuts" in html
 
 
 def test_compliance_tab_renders() -> None:

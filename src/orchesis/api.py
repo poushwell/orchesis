@@ -20,6 +20,7 @@ from fastapi.routing import APIRoute
 from fastapi.responses import JSONResponse, Response
 
 from orchesis.auth import AgentAuthenticator, CredentialStore
+from orchesis.ari import AgentReadinessIndex
 from orchesis.agent_health import AgentHealthScore
 from orchesis.audit import AuditEngine, AuditQuery
 from orchesis.compliance_report import ComplianceReportGenerator
@@ -47,10 +48,13 @@ from orchesis.telemetry import JsonlEmitter
 from orchesis.flow_xray import FlowAnalyzer
 from orchesis.context_dna import ContextDNA
 from orchesis.context_dna_store import ContextDNAStore
+from orchesis.anomaly_alerts import AnomalyAlertManager
 from orchesis.agent_profile import AgentIntelligenceProfile
 from orchesis.pipeline import check_budget
 from orchesis.evidence_record import EvidenceRecord
+from orchesis.cost_analytics import CostAnalytics
 from orchesis.session_replay import SessionReplay
+from orchesis.community_intel import CommunityIntel
 from orchesis.token_yield import TokenYieldTracker
 from orchesis.threat_feed import ThreatFeed
 from orchesis import __version__
@@ -136,8 +140,20 @@ def create_api_app(
     app.state.threat_feed = ThreatFeed(feed_cfg)
     app.state.benchmark_results = {}
     app.state.dna_store = ContextDNAStore(str(policy_file.parent / ".orchesis" / "dna"))
+    community_cfg = (
+        current_version.policy.get("community")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("community"), dict)
+        else {}
+    )
+    app.state.community_intel = CommunityIntel(community_cfg)
     app.state.notifications: list[dict[str, Any]] = []
     app.state.notifications_lock = threading.Lock()
+    anomaly_cfg = (
+        current_version.policy.get("anomaly_alerts")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("anomaly_alerts"), dict)
+        else {}
+    )
+    app.state.anomaly_alerts = AnomalyAlertManager(app.state.dna_store, anomaly_cfg)
     mcp_monitor_cfg = (
         current_version.policy.get("mcp_monitor")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("mcp_monitor"), dict)
@@ -340,6 +356,51 @@ def create_api_app(
     def _audit_engine() -> AuditEngine:
         return AuditEngine(app.state.decisions_log)
 
+    def _build_ari_payload(agent_id: str) -> dict[str, Any]:
+        _refresh_current_version()
+        policy = app.state.current_version.policy
+        readiness_cfg = policy.get("agent_readiness", {}) if isinstance(policy, dict) else {}
+        weights = readiness_cfg.get("weights") if isinstance(readiness_cfg, dict) else None
+        thresholds = readiness_cfg.get("thresholds") if isinstance(readiness_cfg, dict) else None
+        metrics: dict[str, Any] = {}
+        metrics_store = readiness_cfg.get("metrics", {}) if isinstance(readiness_cfg, dict) else {}
+        if isinstance(metrics_store, dict):
+            selected = metrics_store.get(agent_id, {})
+            if isinstance(selected, dict):
+                metrics = selected
+        ari = AgentReadinessIndex(weights=weights, thresholds=thresholds)
+        result = ari.evaluate(agent_id=agent_id, metrics=metrics)
+        by_name = {item.name: item for item in result.dimensions}
+        security = by_name.get("security_posture")
+        reliability = by_name.get("task_reliability")
+        cost = by_name.get("cost_predictability")
+        observability = by_name.get("observability")
+        return {
+            "agent_id": agent_id,
+            "score": int(round(float(result.index))),
+            "status": result.verdict,
+            "dimensions": {
+                "security": {
+                    "score": int(round(float(security.score if security else 0.0))),
+                    "weight": round((float(security.weight if security else 0.0) / 100.0), 4),
+                },
+                "reliability": {
+                    "score": int(round(float(reliability.score if reliability else 0.0))),
+                    "weight": round((float(reliability.weight if reliability else 0.0) / 100.0), 4),
+                },
+                "cost": {
+                    "score": int(round(float(cost.score if cost else 0.0))),
+                    "weight": round((float(cost.weight if cost else 0.0) / 100.0), 4),
+                },
+                "observability": {
+                    "score": int(round(float(observability.score if observability else 0.0))),
+                    "weight": round((float(observability.weight if observability else 0.0) / 100.0), 4),
+                },
+            },
+            "blocking_gates": list(result.blocking_failures),
+            "recommendations": list(result.recommendations),
+        }
+
     def _extract_session_id(payload: dict[str, Any]) -> str | None:
         direct = payload.get("session_id")
         if isinstance(direct, str) and direct.strip():
@@ -411,6 +472,154 @@ def create_api_app(
             "model": latest_model,
             "context_window": context_window,
         }
+
+    def _build_cost_analytics_payload(period_hours: int) -> dict[str, Any]:
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        return CostAnalytics().compute(events, period_hours=period_hours)
+
+    def _build_current_stats_by_agent(since_hours: int = 24) -> dict[str, dict[str, float]]:
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(hours=max(1, int(since_hours)))
+
+        rows: dict[str, dict[str, float]] = {}
+        for event in events:
+            agent_id = str(getattr(event, "agent_id", "") or "unknown")
+            ts = _parse_health_ts(str(getattr(event, "timestamp", "") or ""))
+            if ts is None or ts < cutoff:
+                continue
+            snapshot = getattr(event, "state_snapshot", {})
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            item = rows.setdefault(
+                agent_id,
+                {
+                    "count": 0.0,
+                    "cost_sum": 0.0,
+                    "tool_sum": 0.0,
+                    "prompt_sum": 0.0,
+                    "duration_sum": 0.0,
+                    "error_sum": 0.0,
+                    "cache_sum": 0.0,
+                    "cache_count": 0.0,
+                },
+            )
+            item["count"] += 1.0
+            item["cost_sum"] += float(getattr(event, "cost", 0.0) or 0.0)
+            item["tool_sum"] += 1.0 if str(getattr(event, "tool", "") or "").strip() else 0.0
+            prompt_len = snapshot.get("prompt_length", snapshot.get("prompt_tokens", 0))
+            item["prompt_sum"] += float(prompt_len or 0.0)
+            duration_ms = snapshot.get("session_duration_ms")
+            if duration_ms is None:
+                duration_ms = float(getattr(event, "evaluation_duration_us", 0) or 0.0) / 1000.0
+            item["duration_sum"] += float(duration_ms or 0.0)
+            decision = str(getattr(event, "decision", "") or "").upper()
+            item["error_sum"] += 1.0 if decision == "DENY" else 0.0
+            cache = snapshot.get("cache_hit_rate")
+            if isinstance(cache, int | float):
+                item["cache_sum"] += float(cache)
+                item["cache_count"] += 1.0
+
+        out: dict[str, dict[str, float]] = {}
+        for agent_id, agg in rows.items():
+            count = max(1.0, float(agg.get("count", 0.0)))
+            cache_count = float(agg.get("cache_count", 0.0))
+            out[agent_id] = {
+                "cost_per_request": float(agg.get("cost_sum", 0.0)) / count,
+                "tool_call_frequency": float(agg.get("tool_sum", 0.0)) / count,
+                "avg_prompt_length": float(agg.get("prompt_sum", 0.0)) / count,
+                "session_duration_avg": float(agg.get("duration_sum", 0.0)) / count,
+                "error_rate": float(agg.get("error_sum", 0.0)) / count,
+                "cache_hit_rate": (
+                    float(agg.get("cache_sum", 0.0)) / cache_count if cache_count > 0.0 else 0.0
+                ),
+            }
+        return out
+
+    def _refresh_anomaly_alerts() -> None:
+        manager = app.state.anomaly_alerts
+        current = _build_current_stats_by_agent(since_hours=24)
+        for agent_id, stats in current.items():
+            manager.check(agent_id, stats)
+
+    def _build_search_payload(query: str, limit: int) -> dict[str, Any]:
+        q = str(query or "").strip().lower()
+        safe_limit = max(1, min(200, int(limit)))
+        empty = {"query": q, "results": {"agents": [], "sessions": [], "threats": []}, "total": 0}
+        if not q:
+            return empty
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        now = datetime.now(timezone.utc)
+
+        agents_latest: dict[str, datetime] = {}
+        sessions_latest: dict[str, dict[str, Any]] = {}
+        threats: list[dict[str, Any]] = []
+
+        for event in events:
+            agent_id = str(getattr(event, "agent_id", "") or "unknown")
+            timestamp_raw = str(getattr(event, "timestamp", "") or "")
+            ts = _parse_health_ts(timestamp_raw)
+            if ts is None:
+                ts = now - timedelta(hours=24)
+
+            snapshot = getattr(event, "state_snapshot", {})
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            session_id = _extract_session_id(snapshot) or str(snapshot.get("session_id") or "__default__")
+
+            if q in agent_id.lower():
+                prev = agents_latest.get(agent_id)
+                if prev is None or ts > prev:
+                    agents_latest[agent_id] = ts
+
+            if q in session_id.lower() or q in agent_id.lower():
+                prev_s = sessions_latest.get(session_id)
+                if prev_s is None or ts > prev_s["ts"]:
+                    sessions_latest[session_id] = {"id": session_id, "agent": agent_id, "ts": ts}
+
+            reasons = getattr(event, "reasons", [])
+            reason_text = " ".join(str(item) for item in reasons) if isinstance(reasons, list) else str(reasons or "")
+            decision = str(getattr(event, "decision", "") or "")
+            threat_blob = f"{reason_text} {decision} {agent_id} {session_id}".lower()
+            if decision.upper() == "DENY" and q in threat_blob:
+                threat_type = "policy_violation"
+                first_reason = reason_text.split(",")[0].strip() if reason_text else ""
+                if ":" in first_reason:
+                    threat_type = first_reason.split(":", 1)[0].strip() or threat_type
+                elif first_reason:
+                    threat_type = first_reason.split(" ", 1)[0].strip() or threat_type
+                threats.append(
+                    {
+                        "type": threat_type,
+                        "timestamp": timestamp_raw,
+                        "agent": agent_id,
+                    }
+                )
+
+        agents: list[dict[str, Any]] = []
+        for agent_id, ts in sorted(agents_latest.items(), key=lambda item: item[0]):
+            age = max(0.0, (now - ts).total_seconds())
+            status = "offline"
+            if age <= 60.0:
+                status = "working"
+            elif age <= 300.0:
+                status = "idle"
+            agents.append({"id": agent_id, "status": status})
+
+        sessions = [
+            {"id": row["id"], "agent": row["agent"]}
+            for row in sorted(sessions_latest.values(), key=lambda item: item["ts"], reverse=True)
+        ]
+        threats = sorted(threats, key=lambda item: str(item.get("timestamp", "")), reverse=True)
+
+        agents = agents[:safe_limit]
+        sessions = sessions[:safe_limit]
+        threats = threats[:safe_limit]
+        total = len(agents) + len(sessions) + len(threats)
+        return {"query": q, "results": {"agents": agents, "sessions": sessions, "threats": threats}, "total": total}
 
     def _default_rate_limit_per_minute(policy: dict[str, Any]) -> int:
         rules = policy.get("rules", [])
@@ -905,6 +1114,24 @@ def create_api_app(
             decisions_log=app.state.decisions_log,
         )
 
+    @app.get("/api/v1/ari/{agent_id}")
+    def get_ari(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return _build_ari_payload(agent_id)
+
+    @app.get("/api/v1/ari/{agent_id}/report")
+    def get_ari_report(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = _build_ari_payload(agent_id)
+        payload["report_generated_at"] = datetime.now(timezone.utc).isoformat()
+        return payload
+
     @app.get("/api/v1/overwatch")
     def get_overwatch(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
@@ -1080,6 +1307,62 @@ def create_api_app(
             "corpus_size": corpus_stats["total"],
         }
 
+    @app.get("/api/v1/cost-analytics")
+    def cost_analytics(
+        period: int = 24,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        safe_period = max(1, min(24 * 7, int(period)))
+        return _build_cost_analytics_payload(safe_period)
+
+    @app.get("/api/v1/anomaly/alerts")
+    def anomaly_alerts(
+        since: float | None = None,
+        limit: int = 50,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        _refresh_anomaly_alerts()
+        rows = app.state.anomaly_alerts.get_alerts(since=since, limit=limit)
+        return {"alerts": rows, "count": len(rows)}
+
+    @app.get("/api/v1/anomaly/alerts/{agent_id}")
+    def anomaly_alerts_by_agent(
+        agent_id: str,
+        since: float | None = None,
+        limit: int = 50,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        _refresh_anomaly_alerts()
+        rows = app.state.anomaly_alerts.get_alerts(agent_id=agent_id, since=since, limit=limit)
+        return {"agent_id": agent_id, "alerts": rows, "count": len(rows)}
+
+    @app.post("/api/v1/anomaly/dismiss/{alert_id}")
+    def anomaly_dismiss(
+        alert_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        ok = app.state.anomaly_alerts.dismiss(alert_id)
+        return {"dismissed": bool(ok), "alert_id": alert_id}
+
+    @app.get("/api/v1/anomaly/summary")
+    def anomaly_summary(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        _refresh_anomaly_alerts()
+        return app.state.anomaly_alerts.get_summary()
+
+    @app.get("/api/v1/search")
+    def search(
+        q: str = "",
+        limit: int = 25,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return _build_search_payload(q, limit)
+
     @app.get("/api/v1/notifications")
     def get_notifications(
         since: float = 0.0,
@@ -1139,6 +1422,33 @@ def create_api_app(
     def threat_feed_signatures(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
         return {"signatures": list(app.state.threat_feed._signatures)}
+
+    @app.get("/api/v1/community/status")
+    def community_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        stats = app.state.community_intel.get_stats()
+        return {
+            "enabled": bool(stats.get("enabled", False)),
+            "privacy_badge": "zero_pii_shared",
+            "last_sync": stats.get("last_sync", ""),
+        }
+
+    @app.post("/api/v1/community/enable")
+    def community_enable(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        app.state.community_intel.enabled = True
+        return {"status": "enabled", "enabled": True}
+
+    @app.post("/api/v1/community/disable")
+    def community_disable(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        app.state.community_intel.enabled = False
+        return {"status": "disabled", "enabled": False}
+
+    @app.get("/api/v1/community/stats")
+    def community_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.community_intel.get_stats()
 
     @app.get("/api/v1/rate-limits/status")
     def rate_limits_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
