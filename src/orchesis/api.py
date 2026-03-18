@@ -68,6 +68,7 @@ from orchesis.request_inspector import RequestInspector
 from orchesis.pipeline_debugger import PipelineDebugger
 from orchesis.tool_call_analyzer import ToolCallAnalyzer
 from orchesis.memory_tracker import MemoryTracker
+from orchesis.fleet_coordinator import FleetCoordinator
 from orchesis.token_yield import TokenYieldTracker
 from orchesis.token_yield_report import TokenYieldReportGenerator
 from orchesis.threat_feed import ThreatFeed
@@ -81,8 +82,13 @@ from orchesis.tenants import TenantManager
 from orchesis.semantic_cache import SemanticCache
 from orchesis.cache_warmer import CacheWarmer
 from orchesis.api_rate_limiter import ApiRateLimiter
+from orchesis.shadow_mode import ShadowModeRunner
 from orchesis.intent_classifier import IntentClassifier
 from orchesis.response_analyzer import ResponseAnalyzer
+from orchesis.anomaly_predictor import AnomalyPredictor
+from orchesis.policy_optimizer import PolicyOptimizer
+from orchesis.incident_manager import IncidentManager
+from orchesis.knowledge_base import OrchesisKnowledgeBase
 from orchesis import __version__
 
 
@@ -162,6 +168,8 @@ def create_api_app(
         str(policy_file.parent / ".orchesis" / "session_groups.json")
     )
     app.state.compliance_checker = RealTimeComplianceChecker()
+    app.state.incident_manager = IncidentManager()
+    app.state.knowledge_base = OrchesisKnowledgeBase()
     cost_attribution_cfg = (
         current_version.policy.get("cost_attribution")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("cost_attribution"), dict)
@@ -206,8 +214,11 @@ def create_api_app(
     app.state.agent_scorecard = AgentScorecard()
     app.state.tool_call_analyzer = ToolCallAnalyzer()
     app.state.memory_tracker = MemoryTracker()
+    app.state.fleet_coordinator = FleetCoordinator()
     app.state.intent_classifier = IntentClassifier()
     app.state.response_analyzer = ResponseAnalyzer()
+    app.state.anomaly_predictor = AnomalyPredictor()
+    app.state.policy_optimizer = PolicyOptimizer()
     community_cfg = (
         current_version.policy.get("community")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("community"), dict)
@@ -218,6 +229,18 @@ def create_api_app(
     app.state.notifications_lock = threading.Lock()
     app.state.agent_lifecycle = AgentLifecycleManager()
     app.state.api_limiter = ApiRateLimiter()
+    app.state.shadow_mode_enabled = False
+    app.state.shadow_mode_log_divergences = True
+    app.state.shadow_policy_path = ""
+    app.state.shadow_runner = None
+    if (
+        hasattr(current_version, "registry")
+        and hasattr(current_version.registry, "agents")
+        and isinstance(current_version.registry.agents, dict)
+    ):
+        for agent_id in current_version.registry.agents.keys():
+            if isinstance(agent_id, str) and agent_id.strip():
+                app.state.fleet_coordinator.register_agent(agent_id, ["general"])
     anomaly_cfg = (
         current_version.policy.get("anomaly_alerts")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("anomaly_alerts"), dict)
@@ -364,6 +387,53 @@ def create_api_app(
         else:
             app.state.api_limiter = ApiRateLimiter(cfg)
 
+    def _shadow_engine(request_payload: dict[str, Any], shadow_policy: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(request_payload) if isinstance(request_payload, dict) else {}
+        tool_name = payload.get("tool_name")
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            tool_name = payload.get("tool")
+        params = payload.get("params")
+        eval_payload = {
+            "tool": str(tool_name or ""),
+            "params": dict(params) if isinstance(params, dict) else {},
+            "cost": payload.get("cost", 0.0),
+            "context": dict(payload.get("context")) if isinstance(payload.get("context"), dict) else {},
+        }
+        decision = evaluate(
+            eval_payload,
+            shadow_policy,
+            state=tracker,
+            emitter=event_bus,
+            registry=app.state.current_version.registry,
+            plugins=app.state.plugins,
+            session_type="shadow",
+            channel=None,
+            debug=False,
+        )
+        return {"decision": "ALLOW" if decision.allowed else "DENY", "allowed": bool(decision.allowed)}
+
+    def _sync_shadow_mode(candidate_policy: dict[str, Any]) -> None:
+        cfg = candidate_policy.get("shadow_mode") if isinstance(candidate_policy, dict) else None
+        if not isinstance(cfg, dict):
+            app.state.shadow_mode_enabled = False
+            app.state.shadow_runner = None
+            return
+        app.state.shadow_mode_enabled = bool(cfg.get("enabled", False))
+        app.state.shadow_mode_log_divergences = bool(cfg.get("log_divergences", True))
+        shadow_policy_ref = str(cfg.get("shadow_policy", "shadow_policy.yaml") or "shadow_policy.yaml").strip()
+        app.state.shadow_policy_path = shadow_policy_ref
+        if not app.state.shadow_mode_enabled:
+            app.state.shadow_runner = None
+            return
+        shadow_path = Path(shadow_policy_ref)
+        if not shadow_path.is_absolute():
+            shadow_path = (policy_file.parent / shadow_path).resolve()
+        try:
+            shadow_policy = load_policy(str(shadow_path))
+        except Exception:
+            shadow_policy = dict(app.state.current_version.policy)
+        app.state.shadow_runner = ShadowModeRunner(shadow_policy, _shadow_engine)
+
     def _refresh_current_version() -> None:
         app.state.current_version = store.current or store.load(str(policy_file))
         app.state.plugins = load_plugins_for_policy(
@@ -389,6 +459,7 @@ def create_api_app(
         _sync_auth(app.state.current_version.policy)
         _sync_agent_teams_from_policy(app.state.current_version.policy)
         _sync_api_limiter(app.state.current_version.policy)
+        _sync_shadow_mode(app.state.current_version.policy)
 
     def _sync_auth(candidate_policy: dict[str, Any]) -> None:
         auth = candidate_policy.get("authentication")
@@ -433,6 +504,7 @@ def create_api_app(
     _sync_auth(current_version.policy)
     _sync_agent_teams_from_policy(current_version.policy)
     _sync_api_limiter(current_version.policy)
+    _sync_shadow_mode(current_version.policy)
 
     def _auth_token_from_policy() -> str | None:
         token_override = getattr(app.state, "api_token_override", None)
@@ -1532,6 +1604,50 @@ def create_api_app(
             "certificate": result.get("certificate"),
         }
 
+    @app.get("/api/v1/kb/search")
+    def kb_search(q: str = "", authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        results = app.state.knowledge_base.search(q)
+        return {"query": q, "results": results, "total": len(results)}
+
+    @app.get("/api/v1/kb/articles")
+    def kb_articles(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        rows = [
+            article
+            for article in (
+                app.state.knowledge_base.get_article(article_id)
+                for article_id in sorted(app.state.knowledge_base._articles.keys())
+            )
+            if isinstance(article, dict)
+        ]
+        return {"articles": rows, "total": len(rows)}
+
+    @app.get("/api/v1/kb/articles/{article_id}")
+    def kb_article(article_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        row = app.state.knowledge_base.get_article(article_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail={"error": "article not found"})
+        return row
+
+    @app.get("/api/v1/kb/tags/{tag}")
+    def kb_by_tag(tag: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        rows = app.state.knowledge_base.list_by_tag(tag)
+        return {"tag": tag, "articles": rows, "total": len(rows)}
+
+    @app.post("/api/v1/kb/suggest-for-error")
+    def kb_suggest_for_error(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        message = str(payload.get("error_message", payload.get("error", "")) or "")
+        rows = app.state.knowledge_base.suggest_for_error(message)
+        return {"error_message": message, "suggestions": rows, "total": len(rows)}
+
     @app.get("/api/v1/compliance/report/{agent_id}")
     def compliance_report_endpoint(
         agent_id: str,
@@ -1864,6 +1980,81 @@ def create_api_app(
         response_payload = payload if isinstance(payload, dict) else {}
         return app.state.response_analyzer.check_for_hallucination_signals(response_payload)
 
+    @app.post("/api/v1/predict/anomaly")
+    def predict_anomaly_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        recent_metrics = body.get("recent_metrics", [])
+        if not isinstance(recent_metrics, list):
+            recent_metrics = []
+        prediction = app.state.anomaly_predictor.predict(recent_metrics)
+        agent_id = body.get("agent_id")
+        if isinstance(agent_id, str) and agent_id.strip():
+            app.state.anomaly_predictor.record_prediction(agent_id.strip(), prediction)
+        return prediction
+
+    @app.get("/api/v1/predict/{agent_id}/warning")
+    def predict_warning_endpoint(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        return app.state.anomaly_predictor.early_warning(agent_id, events)
+
+    @app.get("/api/v1/predict/history")
+    def predict_history_endpoint(
+        agent_id: str | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        if isinstance(agent_id, str) and agent_id.strip():
+            return {"agent_id": agent_id.strip(), "history": app.state.anomaly_predictor.get_predictions_history(agent_id.strip())}
+        return {"history": app.state.anomaly_predictor.get_all_history()}
+
+    @app.post("/api/v1/policy/optimize")
+    def policy_optimize_endpoint(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        current_policy = payload.get("policy")
+        if not isinstance(current_policy, dict):
+            current_policy = app.state.current_version.policy if isinstance(app.state.current_version.policy, dict) else {}
+        return app.state.policy_optimizer.analyze(events, current_policy)
+
+    @app.get("/api/v1/policy/suggestions")
+    def policy_suggestions_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        current_policy = app.state.current_version.policy if isinstance(app.state.current_version.policy, dict) else {}
+        analysis = app.state.policy_optimizer.analyze(events, current_policy)
+        return {"suggested_changes": analysis.get("suggested_changes", [])}
+
+    @app.post("/api/v1/policy/apply-suggestion")
+    def policy_apply_suggestion_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        policy = body.get("policy")
+        suggestions = body.get("suggestions")
+        if not isinstance(policy, dict):
+            policy = app.state.current_version.policy if isinstance(app.state.current_version.policy, dict) else {}
+        if not isinstance(suggestions, list):
+            suggestions = []
+        updated = app.state.policy_optimizer.apply_suggestions(policy, suggestions)
+        return {"policy": updated}
+
     @app.post("/api/v1/tools/analyze")
     def analyze_tools_endpoint(
         body: dict[str, Any],
@@ -1931,6 +2122,52 @@ def create_api_app(
         _require_auth(authorization)
         app.state.memory_tracker.clear_session(session_id)
         return {"ok": True, "session_id": session_id}
+
+    @app.get("/api/v1/fleet/status")
+    def get_fleet_status_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.fleet_coordinator.get_fleet_status()
+
+    @app.get("/api/v1/fleet/distribution")
+    def get_fleet_distribution_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.fleet_coordinator.get_load_distribution()
+
+    @app.post("/api/v1/fleet/assign")
+    def fleet_assign_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        task = body.get("task") if isinstance(body.get("task"), dict) else body
+        agent_id = app.state.fleet_coordinator.assign_task(task)
+        if not agent_id:
+            raise HTTPException(status_code=404, detail="no_eligible_agent")
+        return {"assigned_agent": agent_id}
+
+    @app.post("/api/v1/fleet/share-context")
+    def fleet_share_context_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        shared = app.state.fleet_coordinator.share_context(
+            from_agent=str(body.get("from_agent", "") or ""),
+            to_agent=str(body.get("to_agent", "") or ""),
+            context_key=str(body.get("context_key", "") or ""),
+        )
+        return {"shared": bool(shared)}
+
+    @app.post("/api/v1/fleet/rebalance")
+    def fleet_rebalance_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.fleet_coordinator.rebalance()
 
     @app.get("/api/v1/ari/{agent_id}")
     def get_ari(
@@ -2780,6 +3017,53 @@ def create_api_app(
         app.state.api_limiter.reset(client_id)
         return {"reset": True, "client_id": str(client_id)}
 
+    @app.get("/api/v1/shadow/status")
+    def shadow_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        runner = getattr(app.state, "shadow_runner", None)
+        report = runner.get_divergence_report() if isinstance(runner, ShadowModeRunner) else {}
+        recommendation = runner.get_recommendation() if isinstance(runner, ShadowModeRunner) else "disabled"
+        return {
+            "enabled": bool(getattr(app.state, "shadow_mode_enabled", False)),
+            "shadow_policy": str(getattr(app.state, "shadow_policy_path", "")),
+            "log_divergences": bool(getattr(app.state, "shadow_mode_log_divergences", True)),
+            "report": report,
+            "recommendation": recommendation,
+        }
+
+    @app.get("/api/v1/shadow/divergences")
+    def shadow_divergences(
+        limit: int = 100,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        runner = getattr(app.state, "shadow_runner", None)
+        if not isinstance(runner, ShadowModeRunner):
+            return {"enabled": False, "report": {}, "items": []}
+        safe_limit = max(1, min(int(limit), 1000))
+        rows = [item for item in runner._results if not bool(item.get("match", False))]  # noqa: SLF001
+        return {
+            "enabled": True,
+            "report": runner.get_divergence_report(),
+            "items": rows[-safe_limit:],
+        }
+
+    @app.post("/api/v1/shadow/enable")
+    def shadow_enable(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        _refresh_current_version()
+        app.state.shadow_mode_enabled = True
+        runner = getattr(app.state, "shadow_runner", None)
+        if not isinstance(runner, ShadowModeRunner):
+            app.state.shadow_runner = ShadowModeRunner(dict(app.state.current_version.policy), _shadow_engine)
+        return {"enabled": True}
+
+    @app.post("/api/v1/shadow/disable")
+    def shadow_disable(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        app.state.shadow_mode_enabled = False
+        return {"enabled": False}
+
     @app.get("/api/v1/geo/classify")
     def geo_classify(
         ip: str,
@@ -3212,6 +3496,13 @@ def create_api_app(
             raise HTTPException(status_code=429, detail=budget_meta)
         response = _evaluate_payload(body=body, trace=trace)
         request.state.orchesis_decision = "ALLOW" if response["allowed"] else "DENY"
+        if bool(getattr(app.state, "shadow_mode_enabled", False)):
+            runner = getattr(app.state, "shadow_runner", None)
+            if isinstance(runner, ShadowModeRunner):
+                try:
+                    runner.shadow_evaluate(body, response)
+                except Exception:
+                    pass
         _record_flow_decision(body, response)
         logger.debug(
             "remote evaluation completed",
@@ -3356,13 +3647,33 @@ def create_api_app(
     @app.get("/api/v1/incidents")
     def incidents_list(
         since: str | None = None,
+        status: str | None = None,
         severity: str | None = None,
+        agent_id: str | None = None,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_auth(authorization)
+        manager = app.state.incident_manager
+        has_managed = len(manager.list_incidents()) > 0
+        if has_managed or status is not None or agent_id is not None:
+            incidents = manager.list_incidents(status=status, severity=severity, agent_id=agent_id)
+            return {"incidents": incidents, "total": len(incidents)}
         engine = ForensicsEngine(decisions_path=app.state.decisions_log)
         incidents = engine.detect_incidents(since=since, severity_filter=severity)
         return {"incidents": [incident.__dict__ for incident in incidents], "total": len(incidents)}
+
+    @app.post("/api/v1/incidents")
+    def incidents_create(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        threat = payload.get("threat")
+        if not isinstance(threat, dict):
+            threat = payload
+        agent_id = str(payload.get("agent_id", threat.get("agent_id", "unknown")) or "unknown")
+        return app.state.incident_manager.create(threat=threat, agent_id=agent_id)
 
     @app.get("/api/v1/incidents/report")
     def incidents_report(
@@ -3399,12 +3710,49 @@ def create_api_app(
         )
         return {"events": events}
 
+    @app.get("/api/v1/incidents/metrics")
+    def incidents_metrics(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.incident_manager.get_metrics()
+
+    @app.put("/api/v1/incidents/{incident_id}/status")
+    def incidents_update_status(
+        incident_id: str,
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        status = str(payload.get("status", "") or "")
+        note = str(payload.get("note", "") or "")
+        ok = app.state.incident_manager.update_status(incident_id=incident_id, status=status, note=note)
+        if not ok:
+            raise HTTPException(status_code=404, detail={"error": "incident not found"})
+        return {"ok": True, "incident_id": incident_id, "status": status}
+
+    @app.post("/api/v1/incidents/{incident_id}/mitigations")
+    def incidents_add_mitigation(
+        incident_id: str,
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        action = str(payload.get("action", "") or "")
+        ok = app.state.incident_manager.add_mitigation(incident_id=incident_id, action=action)
+        if not ok:
+            raise HTTPException(status_code=404, detail={"error": "incident not found"})
+        return {"ok": True, "incident_id": incident_id, "action": action}
+
     @app.get("/api/v1/incidents/{incident_id}")
     def incident_detail(
         incident_id: str,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_auth(authorization)
+        managed = app.state.incident_manager.get_incident(incident_id)
+        if isinstance(managed, dict):
+            return managed
         engine = ForensicsEngine(decisions_path=app.state.decisions_log)
         incident = engine.get_incident(incident_id)
         if incident is None:

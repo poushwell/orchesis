@@ -95,10 +95,12 @@ from orchesis.connection_pool import ConnectionPool, PoolConfig, PooledConnectio
 from orchesis.experiment import ExperimentConfig, ExperimentManager
 from orchesis.context_engine import ContextConfig, ContextEngine
 from orchesis.context_budget import ContextBudget
+from orchesis.context_window_optimizer import ContextWindowOptimizer
 from orchesis.context_compression_v2 import ContextCompressionV2
 from orchesis.threat_intel import ThreatIntelConfig, ThreatMatcher
 from orchesis.semantic_cache import SemanticCache, SemanticCacheConfig
 from orchesis.spend_rate import SpendRateDetector, SpendWindow
+from orchesis.request_prioritizer import RequestPrioritizer
 from orchesis.core.context_profile_logger import log_context_profile
 from orchesis.core.evidence_ledger import EvidenceLedger
 
@@ -2103,6 +2105,12 @@ class LLMHTTPProxy:
         if isinstance(context_opt_cfg, dict) and bool(context_opt_cfg.get("enabled", False)):
             self._context_optimizer = ContextOptimizer(context_opt_cfg)
         self._context_router = ContextStrategyRouter()
+        prioritizer_cfg = self._policy.get("request_prioritizer")
+        self._prioritizer = RequestPrioritizer(prioritizer_cfg if isinstance(prioritizer_cfg, dict) else {})
+        context_window_cfg = self._policy.get("context_window_optimizer")
+        self._context_window_optimizer: ContextWindowOptimizer | None = None
+        if isinstance(context_window_cfg, dict) and bool(context_window_cfg.get("enabled", False)):
+            self._context_window_optimizer = ContextWindowOptimizer(context_window_cfg)
         context_budget_cfg = self._policy.get("context_budget")
         self._context_budget: ContextBudget | None = None
         if isinstance(context_budget_cfg, dict) and bool(context_budget_cfg.get("enabled", False)):
@@ -4236,6 +4244,9 @@ class LLMHTTPProxy:
 
     def _phase_context(self, ctx: _RequestContext) -> bool:
         """Optimize context window before sending to LLM."""
+        assigned_priority = self._prioritizer.assign_priority(ctx.body if isinstance(ctx.body, dict) else {})
+        ctx.proc_result["priority"] = assigned_priority
+        ctx.session_headers["X-Orchesis-Priority"] = assigned_priority
         messages = ctx.body.get("messages")
         if isinstance(messages, list) and messages:
             tools_used: list[str] = []
@@ -4278,6 +4289,20 @@ class LLMHTTPProxy:
                 optimized_messages, opt_stats = self._cost_optimizer.optimize(messages)
                 ctx.body["messages"] = validate_tool_chain(optimized_messages)
                 ctx.proc_result["cost_optimization"] = opt_stats
+        if self._context_window_optimizer is not None:
+            messages = ctx.body.get("messages")
+            if isinstance(messages, list) and messages:
+                model = str(ctx.body.get("model", "") or "")
+                result = self._context_window_optimizer.optimize_for_model(messages, model)
+                optimized_messages = result.get("messages")
+                if isinstance(optimized_messages, list):
+                    ctx.body["messages"] = validate_tool_chain(optimized_messages)
+                ctx.proc_result["context_window_optimizer"] = {
+                    "model": str(result.get("model", model)),
+                    "original_tokens": int(result.get("original_tokens", 0) or 0),
+                    "optimized_tokens": int(result.get("optimized_tokens", 0) or 0),
+                    "fits": bool(result.get("fits", False)),
+                }
         if self._context_budget is not None and self._context_budget.enabled:
             messages = ctx.body.get("messages")
             if isinstance(messages, list) and messages:
@@ -5105,6 +5130,7 @@ class LLMHTTPProxy:
                 ctx.handler.send_header("X-Orchesis-Daily-Budget", f"{float(daily_budget):.4f}")
             ctx.handler.send_header("X-Orchesis-Saved", f"{float(ctx.request_saved_usd):.4f}")
             ctx.handler.send_header("X-Orchesis-Session", str(ctx.session_id or ctx.proc_result.get("session_id", "unknown")))
+            ctx.handler.send_header("X-Orchesis-Priority", str(ctx.proc_result.get("priority", "normal")))
             ctx.handler.send_header("X-Orchesis-Cascade-Level", ctx.cascade_level_name)
             ctx.handler.send_header("X-Orchesis-Cascade-Model", str(ctx.body.get("model", ctx.original_model)))
             if ctx.from_semantic_cache:
