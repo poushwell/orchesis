@@ -69,10 +69,12 @@ from orchesis.pipeline_debugger import PipelineDebugger
 from orchesis.tool_call_analyzer import ToolCallAnalyzer
 from orchesis.memory_tracker import MemoryTracker
 from orchesis.fleet_coordinator import FleetCoordinator
+from orchesis.vibe_audit import VibeCodeAuditor
 from orchesis.token_yield import TokenYieldTracker
 from orchesis.token_yield_report import TokenYieldReportGenerator
 from orchesis.threat_feed import ThreatFeed
 from orchesis.threat_patterns import ThreatPatternLibrary
+from orchesis.data_flywheel import DataFlywheel
 from orchesis.signature_editor import SignatureEditor
 from orchesis.alert_rules import AlertRule, AlertRulesEngine
 from orchesis.agent_graph import AgentCollaborationGraph
@@ -87,8 +89,12 @@ from orchesis.intent_classifier import IntentClassifier
 from orchesis.response_analyzer import ResponseAnalyzer
 from orchesis.anomaly_predictor import AnomalyPredictor
 from orchesis.policy_optimizer import PolicyOptimizer
+from orchesis.byzantine_detector import ByzantineDetector
+from orchesis.raft_context import RaftContextProtocol
 from orchesis.incident_manager import IncidentManager
 from orchesis.knowledge_base import OrchesisKnowledgeBase
+from orchesis.quorum_sensing import QuorumSensor
+from orchesis.pid_controller_v2 import PIDControllerV2
 from orchesis import __version__
 
 
@@ -170,6 +176,18 @@ def create_api_app(
     app.state.compliance_checker = RealTimeComplianceChecker()
     app.state.incident_manager = IncidentManager()
     app.state.knowledge_base = OrchesisKnowledgeBase()
+    quorum_cfg = (
+        current_version.policy.get("quorum_sensing")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("quorum_sensing"), dict)
+        else {}
+    )
+    app.state.quorum_sensor = QuorumSensor(quorum_cfg)
+    pid_cfg = (
+        current_version.policy.get("pid_controller_v2")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("pid_controller_v2"), dict)
+        else {}
+    )
+    app.state.pid_controller_v2 = PIDControllerV2(pid_cfg)
     cost_attribution_cfg = (
         current_version.policy.get("cost_attribution")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("cost_attribution"), dict)
@@ -215,10 +233,19 @@ def create_api_app(
     app.state.tool_call_analyzer = ToolCallAnalyzer()
     app.state.memory_tracker = MemoryTracker()
     app.state.fleet_coordinator = FleetCoordinator()
+    app.state.vibe_auditor = VibeCodeAuditor()
     app.state.intent_classifier = IntentClassifier()
     app.state.response_analyzer = ResponseAnalyzer()
     app.state.anomaly_predictor = AnomalyPredictor()
     app.state.policy_optimizer = PolicyOptimizer()
+    app.state.byzantine_detector = ByzantineDetector()
+    app.state.raft_context = RaftContextProtocol()
+    flywheel_cfg = (
+        current_version.policy.get("data_flywheel")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("data_flywheel"), dict)
+        else {}
+    )
+    app.state.data_flywheel = DataFlywheel(flywheel_cfg)
     community_cfg = (
         current_version.policy.get("community")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("community"), dict)
@@ -434,6 +461,22 @@ def create_api_app(
             shadow_policy = dict(app.state.current_version.policy)
         app.state.shadow_runner = ShadowModeRunner(shadow_policy, _shadow_engine)
 
+    def _sync_data_flywheel(candidate_policy: dict[str, Any]) -> None:
+        cfg = (
+            candidate_policy.get("data_flywheel")
+            if isinstance(candidate_policy, dict) and isinstance(candidate_policy.get("data_flywheel"), dict)
+            else {}
+        )
+        flywheel = getattr(app.state, "data_flywheel", None)
+        if not isinstance(flywheel, DataFlywheel):
+            app.state.data_flywheel = DataFlywheel(cfg)
+            return
+        levels = cfg.get("levels")
+        if isinstance(levels, list):
+            cleaned = [str(item) for item in levels if str(item) in DataFlywheel.LEVELS]
+            if cleaned:
+                flywheel.enabled_levels = cleaned
+
     def _refresh_current_version() -> None:
         app.state.current_version = store.current or store.load(str(policy_file))
         app.state.plugins = load_plugins_for_policy(
@@ -460,6 +503,7 @@ def create_api_app(
         _sync_agent_teams_from_policy(app.state.current_version.policy)
         _sync_api_limiter(app.state.current_version.policy)
         _sync_shadow_mode(app.state.current_version.policy)
+        _sync_data_flywheel(app.state.current_version.policy)
 
     def _sync_auth(candidate_policy: dict[str, Any]) -> None:
         auth = candidate_policy.get("authentication")
@@ -505,6 +549,7 @@ def create_api_app(
     _sync_agent_teams_from_policy(current_version.policy)
     _sync_api_limiter(current_version.policy)
     _sync_shadow_mode(current_version.policy)
+    _sync_data_flywheel(current_version.policy)
 
     def _auth_token_from_policy() -> str | None:
         token_override = getattr(app.state, "api_token_override", None)
@@ -879,6 +924,10 @@ def create_api_app(
         events = read_events_from_jsonl(source) if source.exists() else []
         analyzer = app.state.tool_call_analyzer
         return analyzer.get_session_tool_stats(session_id=session_id, decisions_log=events)
+
+    def _build_vibe_audit_payload(code: str, language: str) -> dict[str, Any]:
+        auditor = app.state.vibe_auditor
+        return auditor.audit_code(code=code, language=language)
 
     def _hydrate_memory_session(session_id: str) -> None:
         tracker = app.state.memory_tracker
@@ -1648,6 +1697,137 @@ def create_api_app(
         rows = app.state.knowledge_base.suggest_for_error(message)
         return {"error_message": message, "suggestions": rows, "total": len(rows)}
 
+    @app.get("/api/v1/quorum/status")
+    def quorum_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.quorum_sensor.get_stats()
+
+    @app.get("/api/v1/quorum/active")
+    def quorum_active(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        rows = app.state.quorum_sensor.detect_quorum()
+        return {"quorums": rows, "total": len(rows)}
+
+    @app.post("/api/v1/quorum/register-task")
+    def quorum_register_task(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        agent_id = str(payload.get("agent_id", "") or "").strip()
+        task_fingerprint = str(payload.get("task_fingerprint", "") or "").strip()
+        if not agent_id or not task_fingerprint:
+            raise HTTPException(status_code=400, detail={"error": "agent_id and task_fingerprint are required"})
+        app.state.quorum_sensor.register_task(agent_id=agent_id, task_fingerprint=task_fingerprint)
+        return {"ok": True, "active_quorums": len(app.state.quorum_sensor.detect_quorum())}
+
+    @app.get("/api/v1/quorum/{quorum_id}/context")
+    def quorum_get_context(
+        quorum_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        row = app.state.quorum_sensor.get_shared_context(quorum_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail={"error": "quorum not found"})
+        return row
+
+    @app.post("/api/v1/quorum/{quorum_id}/contribute")
+    def quorum_contribute(
+        quorum_id: str,
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        agent_id = str(payload.get("agent_id", "") or "").strip()
+        context = payload.get("context")
+        if not agent_id or not isinstance(context, dict):
+            raise HTTPException(status_code=400, detail={"error": "agent_id and context are required"})
+        ok = app.state.quorum_sensor.contribute_context(quorum_id=quorum_id, agent_id=agent_id, context=context)
+        if not ok:
+            raise HTTPException(status_code=404, detail={"error": "quorum not found"})
+        return {"ok": True, "quorum_id": quorum_id, "agent_id": agent_id}
+
+    @app.post("/api/v1/pid/update")
+    def pid_update(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        current_value = payload.get("current_value")
+        setpoint = payload.get("setpoint")
+        if not isinstance(current_value, int | float) or not isinstance(setpoint, int | float):
+            raise HTTPException(status_code=400, detail={"error": "current_value and setpoint must be numbers"})
+        correction = app.state.pid_controller_v2.update(float(current_value), float(setpoint))
+        return {"correction": float(correction)}
+
+    @app.post("/api/v1/pid/check-ews")
+    def pid_check_ews(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        values = payload.get("values", [])
+        if not isinstance(values, list):
+            raise HTTPException(status_code=400, detail={"error": "values must be a list"})
+        return app.state.pid_controller_v2.check_ews_tau(values)
+
+    @app.post("/api/v1/pid/check-zipf-drift")
+    def pid_check_zipf(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        values = payload.get("token_frequencies", [])
+        if not isinstance(values, list):
+            raise HTTPException(status_code=400, detail={"error": "token_frequencies must be a list"})
+        return app.state.pid_controller_v2.check_zipf_drift(values)
+
+    @app.post("/api/v1/pid/check-latency")
+    def pid_check_latency(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        values = payload.get("latencies_ms", [])
+        if not isinstance(values, list):
+            raise HTTPException(status_code=400, detail={"error": "latencies_ms must be a list"})
+        return app.state.pid_controller_v2.check_latency_zscore(values)
+
+    @app.get("/api/v1/pid/{session_id}/warning-level")
+    def pid_warning_level(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        values: list[float] = []
+        token_freq: list[int] = []
+        latencies: list[float] = []
+        for event in events:
+            snapshot = getattr(event, "state_snapshot", {})
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            sid = str(snapshot.get("session_id", "__global__"))
+            if sid != session_id:
+                continue
+            prompt_len = snapshot.get("prompt_length", snapshot.get("prompt_tokens", 0))
+            if isinstance(prompt_len, int | float):
+                values.append(float(prompt_len))
+                token_freq.append(int(max(1, int(prompt_len))))
+            dur_us = getattr(event, "evaluation_duration_us", 0)
+            if isinstance(dur_us, int | float):
+                latencies.append(float(dur_us) / 1000.0)
+        metrics = {"values": values[-30:], "token_frequencies": token_freq[-30:], "latencies_ms": latencies[-30:]}
+        return app.state.pid_controller_v2.get_warning_level(session_id=session_id, metrics=metrics)
+
     @app.get("/api/v1/compliance/report/{agent_id}")
     def compliance_report_endpoint(
         agent_id: str,
@@ -2055,6 +2235,114 @@ def create_api_app(
         updated = app.state.policy_optimizer.apply_suggestions(policy, suggestions)
         return {"policy": updated}
 
+    @app.post("/api/v1/byzantine/observe")
+    def byzantine_observe_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        agent_id = body.get("agent_id")
+        metrics = body.get("metrics")
+        if not isinstance(agent_id, str) or not agent_id.strip():
+            raise HTTPException(status_code=400, detail="agent_id is required")
+        if not isinstance(metrics, dict):
+            metrics = {}
+        app.state.byzantine_detector.observe(agent_id.strip(), metrics)
+        return {
+            "ok": True,
+            "agent_id": agent_id.strip(),
+            "observations": len(app.state.byzantine_detector._observations.get(agent_id.strip(), [])),
+        }
+
+    @app.get("/api/v1/byzantine/detect")
+    def byzantine_detect_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {"results": app.state.byzantine_detector.detect()}
+
+    @app.get("/api/v1/byzantine/fleet-health")
+    def byzantine_fleet_health_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.byzantine_detector.get_fleet_health()
+
+    @app.post("/api/v1/byzantine/cross-validate")
+    def byzantine_cross_validate_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        agent_a = str(body.get("agent_a", "")).strip()
+        agent_b = str(body.get("agent_b", "")).strip()
+        query = str(body.get("query", "")).strip()
+        if not agent_a or not agent_b:
+            raise HTTPException(status_code=400, detail="agent_a and agent_b are required")
+        return app.state.byzantine_detector.cross_validate(agent_a=agent_a, agent_b=agent_b, query=query)
+
+    @app.post("/api/v1/raft/append")
+    def raft_append_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        key = str(body.get("key", "")).strip()
+        value = str(body.get("value", ""))
+        agent_id = str(body.get("agent_id", "")).strip()
+        if not key:
+            raise HTTPException(status_code=400, detail="key is required")
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="agent_id is required")
+        return app.state.raft_context.append_entry(key=key, value=value, agent_id=agent_id)
+
+    @app.post("/api/v1/raft/acknowledge")
+    def raft_acknowledge_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        agent_id = str(body.get("agent_id", "")).strip()
+        index = body.get("index", 0)
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="agent_id is required")
+        try:
+            idx = int(index)
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail="index must be an integer") from error
+        ok = app.state.raft_context.acknowledge(agent_id=agent_id, index=idx)
+        return {"ok": ok}
+
+    @app.get("/api/v1/raft/divergent")
+    def raft_divergent_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {"agents": app.state.raft_context.get_divergent_agents()}
+
+    @app.get("/api/v1/raft/{agent_id}/context")
+    def raft_context_endpoint(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.raft_context.get_consistent_context(agent_id=agent_id)
+
+    @app.post("/api/v1/raft/{agent_id}/sync")
+    def raft_sync_endpoint(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.raft_context.sync_agent(agent_id=agent_id)
+
+    @app.get("/api/v1/raft/stats")
+    def raft_stats_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.raft_context.get_raft_stats()
+
     @app.post("/api/v1/tools/analyze")
     def analyze_tools_endpoint(
         body: dict[str, Any],
@@ -2168,6 +2456,39 @@ def create_api_app(
     ) -> dict[str, Any]:
         _require_auth(authorization)
         return app.state.fleet_coordinator.rebalance()
+
+    @app.post("/api/v1/vibe-audit/code")
+    def vibe_audit_code_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        code = str(body.get("code", "") or "")
+        language = str(body.get("language", "python") or "python")
+        return _build_vibe_audit_payload(code, language)
+
+    @app.post("/api/v1/vibe-audit/analyze")
+    def vibe_audit_analyze_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        code = str(body.get("code", "") or "")
+        language = str(body.get("language", "python") or "python")
+        report = _build_vibe_audit_payload(code, language)
+        checks = body.get("checks")
+        if isinstance(checks, list) and checks:
+            allow = {str(item).strip() for item in checks if str(item).strip()}
+            report["findings"] = [
+                item for item in report.get("findings", []) if str(item.get("check", "")) in allow
+            ]
+            report["critical_count"] = sum(
+                1 for item in report["findings"] if str(item.get("severity", "")) == "critical"
+            )
+            report["high_count"] = sum(
+                1 for item in report["findings"] if str(item.get("severity", "")) == "high"
+            )
+        return report
 
     @app.get("/api/v1/ari/{agent_id}")
     def get_ari(
@@ -2902,6 +3223,39 @@ def create_api_app(
         metric_values = metrics_input if isinstance(metrics_input, dict) else _default_alert_metrics()
         fired = app.state.alert_rules_engine.evaluate(metric_values)
         return {"fired": fired, "count": len(fired), "metrics": metric_values}
+
+    @app.get("/api/v1/flywheel/stats")
+    def flywheel_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        app.state.data_flywheel.extract_patterns()
+        return app.state.data_flywheel.get_flywheel_stats()
+
+    @app.get("/api/v1/flywheel/leaderboard")
+    def flywheel_leaderboard(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        rows = app.state.data_flywheel.get_leaderboard()
+        return {"leaderboard": rows, "count": len(rows)}
+
+    @app.post("/api/v1/flywheel/signal")
+    def flywheel_signal(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        app.state.data_flywheel.collect_signal(payload)
+        return {"status": "accepted", "stored": True}
+
+    @app.post("/api/v1/flywheel/calibrate")
+    def flywheel_calibrate(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        community_data = payload.get("community_data")
+        rows = community_data if isinstance(community_data, list) else []
+        return app.state.data_flywheel.calibrate_signatures(rows)
 
     @app.get("/api/v1/tenants")
     def list_tenants(authorization: str | None = Header(default=None)) -> dict[str, Any]:

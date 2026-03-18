@@ -76,6 +76,7 @@ from orchesis.context_optimizer import ContextOptimizer
 from orchesis.context_router import ContextStrategyRouter
 from orchesis.auto_healer import AutoHealer
 from orchesis.thompson_router import ThompsonRouter
+from orchesis.thompson_sampling import ThompsonSampler
 from orchesis.agent_discovery import AgentDiscovery
 from orchesis.tool_policy import ToolPolicyEngine
 from orchesis.cost_velocity import CostVelocity
@@ -101,6 +102,7 @@ from orchesis.threat_intel import ThreatIntelConfig, ThreatMatcher
 from orchesis.semantic_cache import SemanticCache, SemanticCacheConfig
 from orchesis.spend_rate import SpendRateDetector, SpendWindow
 from orchesis.request_prioritizer import RequestPrioritizer
+from orchesis.apoptosis import ApoptosisEngine
 from orchesis.core.context_profile_logger import log_context_profile
 from orchesis.core.evidence_ledger import EvidenceLedger
 
@@ -2119,6 +2121,10 @@ class LLMHTTPProxy:
         self._compression_v2: ContextCompressionV2 | None = None
         if isinstance(compression_v2_cfg, dict) and bool(compression_v2_cfg.get("enabled", False)):
             self._compression_v2 = ContextCompressionV2(compression_v2_cfg)
+        apoptosis_cfg = self._policy.get("apoptosis")
+        self._apoptosis: ApoptosisEngine | None = None
+        if isinstance(apoptosis_cfg, dict):
+            self._apoptosis = ApoptosisEngine(apoptosis_cfg)
         mast_cfg = self._policy.get("mast")
         self._mast: MASTDetectors | None = None
         if isinstance(mast_cfg, dict) and bool(mast_cfg.get("enabled", False)):
@@ -2131,6 +2137,10 @@ class LLMHTTPProxy:
         self._thompson: ThompsonRouter | None = None
         if isinstance(thompson_cfg, dict) and bool(thompson_cfg.get("enabled", False)):
             self._thompson = ThompsonRouter(thompson_cfg)
+        thompson_sampling_cfg = self._policy.get("thompson_sampling")
+        self._thompson_sampler: ThompsonSampler | None = None
+        if isinstance(thompson_sampling_cfg, dict) and bool(thompson_sampling_cfg.get("enabled", False)):
+            self._thompson_sampler = ThompsonSampler(thompson_sampling_cfg)
         self._agent_discovery = AgentDiscovery(self._policy.get("agent_discovery"))
         self._tool_policy: ToolPolicyEngine | None = None
         tools_cfg_raw = self._policy.get("capabilities", {})
@@ -4159,6 +4169,15 @@ class LLMHTTPProxy:
                 return False
         return True
 
+    def _get_available_models(self) -> list[str]:
+        """Return list of available models from policy config."""
+        models = self._policy.get("models", {})
+        if isinstance(models, list):
+            return [str(item) for item in models if isinstance(item, str)]
+        if isinstance(models, dict):
+            return [str(item) for item in models.keys()]
+        return list(self._thompson_sampler.ARMS.keys()) if self._thompson_sampler else []
+
     def _phase_model_router(self, ctx: _RequestContext) -> bool:
         if self._spend_rate_detector is not None and self._spend_rate_detector.is_heartbeat_request(ctx.body):
             ctx.heartbeat_detected = True
@@ -4206,6 +4225,34 @@ class LLMHTTPProxy:
                 "confidence": float(decision.confidence),
                 "sampled_scores": dict(decision.sampled_scores),
             }
+        if self._thompson_sampler is not None:
+            messages = ctx.body.get("messages")
+            tools_used: list[str] = []
+            tools = ctx.body.get("tools")
+            if isinstance(tools, list):
+                for item in tools:
+                    if not isinstance(item, dict):
+                        continue
+                    fn = item.get("function")
+                    if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+                        tools_used.append(str(fn.get("name")))
+                    elif isinstance(item.get("name"), str):
+                        tools_used.append(str(item.get("name")))
+            task_type = (
+                self._context_router.classify(messages, tools_used)
+                if isinstance(messages, list)
+                else "unknown"
+            )
+            available_models = self._get_available_models()
+            selected_model = self._thompson_sampler.sample(task_type, available_models)
+            if isinstance(selected_model, str) and selected_model:
+                ctx.body["model"] = selected_model
+                ctx.session_headers["X-Orchesis-TS-Model"] = selected_model
+                ctx.proc_result["thompson_sampling"] = {
+                    "task_type": task_type,
+                    "selected_model": selected_model,
+                    "available_models": available_models,
+                }
         return True
 
     def _phase_secrets(self, ctx: _RequestContext) -> bool:
@@ -4248,6 +4295,19 @@ class LLMHTTPProxy:
         ctx.proc_result["priority"] = assigned_priority
         ctx.session_headers["X-Orchesis-Priority"] = assigned_priority
         messages = ctx.body.get("messages")
+        if self._apoptosis is not None and self._apoptosis.enabled and isinstance(messages, list) and messages:
+            findings = self._apoptosis.scan(messages)
+            if findings:
+                result = self._apoptosis.remove(messages, findings)
+                cleaned = result.get("messages")
+                if isinstance(cleaned, list):
+                    ctx.body["messages"] = validate_tool_chain(cleaned)
+                    messages = ctx.body.get("messages")
+                ctx.proc_result["apoptosis"] = {
+                    "removed_count": int(result.get("removed_count", 0) or 0),
+                    "safety_checks_passed": bool(result.get("safety_checks_passed", False)),
+                    "findings_count": len(findings),
+                }
         if isinstance(messages, list) and messages:
             tools_used: list[str] = []
             tools = ctx.body.get("tools")
@@ -4850,6 +4910,16 @@ class LLMHTTPProxy:
                     category=category,
                     outcome=outcome,
                 )
+        if self._thompson_sampler is not None:
+            model = str(ctx.body.get("model", "") or "")
+            if model:
+                task_type = str(ctx.proc_result.get("context_task_type", "unknown") or "unknown")
+                latency_ms = max(0.0, (time.perf_counter() - float(ctx.request_started or 0.0)) * 1000.0)
+                cost = max(0.0, float(ctx.proc_result.get("cost", 0.0) or 0.0))
+                success = 1.0 if bool(ctx.resp_status < 400 and ctx.proc_result.get("allowed", True)) else 0.0
+                quality = 0.7 + (0.3 * success)
+                reward = quality * (1.0 / (1.0 + (cost * 1000.0))) * (1.0 / (1.0 + (latency_ms / 1000.0)))
+                self._thompson_sampler.update(model, task_type, reward)
         if self._agent_discovery is not None and self._agent_discovery.enabled:
             tools_used: list[str] = []
             for tool_call in getattr(ctx.parsed_req, "tool_calls", []):
