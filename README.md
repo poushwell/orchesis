@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://pypi.org/project/orchesis/"><img src="https://img.shields.io/pypi/v/orchesis?color=7c3aed&label=PyPI" alt="PyPI"/></a>
-  <a href="https://github.com/poushwell/orchesis/actions"><img src="https://img.shields.io/badge/tests-2969%20passing-22c55e" alt="tests"/></a>
+  <a href="https://github.com/poushwell/orchesis/actions"><img src="https://img.shields.io/badge/tests-3517%20passing-22c55e" alt="tests"/></a>
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"/>
   <a href="https://github.com/poushwell/orchesis"><img src="https://img.shields.io/github/stars/poushwell/orchesis?style=flat&color=7c3aed" alt="Stars"/></a>
   <img src="https://img.shields.io/badge/dependencies-0-green" alt="Zero dependencies"/>
@@ -79,6 +79,44 @@ graph LR
 The proxy layer sees what SDK cannot: cross-agent patterns, fleet-level anomalies,
 duplicate context across providers. This is an architectural advantage, not a feature difference.
 
+## What's inside
+
+**Security**
+- 17-phase detection pipeline, 25+ threat signatures
+- Adaptive Detection v2 (5-layer: regex -> structural -> entropy -> n-gram -> session risk)
+- Intent Classifier, Response Analyzer, Tool Call Analyzer
+- Memory poisoning detection, SSRF geo-classification
+
+**Cost**
+- Token Yield tracking (semantic value / total tokens)
+- Cost Optimizer (5 strategies: dedup, trim, compress, prune)
+- Context Compression v2 (semantic chunking, importance scoring)
+- Budget advisor, cost attribution by team/project, forecasting
+
+**Reliability**
+- Auto-healing 6 levels (L1 log -> L6 circuit break)
+- Agent Lifecycle Manager (state machine: active/idle/degraded/banned)
+- Context Budget progressive degradation (L0/L1/L2)
+- Session replay, shadow mode, pipeline debugger
+
+**Observability**
+- Real-time dashboard (dark/light theme, keyboard shortcuts, mobile responsive)
+- Agent Health Score, Agent Scorecard, Agent Intelligence Profile
+- Flow X-Ray timeline, Request Inspector, Session Heatmap
+- Cost Analytics, Rate Limit Visualization, Notification System
+
+**Compliance**
+- EU AI Act Articles 9/12/72 - Evidence Record, Compliance Checker
+- OWASP Agentic Top 10, MAST, NIST AI RMF coverage
+- Policy-as-Code Validator, Compliance Report Generator
+- Audit Trail Export (JSON/CSV/JSONL)
+
+**Platform**
+- Multi-tenant support, Per-team budget attribution
+- Community threat intelligence (opt-in, zero PII)
+- Threat Pattern Library, Signature Editor, Threat Feed
+- Policy templates, migration tool, backup/restore
+
 ## What Orchesis does
 
 | Capability | Current coverage |
@@ -98,7 +136,7 @@ duplicate context across providers. This is an architectural advantage, not a fe
 | MAST coverage | 78.6% |
 | OWASP coverage | 80% |
 | Auto-heal actions | 6 |
-| Tests passing | 2,969 |
+| Tests passing | 3,517 |
 | Dependencies | **0** (stdlib only) |
 | Proxy overhead | 0.8% measured |
 | Context collapse | 12x growth caught |

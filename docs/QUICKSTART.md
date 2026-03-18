@@ -45,3 +45,19 @@ Open `http://localhost:8080/dashboard` for the embedded control plane:
 4. `orchesis proxy --port 8080`
 5. Point your agent at `http://localhost:8080`
 6. Open `/dashboard` to monitor
+
+## Useful commands
+
+```bash
+# Check system status
+orchesis status
+
+# Create backup
+orchesis backup
+
+# Run benchmark
+orchesis benchmark --run-all
+
+# Export evidence record
+orchesis evidence --session SESSION_ID
+```

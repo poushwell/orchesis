@@ -59,6 +59,20 @@ Phases execute in order. Early phases can short-circuit (e.g., circuit breaker o
 - **Experiment manager** — A/B testing, task completion tracking
 - **Flow analyzer** — Conversation topology, pattern detection
 
+## Recent modules (A-T sprint)
+
+- **Context Router** (`context_router`) — strategy classification per request task type
+- **Cost Optimizer** (`cost_optimizer`) — dedup, whitespace trim, tool-result compression, assistant-turn pruning
+- **Adaptive Detection v2** (`adaptive_detection_v2`) — 5-layer detector with confidence and calibration
+- **Intent Classifier** (`intent_classifier`) — intent + risk inference for inbound prompts
+- **Response Analyzer** (`response_analyzer`) — leakage, hallucination signals, quality scoring
+- **Tool Call Analyzer** (`tool_call_analyzer`) — risk scoring and session-level tool usage insights
+- **Anomaly Predictor** (`anomaly_predictor`) — trend-based early warning and prediction history
+- **Policy Optimizer** (`policy_optimizer`) — suggested rate-limit/cache/budget tuning from traffic
+- **Cache Warmer** (`cache_warmer`) — pre-populates semantic cache from frequent request patterns
+- **Agent Graph** (`agent_graph`) — collaboration map (nodes/edges/clusters/stats)
+- **Geo Intel** (`geo_intel`) — SSRF-oriented IP classification (private/loopback/link-local/public)
+
 ## State management
 
 - Sliding-window rate limits

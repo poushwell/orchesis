@@ -87,3 +87,80 @@ Orchesis proxy exposes HTTP endpoints for the dashboard, stats, and control plan
 - `400` — invalid request
 - `404` — not found (e.g., experiment/threat disabled)
 - `500` — internal error
+
+## Control API (A-T additions)
+
+All endpoints below require `Authorization: Bearer <token>`.
+
+### Overwatch and Teams
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/overwatch/teams` | List team summaries |
+| GET | `/api/v1/overwatch/teams/{team_id}` | Team drill-down |
+| POST | `/api/v1/overwatch/{agent_id}/team` | Assign agent to team |
+
+### Agent Insights
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/agents/{agent_id}/health` | Agent health score widget payload |
+| GET | `/api/v1/agents/graph` | Collaboration graph (nodes/edges) |
+| GET | `/api/v1/agents/graph/stats` | Graph density/degree stats |
+| GET | `/api/v1/agents/clusters` | Agent interaction clusters |
+
+### Compliance and Evidence
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/compliance/report/{agent_id}` | Structured compliance report |
+| GET | `/api/v1/compliance/report/{agent_id}/text` | Text export for audit packs |
+
+### Context and Cache
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/context-budget/stats` | Global context budget degradation stats |
+| GET | `/api/v1/context-budget/{session_id}` | Session context budget stats |
+| GET | `/api/v1/cache/warm/candidates` | Ranked warming candidates |
+| POST | `/api/v1/cache/warm` | Trigger cache warming |
+| GET | `/api/v1/cache/warm/report` | Last warming effectiveness report |
+
+### Benchmark and Rate Limits
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/benchmark/cases` | List benchmark dataset cases |
+| GET | `/api/v1/benchmark/run/{case_id}` | Execute single benchmark case |
+| POST | `/api/v1/benchmark/run-all` | Execute full benchmark suite |
+| GET | `/api/v1/benchmark/results` | Latest benchmark run result |
+| GET | `/api/v1/rate-limits/status` | Per-agent + global rate limit status |
+
+### Geo and Threat Context
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/geo/classify` | Classify IP risk context |
+| POST | `/api/v1/geo/scan-ssrf` | Detect SSRF attempts in payload text |
+
+### Intent and Response Safety
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/v1/intent/classify` | Classify single prompt intent |
+| POST | `/api/v1/intent/batch` | Classify conversation messages |
+| GET | `/api/v1/intent/stats` | Intent classifier aggregate stats |
+| POST | `/api/v1/response/analyze` | Response safety + quality report |
+| POST | `/api/v1/response/check-leakage` | Prompt-leakage indicators |
+| POST | `/api/v1/response/check-hallucination` | Hallucination signals |
+
+### Prediction and Optimization
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/v1/predict/anomaly` | Predict near-term anomaly likelihood |
+| GET | `/api/v1/predict/{agent_id}/warning` | Agent early warning signal |
+| GET | `/api/v1/predict/history` | Prediction history |
+| POST | `/api/v1/policy/optimize` | Generate policy optimization suggestions |
+| GET | `/api/v1/policy/suggestions` | Suggested changes only |
+| POST | `/api/v1/policy/apply-suggestion` | Apply selected suggestions to policy payload |

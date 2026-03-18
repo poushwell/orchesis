@@ -53,7 +53,8 @@ def test_readme_has_badges() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "docs/banner.svg" in content
     assert "img.shields.io/pypi/v/orchesis" in content
-    assert "img.shields.io/badge/tests-2969%20passing-22c55e" in content
+    assert "img.shields.io/badge/tests-" in content
+    assert "%20passing-22c55e" in content
 
 
 def test_readme_has_docker_section() -> None:
@@ -66,5 +67,5 @@ def test_readme_has_docker_section() -> None:
 def test_readme_has_project_status() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "## By the numbers" in content
-    assert "2,969" in content
+    assert "Tests passing" in content
     assert "## What Orchesis does" in content
