@@ -1183,8 +1183,7 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     """Load policy from YAML file path."""
     policy_path = Path(path)
     try:
-        with policy_path.open("r", encoding="utf-8", errors="replace") as file:
-            content = file.read()
+        content = policy_path.read_bytes().decode("utf-8", errors="replace")
     except (OSError, IOError) as error:
         raise PolicyError(f"Cannot read policy file: {policy_path}") from error
 
@@ -1194,11 +1193,13 @@ def load_policy(path: str | Path) -> dict[str, Any]:
 
     try:
         loaded = yaml.safe_load(content)
-    except (yaml.YAMLError, RecursionError, MemoryError) as error:
+    except yaml.YAMLError as error:
         raise ValueError(f"Invalid YAML policy: {error}") from error
+    except (RecursionError, MemoryError) as error:
+        raise ValueError(f"Cannot load policy: {error}") from error
     except Exception as error:
         # Fuzz-hardening: convert unexpected parser internals into user-facing parse error.
-        raise ValueError(f"Invalid YAML policy: unexpected parser error: {error}") from error
+        raise ValueError(f"Cannot load policy: {error}") from error
 
     if not isinstance(loaded, dict):
         raise PolicyError("Policy top-level YAML object must be a mapping.")

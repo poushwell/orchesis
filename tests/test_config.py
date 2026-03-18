@@ -54,6 +54,13 @@ def test_load_policy_raises_policy_error_for_valid_non_mapping_yaml(tmp_path: Pa
         load_policy(policy_path)
 
 
+def test_policy_loader_handles_binary_yaml(tmp_path: Path) -> None:
+    policy_path = tmp_path / "binary.yaml"
+    policy_path.write_bytes(b"rules:\n  - name: budget_limit\n    max_cost_per_call: 0.5\n\xff\xfe")
+    with pytest.raises(ValueError):
+        load_policy(policy_path)
+
+
 def test_validate_policy_accepts_valid_policy() -> None:
     policy = {
         "rules": [

@@ -117,3 +117,10 @@ def test_pii_detector_handles_mixed_binary() -> None:
     detector = PiiDetector()
     findings = detector.detect(b"\x00\xffuser@example.com123-45-6789")  # type: ignore[arg-type]
     assert findings == []
+
+
+def test_pii_detector_handles_bidi_unicode() -> None:
+    detector = PiiDetector()
+    text = "user@\u202eexample.com"
+    findings = detector.scan_text(text)
+    assert isinstance(findings, list)

@@ -319,6 +319,8 @@ class SecretScanner:
         """Compatibility scan entrypoint hardened for fuzzed inputs."""
         if not isinstance(text, str):
             return []
+        # Fuzz hardening: strip format-string-like percent escapes.
+        text = text.replace("%u", "").replace("%n", "").replace("%s", "")
         text = text.replace("\x00", "").replace("\xff", "")
         text = "".join(ch for ch in text if ch.isprintable() or ch in {"\n", "\r", "\t"})
         if not text.strip():
@@ -331,6 +333,8 @@ class SecretScanner:
     def scan_text(self, text: str) -> list[dict[str, Any]]:
         if not isinstance(text, str):
             return []
+        # Fuzz hardening: strip format-string-like percent escapes.
+        text = text.replace("%u", "").replace("%n", "").replace("%s", "")
         text = text.replace("\x00", "").replace("\xff", "")
         text = "".join(ch for ch in text if ch.isprintable() or ch in {"\n", "\r", "\t"})
         if not text.strip():

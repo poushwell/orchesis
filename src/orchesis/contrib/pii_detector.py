@@ -11,6 +11,8 @@ from orchesis.fast_scanner import FastPIIDetector
 from orchesis.input_guard import sanitize_text
 from orchesis.plugins import PluginInfo
 
+BIDI_CONTROLS = {"\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u200f", "\u200e"}
+
 PII_PATTERNS: dict[str, tuple[re.Pattern[str], str, str]] = {
     "email": (
         re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"),
@@ -179,6 +181,7 @@ class PiiDetector:
             text = text.encode("utf-8", errors="replace").decode("utf-8")
         except Exception:
             return []
+        text = "".join(ch for ch in text if ch not in BIDI_CONTROLS)
         if not text.strip():
             return []
         try:
@@ -193,6 +196,7 @@ class PiiDetector:
             text = text.encode("utf-8", errors="replace").decode("utf-8")
         except Exception:
             return []
+        text = "".join(ch for ch in text if ch not in BIDI_CONTROLS)
         text = sanitize_text(text)
         if text is None:
             return []

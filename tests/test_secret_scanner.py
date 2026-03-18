@@ -120,3 +120,9 @@ def test_secret_scanner_handles_binary_input() -> None:
     scanner = SecretScanner()
     findings = scanner.scan(b"\x00\xffbinary-data")  # type: ignore[arg-type]
     assert findings == []
+
+
+def test_secret_scanner_handles_format_strings() -> None:
+    scanner = SecretScanner()
+    findings = scanner.scan_text("prefix %n %s %u token=sk-abcdefghijklmnopqrstuvwxyz123456")
+    assert isinstance(findings, list)
