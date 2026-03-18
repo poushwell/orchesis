@@ -53,12 +53,15 @@ from orchesis.agent_profile import AgentIntelligenceProfile
 from orchesis.pipeline import check_budget
 from orchesis.evidence_record import EvidenceRecord
 from orchesis.cost_analytics import CostAnalytics
+from orchesis.cost_forecast import CostForecaster
 from orchesis.budget_advisor import BudgetAdvisor
 from orchesis.session_replay import SessionReplay
 from orchesis.community_intel import CommunityIntel
 from orchesis.token_yield import TokenYieldTracker
 from orchesis.threat_feed import ThreatFeed
 from orchesis.signature_editor import SignatureEditor
+from orchesis.alert_rules import AlertRule, AlertRulesEngine
+from orchesis.agent_graph import AgentCollaborationGraph
 from orchesis import __version__
 
 
@@ -141,6 +144,20 @@ def create_api_app(
     )
     app.state.threat_feed = ThreatFeed(feed_cfg)
     app.state.signature_editor = SignatureEditor(str(policy_file.parent / ".orchesis" / "signatures.json"))
+    raw_alert_rules = (
+        current_version.policy.get("alert_rules")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("alert_rules"), list)
+        else []
+    )
+    parsed_rules: list[AlertRule] = []
+    for item in raw_alert_rules:
+        if not isinstance(item, dict):
+            continue
+        try:
+            parsed_rules.append(AlertRule(item))
+        except ValueError:
+            continue
+    app.state.alert_rules_engine = AlertRulesEngine(parsed_rules)
     app.state.benchmark_results = {}
     app.state.dna_store = ContextDNAStore(str(policy_file.parent / ".orchesis" / "dna"))
     community_cfg = (
@@ -481,6 +498,34 @@ def create_api_app(
         events = read_events_from_jsonl(source) if source.exists() else []
         return CostAnalytics().compute(events, period_hours=period_hours)
 
+    def _build_hourly_cost_points(history_days: int = 7) -> list[dict[str, Any]]:
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=max(1, int(history_days)))
+        buckets: dict[int, float] = {}
+        for event in events:
+            ts_raw = str(getattr(event, "timestamp", "") or "")
+            ts = _parse_health_ts(ts_raw)
+            if ts is None or ts < cutoff:
+                continue
+            hour_key = int(ts.replace(minute=0, second=0, microsecond=0).timestamp() // 3600)
+            buckets[hour_key] = buckets.get(hour_key, 0.0) + float(getattr(event, "cost", 0.0) or 0.0)
+        if not buckets:
+            return []
+        keys = sorted(buckets.keys())
+        first = keys[0]
+        points: list[dict[str, Any]] = []
+        for idx, key in enumerate(keys):
+            points.append(
+                {
+                    "hour_index": key - first if key >= first else idx,
+                    "timestamp": datetime.fromtimestamp(key * 3600, tz=timezone.utc).isoformat(),
+                    "cost": round(float(buckets[key]), 8),
+                }
+            )
+        return points
+
     def _build_budget_advice_payload() -> dict[str, Any]:
         source = Path(app.state.decisions_log)
         events = read_events_from_jsonl(source) if source.exists() else []
@@ -725,6 +770,86 @@ def create_api_app(
                 "requests_this_minute": int(global_requests),
                 "peak_this_hour": int(peak_this_hour),
             },
+        }
+
+    def _build_agent_graph_model() -> AgentCollaborationGraph:
+        graph = AgentCollaborationGraph()
+        _refresh_current_version()
+        for agent_id in sorted(app.state.current_version.registry.agents.keys()):
+            graph.record_agent(agent_id, requests=0, cost=0.0)
+        source = Path(app.state.decisions_log)
+        if not source.exists():
+            return graph
+        for event in read_events_from_jsonl(source):
+            actor = str(getattr(event, "agent_id", "") or "").strip()
+            raw_cost = getattr(event, "cost", 0.0)
+            try:
+                cost = float(raw_cost)
+            except (TypeError, ValueError):
+                cost = 0.0
+            if actor:
+                graph.record_agent(actor, requests=1, cost=cost)
+            snapshot = event.state_snapshot if isinstance(event.state_snapshot, dict) else {}
+            interaction_type = (
+                str(snapshot.get("interaction_type")).strip()
+                if isinstance(snapshot.get("interaction_type"), str) and str(snapshot.get("interaction_type")).strip()
+                else "context_share"
+            )
+            targets: list[str] = []
+            for key in (
+                "to_agent",
+                "target_agent",
+                "called_agent",
+                "peer_agent",
+                "collaborator",
+                "interaction_with",
+            ):
+                value = snapshot.get(key)
+                if isinstance(value, str) and value.strip():
+                    targets.append(value.strip())
+            shared_with = snapshot.get("shared_with")
+            if isinstance(shared_with, list):
+                for value in shared_with:
+                    if isinstance(value, str) and value.strip():
+                        targets.append(value.strip())
+            if actor:
+                for target in targets:
+                    if target and target != actor:
+                        graph.record_interaction(actor, target, interaction_type=interaction_type)
+        return graph
+
+    def _default_alert_metrics() -> dict[str, Any]:
+        stats = metrics.snapshot()
+        cache_hit = _cache_hit_rate_from_metrics(stats)
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        now = datetime.now(timezone.utc)
+        day_ago = now - timedelta(hours=24)
+        cost_today = 0.0
+        blocked_count = 0
+        loop_count = 0
+        for event in events:
+            ts = _parse_health_ts(str(getattr(event, "timestamp", "") or ""))
+            if ts is None or ts < day_ago:
+                continue
+            cost_today += float(getattr(event, "cost", 0.0) or 0.0)
+            reasons = getattr(event, "reasons", [])
+            decision = str(getattr(event, "decision", "") or "").upper()
+            if decision == "DENY":
+                blocked_count += 1
+            if isinstance(reasons, list):
+                joined = " ".join(str(item) for item in reasons).lower()
+                if "loop" in joined:
+                    loop_count += 1
+        audit = _audit_engine()
+        stats_1h = audit.stats(AuditQuery(since_hours=1, limit=1_000_000))
+        return {
+            "cost_today": round(cost_today, 6),
+            "blocked_count": int(blocked_count),
+            "cache_hit_rate": float(cache_hit),
+            "error_rate": float(stats_1h.deny_rate),
+            "active_agents": int(stats_1h.unique_agents),
+            "loop_count": int(loop_count),
         }
 
     def _record_flow_decision(payload: dict[str, Any], response: dict[str, Any]) -> None:
@@ -1049,6 +1174,21 @@ def create_api_app(
             )
         return {"agents": agents, "default_tier": registry.default_tier.name.lower()}
 
+    @app.get("/api/v1/agents/graph")
+    def agents_graph(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return _build_agent_graph_model().get_graph()
+
+    @app.get("/api/v1/agents/graph/stats")
+    def agents_graph_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return _build_agent_graph_model().get_stats()
+
+    @app.get("/api/v1/agents/clusters")
+    def agents_clusters(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {"clusters": _build_agent_graph_model().get_clusters()}
+
     @app.get("/api/v1/agents/{agent_id}")
     def get_agent(
         agent_id: str, authorization: str | None = Header(default=None)
@@ -1334,6 +1474,54 @@ def create_api_app(
         safe_period = max(1, min(24 * 7, int(period)))
         return _build_cost_analytics_payload(safe_period)
 
+    @app.get("/api/v1/cost-forecast")
+    def cost_forecast(
+        hours: int = 24,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        cfg = (
+            app.state.current_version.policy.get("cost_forecast")
+            if isinstance(app.state.current_version.policy, dict)
+            and isinstance(app.state.current_version.policy.get("cost_forecast"), dict)
+            else {}
+        )
+        model = CostForecaster(cfg)
+        points = _build_hourly_cost_points(model.history_days)
+        model.fit(points)
+        return model.predict(hours_ahead=max(1, min(24 * 30, int(hours))))
+
+    @app.get("/api/v1/cost-forecast/monthly")
+    def cost_forecast_monthly(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        cfg = (
+            app.state.current_version.policy.get("cost_forecast")
+            if isinstance(app.state.current_version.policy, dict)
+            and isinstance(app.state.current_version.policy.get("cost_forecast"), dict)
+            else {}
+        )
+        model = CostForecaster(cfg)
+        points = _build_hourly_cost_points(model.history_days)
+        model.fit(points)
+        return model.predict_monthly()
+
+    @app.get("/api/v1/cost-forecast/breakeven")
+    def cost_forecast_breakeven(
+        budget: float,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        cfg = (
+            app.state.current_version.policy.get("cost_forecast")
+            if isinstance(app.state.current_version.policy, dict)
+            and isinstance(app.state.current_version.policy.get("cost_forecast"), dict)
+            else {}
+        )
+        model = CostForecaster(cfg)
+        points = _build_hourly_cost_points(model.history_days)
+        model.fit(points)
+        return model.get_breakeven(monthly_budget=float(budget))
+
     @app.get("/api/v1/budget/advice")
     def budget_advice(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
@@ -1518,6 +1706,47 @@ def create_api_app(
         if not deleted:
             raise HTTPException(status_code=404, detail={"error": "signature not found"})
         return {"deleted": True, "id": sig_id}
+
+    @app.get("/api/v1/alert-rules")
+    def alert_rules_list(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        rows = app.state.alert_rules_engine.list_rules()
+        return {"rules": rows, "count": len(rows)}
+
+    @app.post("/api/v1/alert-rules")
+    def alert_rules_add(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        try:
+            rule = app.state.alert_rules_engine.add_rule(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        return rule.to_dict()
+
+    @app.delete("/api/v1/alert-rules/{name}")
+    def alert_rules_remove(
+        name: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        ok = app.state.alert_rules_engine.remove_rule(name)
+        if not ok:
+            raise HTTPException(status_code=404, detail={"error": "rule not found"})
+        return {"deleted": True, "name": name}
+
+    @app.post("/api/v1/alert-rules/evaluate")
+    def alert_rules_evaluate(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        metrics_input = payload.get("metrics")
+        metric_values = metrics_input if isinstance(metrics_input, dict) else _default_alert_metrics()
+        fired = app.state.alert_rules_engine.evaluate(metric_values)
+        return {"fired": fired, "count": len(fired), "metrics": metric_values}
 
     @app.get("/api/v1/community/status")
     def community_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:

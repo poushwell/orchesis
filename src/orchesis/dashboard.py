@@ -1117,6 +1117,24 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     }
     .ow-radar-footer { display: flex; justify-content: flex-end; }
     .ow-teams-wrap { display: grid; gap: 12px; }
+    .ow-graph-wrap { display: grid; gap: 10px; }
+    .ow-graph-box {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: rgba(255,255,255,0.01);
+      padding: 10px;
+      min-height: 470px;
+    }
+    .ow-graph-svg { width: 100%; height: 460px; display: block; }
+    .ow-graph-detail {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 8px 10px;
+      color: var(--text-secondary);
+      font-size: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      background: rgba(255,255,255,0.02);
+    }
     .ow-team-cards {
       display: grid;
       grid-template-columns: repeat(3, minmax(220px, 1fr));
@@ -1685,6 +1703,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
             <button id="ow-view-cards" class="ow-view-btn active">Cards</button>
             <button id="ow-view-radar" class="ow-view-btn">Radar</button>
             <button id="ow-view-teams" class="ow-view-btn">Teams</button>
+            <button id="ow-view-graph" class="ow-view-btn">Graph</button>
           </div>
         </div>
         <div id="ow-cards-view">
@@ -1708,6 +1727,12 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
           <div id="ow-team-detail" class="ow-team-detail">
             <div class="subtle">Select a team card to view its agents.</div>
           </div>
+        </div>
+        <div id="ow-graph-view" class="ow-graph-wrap" style="display:none;">
+          <div class="ow-graph-box">
+            <svg id="ow-graph-svg" class="ow-graph-svg" viewBox="0 0 620 460"></svg>
+          </div>
+          <div id="ow-graph-detail" class="ow-graph-detail">Click a node to inspect agent interactions.</div>
         </div>
         <div id="ow-approvals-section" class="ow-ap-section" style="display:none;">
           <div class="section-title"><strong>Pending Approvals</strong></div>
@@ -1950,16 +1975,30 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
           { approval_id: "ow-demo-1", agent_id: "ops-bot", description: "system.run deployment command", risk: "high", reason: "destructive file operation suspected", timestamp: Date.now() / 1000 },
           { approval_id: "ow-demo-2", agent_id: "invoice-guard", description: "web_fetch internal.corp.com", risk: "medium", reason: "blocked domain requires approval", timestamp: Date.now() / 1000 },
         ],
+        graph: {
+          nodes: [
+            { id: "planner-core", requests: 520, cost: 4.2 },
+            { id: "ops-bot", requests: 860, cost: 9.7 },
+            { id: "invoice-guard", requests: 740, cost: 8.62 },
+          ],
+          edges: [
+            { from: "planner-core", to: "ops-bot", weight: 8, type: "context_share" },
+            { from: "ops-bot", to: "invoice-guard", weight: 4, type: "tool_call" },
+          ],
+          central_agent: "ops-bot",
+          isolated_agents: [],
+        },
       };
     }
     function normalizeOverwatch(payload){
-      if (!payload || typeof payload !== "object") return { summary: null, agents: [], approvals: [], teams: [] };
+      if (!payload || typeof payload !== "object") return { summary: null, agents: [], approvals: [], teams: [], graph: { nodes: [], edges: [], central_agent: "", isolated_agents: [] } };
       const summaryRaw = (payload.summary && typeof payload.summary === "object")
         ? payload.summary
         : ((payload.overwatch_summary && typeof payload.overwatch_summary === "object") ? payload.overwatch_summary : payload);
       const agents = Array.isArray(payload.agents) ? payload.agents : (Array.isArray(payload.items) ? payload.items : []);
       const approvals = Array.isArray(payload.approvals) ? payload.approvals : (Array.isArray(payload.pending) ? payload.pending : []);
       const teams = Array.isArray(payload.teams) ? payload.teams : [];
+      const graph = (payload.graph && typeof payload.graph === "object") ? payload.graph : { nodes: [], edges: [], central_agent: "", isolated_agents: [] };
       return {
         summary: {
           active_agents: Number(summaryRaw.active_agents ?? summaryRaw.active ?? agents.filter((a)=> String(a.status || "").toLowerCase() === "working").length ?? 0),
@@ -1970,6 +2009,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         agents,
         approvals,
         teams,
+        graph,
       };
     }
     function animateValue(el, start, end, duration, formatter) {
@@ -3533,6 +3573,114 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       });
     }
 
+    function renderOverwatchGraph(model){
+      const svg = document.getElementById("ow-graph-svg");
+      const detailEl = document.getElementById("ow-graph-detail");
+      if(!svg){ return; }
+      const graph = (model && model.graph && typeof model.graph === "object") ? model.graph : {};
+      const nodesIn = Array.isArray(graph.nodes) ? graph.nodes : [];
+      const edges = Array.isArray(graph.edges) ? graph.edges : [];
+      if(nodesIn.length === 0){
+        svg.innerHTML = "";
+        if(detailEl){
+          detailEl.textContent = "No collaboration data yet.";
+        }
+        return;
+      }
+      const w = 620;
+      const h = 460;
+      const nodes = nodesIn.map((node, idx)=>{
+        const angle = (idx / Math.max(1, nodesIn.length)) * (Math.PI * 2);
+        return {
+          id: String(node.id || `agent-${idx}`),
+          requests: Number(node.requests || 0),
+          cost: Number(node.cost || 0),
+          x: w / 2 + Math.cos(angle) * 150,
+          y: h / 2 + Math.sin(angle) * 130,
+          vx: 0,
+          vy: 0,
+        };
+      });
+      const byId = {};
+      nodes.forEach((node)=>{ byId[node.id] = node; });
+      for(let iter = 0; iter < 120; iter += 1){
+        for(let i = 0; i < nodes.length; i += 1){
+          for(let j = i + 1; j < nodes.length; j += 1){
+            const a = nodes[i];
+            const b = nodes[j];
+            let dx = b.x - a.x;
+            let dy = b.y - a.y;
+            const dist = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+            const force = 2500 / (dist * dist);
+            dx /= dist;
+            dy /= dist;
+            a.vx -= dx * force * 0.01;
+            a.vy -= dy * force * 0.01;
+            b.vx += dx * force * 0.01;
+            b.vy += dy * force * 0.01;
+          }
+        }
+        edges.forEach((edge)=>{
+          const a = byId[String(edge.from || "")];
+          const b = byId[String(edge.to || "")];
+          if(!a || !b){ return; }
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const dist = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+          const rest = 90 + Math.min(120, Number(edge.weight || 1) * 4);
+          const stretch = dist - rest;
+          const k = 0.004;
+          const fx = (dx / dist) * stretch * k;
+          const fy = (dy / dist) * stretch * k;
+          a.vx += fx;
+          a.vy += fy;
+          b.vx -= fx;
+          b.vy -= fy;
+        });
+        nodes.forEach((node)=>{
+          node.x = Math.max(24, Math.min(w - 24, node.x + node.vx));
+          node.y = Math.max(24, Math.min(h - 24, node.y + node.vy));
+          node.vx *= 0.85;
+          node.vy *= 0.85;
+        });
+      }
+      const maxReq = Math.max(1, ...nodes.map((node)=> node.requests));
+      let html = "";
+      edges.forEach((edge, idx)=>{
+        const a = byId[String(edge.from || "")];
+        const b = byId[String(edge.to || "")];
+        if(!a || !b){ return; }
+        const width = Math.max(1, Math.min(8, Number(edge.weight || 1)));
+        html += `<line x1="${a.x.toFixed(2)}" y1="${a.y.toFixed(2)}" x2="${b.x.toFixed(2)}" y2="${b.y.toFixed(2)}" stroke="rgba(168,85,247,0.55)" stroke-width="${width.toFixed(1)}" />`;
+        if(idx < 24){
+          const mx = ((a.x + b.x) / 2).toFixed(2);
+          const my = ((a.y + b.y) / 2).toFixed(2);
+          html += `<text x="${mx}" y="${my}" fill="var(--text-secondary)" font-size="10" text-anchor="middle">${String(edge.type || "link")}</text>`;
+        }
+      });
+      nodes.forEach((node, idx)=>{
+        const r = 6 + (node.requests / maxReq) * 10;
+        const isCentral = String(graph.central_agent || "") === node.id;
+        const fill = isCentral ? "#22c55e" : "#a855f7";
+        html += `<circle id="ow-graph-node-${idx}" cx="${node.x.toFixed(2)}" cy="${node.y.toFixed(2)}" r="${r.toFixed(2)}" fill="${fill}" fill-opacity="0.95" stroke="rgba(255,255,255,0.35)" stroke-width="1.2"/>`;
+        html += `<text x="${node.x.toFixed(2)}" y="${(node.y + r + 11).toFixed(2)}" fill="var(--text-secondary)" font-size="11" text-anchor="middle">${node.id}</text>`;
+      });
+      svg.innerHTML = html;
+      nodes.forEach((node, idx)=>{
+        const el = document.getElementById(`ow-graph-node-${idx}`);
+        if(!el){ return; }
+        el.addEventListener("click", ()=>{
+          if(!detailEl){ return; }
+          const outEdges = edges.filter((edge)=> String(edge.from || "") === node.id || String(edge.to || "") === node.id);
+          detailEl.textContent = `${node.id} · requests:${fmtNum(node.requests)} · cost:${fmtMoney(node.cost)} · links:${fmtNum(outEdges.length)}`;
+        });
+      });
+      if(detailEl){
+        const isolated = Array.isArray(graph.isolated_agents) ? graph.isolated_agents : [];
+        detailEl.textContent = `Central agent: ${String(graph.central_agent || "n/a")} · isolated: ${isolated.length ? isolated.join(", ") : "none"}`;
+      }
+    }
+
     function renderOverwatchApprovals(model){
       const section = document.getElementById("ow-approvals-section");
       const listEl = document.getElementById("ow-approvals-list");
@@ -3575,16 +3723,19 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       renderOverwatchCards(model);
       renderOverwatchRadar(model);
       renderOverwatchTeams(model);
+      renderOverwatchGraph(model);
       renderOverwatchApprovals(model);
     }
 
     async function pollOverwatch(){
-      const [snapshot, teams] = await Promise.all([
+      const [snapshot, teams, graph] = await Promise.all([
         fetchData("/api/v1/overwatch"),
         fetchData("/api/v1/overwatch/teams"),
+        fetchData("/api/v1/agents/graph"),
       ]);
       const payload = Object.assign({}, snapshot || {});
       payload.teams = (teams && Array.isArray(teams.teams)) ? teams.teams : [];
+      payload.graph = (graph && typeof graph === "object") ? graph : { nodes: [], edges: [], central_agent: "", isolated_agents: [] };
       renderOverwatch(payload);
     }
 
@@ -3819,27 +3970,33 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       const owCards = document.getElementById("ow-view-cards");
       const owRadar = document.getElementById("ow-view-radar");
       const owTeams = document.getElementById("ow-view-teams");
+      const owGraph = document.getElementById("ow-view-graph");
       const cardsView = document.getElementById("ow-cards-view");
       const radarView = document.getElementById("ow-radar-view");
       const teamsView = document.getElementById("ow-teams-view");
-      if (owCards && owRadar && owTeams && cardsView && radarView && teamsView) {
+      const graphView = document.getElementById("ow-graph-view");
+      if (owCards && owRadar && owTeams && owGraph && cardsView && radarView && teamsView && graphView) {
         owCards.addEventListener("click", ()=>{
           overwatchView = "cards";
           owCards.classList.add("active");
           owRadar.classList.remove("active");
           owTeams.classList.remove("active");
+          owGraph.classList.remove("active");
           cardsView.style.display = "";
           radarView.style.display = "none";
           teamsView.style.display = "none";
+          graphView.style.display = "none";
         });
         owRadar.addEventListener("click", ()=>{
           overwatchView = "radar";
           owRadar.classList.add("active");
           owCards.classList.remove("active");
           owTeams.classList.remove("active");
+          owGraph.classList.remove("active");
           radarView.style.display = "";
           cardsView.style.display = "none";
           teamsView.style.display = "none";
+          graphView.style.display = "none";
           if (overwatchSnapshot) renderOverwatchRadar(overwatchSnapshot);
         });
         owTeams.addEventListener("click", ()=>{
@@ -3847,10 +4004,24 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
           owTeams.classList.add("active");
           owCards.classList.remove("active");
           owRadar.classList.remove("active");
+          owGraph.classList.remove("active");
           teamsView.style.display = "";
           cardsView.style.display = "none";
           radarView.style.display = "none";
+          graphView.style.display = "none";
           if (overwatchSnapshot) renderOverwatchTeams(overwatchSnapshot);
+        });
+        owGraph.addEventListener("click", ()=>{
+          overwatchView = "graph";
+          owGraph.classList.add("active");
+          owCards.classList.remove("active");
+          owRadar.classList.remove("active");
+          owTeams.classList.remove("active");
+          graphView.style.display = "";
+          cardsView.style.display = "none";
+          radarView.style.display = "none";
+          teamsView.style.display = "none";
+          if (overwatchSnapshot) renderOverwatchGraph(overwatchSnapshot);
         });
       }
       const owLoadDemo = document.getElementById("ow-load-demo");

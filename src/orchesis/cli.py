@@ -29,7 +29,13 @@ from orchesis.audit_export import AuditTrailExporter
 from orchesis.compliance import ComplianceEngine, FRAMEWORK_CHECKS, FrameworkCrossReference
 from orchesis.compliance_report import ComplianceReportGenerator
 from orchesis.ari import AgentReadinessIndex
-from orchesis.benchmark import BenchmarkSuite
+from orchesis.benchmark import (
+    ORCHESIS_BENCHMARK_V1,
+    BenchmarkCase,
+    BenchmarkReport,
+    BenchmarkResult,
+    BenchmarkSuite,
+)
 from orchesis.contrib.ioc_database import IoCMatcher
 from orchesis.contrib.network_scanner import NetworkExposureScanner
 from orchesis.contrib.remote_scanner import RemoteSkillScanner
@@ -3505,57 +3511,176 @@ def experiment_command(
 
 
 @main.command("benchmark")
-@click.option("--category", default=None)
-@click.option("--export", "export_path", default=None, type=click.Path())
-def benchmark_command(category: str | None, export_path: str | None) -> None:
-    """Run Orchesis benchmark suite."""
+@click.option("--run-all", "run_all", is_flag=True, default=False, help="Run all benchmark cases")
+@click.option("--case", "case_name", default=None, help="Run a single case by id or subcategory")
+@click.option(
+    "--compare",
+    "compare_files",
+    nargs=2,
+    type=click.Path(exists=True),
+    default=None,
+    help="Compare two exported benchmark JSON files",
+)
+@click.option("--list-cases", "list_cases", is_flag=True, default=False, help="List all benchmark cases")
+@click.option("--export", "export_path", default=None, type=click.Path(), help="Export results to JSON/CSV")
+def benchmark_command(
+    run_all: bool,
+    case_name: str | None,
+    compare_files: tuple[str, str] | None,
+    list_cases: bool,
+    export_path: str | None,
+) -> None:
+    """Run and compare Orchesis benchmark suites."""
 
-    def _bar(rate: float, width: int = 10) -> str:
+    def _bar(rate: float, width: int = 20) -> str:
         filled = int(round(max(0.0, min(1.0, rate)) * width))
         return ("█" * filled) + ("░" * (width - filled))
 
+    def _load_report(path: str) -> BenchmarkReport:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        rows = payload.get("results", []) if isinstance(payload, dict) else []
+        results = [
+            BenchmarkResult(
+                case_id=str(item.get("case_id", "")),
+                category=str(item.get("category", "")),
+                expected_action=str(item.get("expected_action", "")),
+                actual_action=str(item.get("actual_action", "")),
+                passed=bool(item.get("passed", False)),
+                latency_ms=float(item.get("latency_ms", 0.0)),
+                details=str(item.get("details", "")),
+            )
+            for item in rows
+            if isinstance(item, dict)
+        ]
+        return BenchmarkReport(
+            suite_name=str(payload.get("suite_name", "ORCHESIS_BENCHMARK_V1")),
+            total=int(payload.get("total", len(results))),
+            passed=int(payload.get("passed", sum(1 for item in results if item.passed))),
+            failed=int(payload.get("failed", max(0, len(results) - sum(1 for item in results if item.passed)))),
+            pass_rate=float(payload.get("pass_rate", (sum(1 for item in results if item.passed) / len(results)) if results else 0.0)),
+            by_category=payload.get("by_category", {}) if isinstance(payload.get("by_category"), dict) else {},
+            by_severity=payload.get("by_severity", {}) if isinstance(payload.get("by_severity"), dict) else {},
+            avg_latency_ms=float(payload.get("avg_latency_ms", 0.0)),
+            results=results,
+            generated_at=float(payload.get("generated_at", time.time())),
+            orchesis_version=str(payload.get("orchesis_version", __version__)),
+        )
+
+    def _run_cases_with_progress(suite: BenchmarkSuite, selected: list[BenchmarkCase]) -> BenchmarkReport:
+        total = len(selected)
+        click.echo(f"Running benchmark suite [{total} cases]")
+        results: list[BenchmarkResult] = []
+        evaluator = suite._default_evaluator  # noqa: SLF001
+        for idx, case in enumerate(selected, start=1):
+            started = time.perf_counter()
+            actual_action = str(evaluator(case.request, suite._policy)).lower()  # noqa: SLF001
+            latency_ms = max(0.001, (time.perf_counter() - started) * 1000.0)
+            passed = actual_action == case.expected_action
+            details = (
+                f"Matched expected action '{case.expected_action}'"
+                if passed
+                else f"Expected {case.expected_action}, got {actual_action}"
+            )
+            results.append(
+                BenchmarkResult(
+                    case_id=case.id,
+                    category=case.category,
+                    expected_action=case.expected_action,
+                    actual_action=actual_action,
+                    passed=passed,
+                    latency_ms=round(latency_ms, 3),
+                    details=details,
+                )
+            )
+            rate = idx / float(max(1, total))
+            label = case.subcategory or case.id
+            click.echo(f"  [{_bar(rate)}] {int(rate * 100):>3}% ({idx}/{total}) {label}")
+
+        passed_count = sum(1 for item in results if item.passed)
+        failed_count = len(results) - passed_count
+        pass_rate = (passed_count / float(len(results))) if results else 0.0
+        avg_latency = (sum(item.latency_ms for item in results) / float(len(results))) if results else 0.0
+        case_by_id = {case.id: case for case in selected}
+        by_category = suite._aggregate(results, lambda result: result.category)  # noqa: SLF001
+        by_severity = suite._aggregate(  # noqa: SLF001
+            results,
+            lambda result: case_by_id.get(result.case_id, BenchmarkCase("", "", "", "", {}, "allow", "low", [], "")).severity,
+        )
+        return BenchmarkReport(
+            suite_name="ORCHESIS_BENCHMARK_V1",
+            total=len(results),
+            passed=passed_count,
+            failed=failed_count,
+            pass_rate=round(pass_rate, 4),
+            by_category=by_category,
+            by_severity=by_severity,
+            avg_latency_ms=round(avg_latency, 3),
+            results=results,
+            generated_at=time.time(),
+            orchesis_version=__version__,
+        )
+
     suite = BenchmarkSuite()
-    if category:
-        report = suite.run_category(category)
+
+    if list_cases:
+        click.echo("Available benchmark cases:")
+        click.echo("ID       Category     Subcategory              Description")
+        click.echo("-------  -----------  -----------------------  ------------------------------")
+        for case in ORCHESIS_BENCHMARK_V1:
+            click.echo(f"{case.id:<7}  {case.category:<11}  {case.subcategory:<23}  {case.description}")
+        return
+
+    if compare_files:
+        file_a, file_b = compare_files
+        report_a = _load_report(file_a)
+        report_b = _load_report(file_b)
+        by_a = {item.case_id: item for item in report_a.results}
+        by_b = {item.case_id: item for item in report_b.results}
+        common = sorted(set(by_a.keys()) & set(by_b.keys()))
+        better: list[str] = []
+        worse: list[str] = []
+        same_count = 0
+        for case_id in common:
+            a_res = by_a[case_id]
+            b_res = by_b[case_id]
+            if (not a_res.passed) and b_res.passed:
+                better.append(f"{case_id} (FAIL → PASS)")
+            elif a_res.passed and (not b_res.passed):
+                worse.append(f"{case_id} (PASS → FAIL)")
+            else:
+                same_count += 1
+        click.echo("Comparing results:")
+        if better:
+            click.echo(f"  ✓ Better:  {', '.join(better)}")
+        if worse:
+            click.echo(f"  ✗ Worse:   {', '.join(worse)}")
+        click.echo(f"  = Same:    {same_count} cases")
+        return
+
+    selected_cases: list[BenchmarkCase]
+    if case_name:
+        key = str(case_name).strip().lower()
+        selected_cases = [
+            case
+            for case in ORCHESIS_BENCHMARK_V1
+            if case.id.lower() == key or case.subcategory.lower() == key
+        ]
+        if not selected_cases:
+            raise click.ClickException(f"Case not found: {case_name}")
+    elif run_all or (not case_name and not compare_files and not list_cases):
+        selected_cases = list(ORCHESIS_BENCHMARK_V1)
     else:
-        report = suite.run()
+        selected_cases = list(ORCHESIS_BENCHMARK_V1)
 
-    click.echo("Orchesis Benchmark Suite v1")
-    click.echo("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    click.echo(f"Running {report.total} cases...")
-    click.echo("")
-
-    for cat in ("security", "cost", "reliability", "compliance"):
-        row = report.by_category.get(cat)
-        if row is None:
-            continue
-        total = int(row.get("total", 0))
-        passed = int(row.get("passed", 0))
-        rate = float(row.get("rate", 0.0))
-        click.echo(f"{cat.capitalize():<12} {passed:>2}/{total:<2} {rate*100:>5.1f}%  {_bar(rate)}")
-
+    report = _run_cases_with_progress(suite, selected_cases)
     click.echo("")
     click.echo(f"Overall: {report.passed}/{report.total}  {report.pass_rate*100:.1f}%")
-    click.echo("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-    failures = [result for result in report.results if not result.passed]
-    if failures:
-        click.echo(f"{len(failures)} failures:")
-        severity_by_case = {
-            case.id: case.severity
-            for case in (suite._cases if category is None else [item for item in suite._cases if item.category == category])
-        }
-        for result in failures:
-            severity = severity_by_case.get(result.case_id, "unknown")
-            click.echo(
-                f"  ✗ {result.case_id} ({severity}): expected {result.expected_action}, got {result.actual_action}"
-            )
 
     if export_path:
         suffix = Path(export_path).suffix.lower()
         fmt = "csv" if suffix == ".csv" else "json"
         BenchmarkSuite.export_report(report, export_path, fmt=fmt)
-        click.echo(f"\nExported report to {export_path}")
+        click.echo(f"Exported report to {export_path}")
 
 
 @main.command("publish")

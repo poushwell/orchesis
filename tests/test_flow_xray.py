@@ -872,3 +872,103 @@ async def test_flow_share_link_format(tmp_path: Path) -> None:
     token = share_url.rsplit("/", 1)[-1]
     assert len(token) == 8
     assert all(ch in "0123456789abcdef" for ch in token)
+
+
+@pytest.mark.asyncio
+async def test_timeline_endpoint_returns_phases(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(_api_policy_yaml(), encoding="utf-8")
+    app = create_api_app(
+        policy_path=str(policy_path),
+        state_persist=str(tmp_path / "state.jsonl"),
+        decisions_log=str(tmp_path / "decisions.jsonl"),
+        history_path=str(tmp_path / "policy_versions.jsonl"),
+    )
+    async with await _api_client(app) as client:
+        await client.post(
+            "/api/v1/evaluate",
+            headers=_api_auth(),
+            json={"session_id": "flow-t1", "tool_name": "read_file", "params": {"path": "/tmp/a"}, "cost": 0.01},
+        )
+        resp = await client.get(
+            "/api/v1/flow/timeline",
+            params={"session_id": "flow-t1", "limit": 5},
+            headers=_api_auth(),
+        )
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert isinstance(payload.get("phase_order"), list)
+    assert len(payload["phase_order"]) > 0
+    assert isinstance(payload.get("requests"), list)
+
+
+@pytest.mark.asyncio
+async def test_timeline_phase_count_correct(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(_api_policy_yaml(), encoding="utf-8")
+    app = create_api_app(
+        policy_path=str(policy_path),
+        state_persist=str(tmp_path / "state.jsonl"),
+        decisions_log=str(tmp_path / "decisions.jsonl"),
+        history_path=str(tmp_path / "policy_versions.jsonl"),
+    )
+    async with await _api_client(app) as client:
+        await client.post(
+            "/api/v1/evaluate",
+            headers=_api_auth(),
+            json={"session_id": "flow-t2", "tool_name": "read_file", "params": {"path": "/tmp/a"}, "cost": 0.01},
+        )
+        resp = await client.get(
+            "/api/v1/flow/timeline",
+            params={"session_id": "flow-t2"},
+            headers=_api_auth(),
+        )
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload.get("phase_count") == 17
+    requests = payload.get("requests", [])
+    if requests:
+        assert len(requests[0].get("phases", [])) == 17
+
+
+@pytest.mark.asyncio
+async def test_timeline_decision_colors(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(_api_policy_yaml(), encoding="utf-8")
+    app = create_api_app(
+        policy_path=str(policy_path),
+        state_persist=str(tmp_path / "state.jsonl"),
+        decisions_log=str(tmp_path / "decisions.jsonl"),
+        history_path=str(tmp_path / "policy_versions.jsonl"),
+    )
+    async with await _api_client(app) as client:
+        # allowed
+        await client.post(
+            "/api/v1/evaluate",
+            headers=_api_auth(),
+            json={"session_id": "flow-t3", "tool_name": "read_file", "params": {"path": "/tmp/a"}, "cost": 0.01},
+        )
+        # blocked by budget limit
+        await client.post(
+            "/api/v1/evaluate",
+            headers=_api_auth(),
+            json={"session_id": "flow-t3", "tool_name": "read_file", "params": {"path": "/tmp/a"}, "cost": 0.2},
+        )
+        resp = await client.get(
+            "/api/v1/flow/timeline",
+            params={"session_id": "flow-t3", "limit": 10},
+            headers=_api_auth(),
+        )
+    assert resp.status_code == 200
+    payload = resp.json()
+    colors = payload.get("decision_colors", {})
+    assert colors.get("pass") == "#00FF41"
+    assert colors.get("warn") == "#fbbf24"
+    assert colors.get("block") == "#ef4444"
+    phase_colors = [
+        str(phase.get("color"))
+        for request in payload.get("requests", [])
+        for phase in request.get("phases", [])
+    ]
+    assert "#00FF41" in phase_colors
+    assert "#ef4444" in phase_colors
