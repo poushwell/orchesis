@@ -95,6 +95,7 @@ from orchesis.connection_pool import ConnectionPool, PoolConfig, PooledConnectio
 from orchesis.experiment import ExperimentConfig, ExperimentManager
 from orchesis.context_engine import ContextConfig, ContextEngine
 from orchesis.context_budget import ContextBudget
+from orchesis.context_compression_v2 import ContextCompressionV2
 from orchesis.threat_intel import ThreatIntelConfig, ThreatMatcher
 from orchesis.semantic_cache import SemanticCache, SemanticCacheConfig
 from orchesis.spend_rate import SpendRateDetector, SpendWindow
@@ -2106,6 +2107,10 @@ class LLMHTTPProxy:
         self._context_budget: ContextBudget | None = None
         if isinstance(context_budget_cfg, dict) and bool(context_budget_cfg.get("enabled", False)):
             self._context_budget = ContextBudget(context_budget_cfg)
+        compression_v2_cfg = self._policy.get("context_compression_v2")
+        self._compression_v2: ContextCompressionV2 | None = None
+        if isinstance(compression_v2_cfg, dict) and bool(compression_v2_cfg.get("enabled", False)):
+            self._compression_v2 = ContextCompressionV2(compression_v2_cfg)
         mast_cfg = self._policy.get("mast")
         self._mast: MASTDetectors | None = None
         if isinstance(mast_cfg, dict) and bool(mast_cfg.get("enabled", False)):
@@ -4286,6 +4291,15 @@ class LLMHTTPProxy:
                     ctx.body["messages"] = validate_tool_chain(degraded)
                     ctx.session_headers["X-Orchesis-Context-Level"] = level
                     ctx.proc_result["context_budget_level"] = level
+                    if self._compression_v2 is not None and level in ("L1", "L2"):
+                        compressed = self._compression_v2.compress(
+                            messages=ctx.body.get("messages", []),
+                            budget_tokens=max_window,
+                        )
+                        compressed_messages = compressed.get("compressed_messages")
+                        if isinstance(compressed_messages, list):
+                            ctx.body["messages"] = validate_tool_chain(compressed_messages)
+                        ctx.proc_result["compression_v2"] = compressed
                     _HTTP_PROXY_LOGGER.info(
                         "context budget degradation applied level=%s model=%s used_tokens=%s max_tokens=%s session_id=%s",
                         level,

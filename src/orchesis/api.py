@@ -26,6 +26,7 @@ from orchesis.ari import AgentReadinessIndex
 from orchesis.agent_health import AgentHealthScore
 from orchesis.audit import AuditEngine, AuditQuery
 from orchesis.compliance_report import ComplianceReportGenerator
+from orchesis.compliance_checker import RealTimeComplianceChecker
 from orchesis.benchmark import BenchmarkSuite, ORCHESIS_BENCHMARK_V1
 from orchesis.agent_store import AgentPolicyStore, build_agent_overwatch_snapshot
 from orchesis.config import load_policy, validate_policy, validate_policy_warnings
@@ -57,6 +58,7 @@ from orchesis.pipeline import check_budget
 from orchesis.evidence_record import EvidenceRecord
 from orchesis.cost_analytics import CostAnalytics
 from orchesis.cost_forecast import CostForecaster
+from orchesis.cost_attribution import CostAttributionEngine
 from orchesis.session_heatmap import SessionHeatmap
 from orchesis.budget_advisor import BudgetAdvisor
 from orchesis.session_replay import SessionReplay
@@ -64,6 +66,8 @@ from orchesis.session_groups import SessionGroupManager
 from orchesis.community_intel import CommunityIntel
 from orchesis.request_inspector import RequestInspector
 from orchesis.pipeline_debugger import PipelineDebugger
+from orchesis.tool_call_analyzer import ToolCallAnalyzer
+from orchesis.memory_tracker import MemoryTracker
 from orchesis.token_yield import TokenYieldTracker
 from orchesis.token_yield_report import TokenYieldReportGenerator
 from orchesis.threat_feed import ThreatFeed
@@ -71,11 +75,14 @@ from orchesis.threat_patterns import ThreatPatternLibrary
 from orchesis.signature_editor import SignatureEditor
 from orchesis.alert_rules import AlertRule, AlertRulesEngine
 from orchesis.agent_graph import AgentCollaborationGraph
+from orchesis.agent_lifecycle import AgentLifecycleManager
 from orchesis.geo_intel import GeoIntel
 from orchesis.tenants import TenantManager
 from orchesis.semantic_cache import SemanticCache
 from orchesis.cache_warmer import CacheWarmer
 from orchesis.api_rate_limiter import ApiRateLimiter
+from orchesis.intent_classifier import IntentClassifier
+from orchesis.response_analyzer import ResponseAnalyzer
 from orchesis import __version__
 
 
@@ -154,6 +161,13 @@ def create_api_app(
     app.state.session_groups = SessionGroupManager(
         str(policy_file.parent / ".orchesis" / "session_groups.json")
     )
+    app.state.compliance_checker = RealTimeComplianceChecker()
+    cost_attribution_cfg = (
+        current_version.policy.get("cost_attribution")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("cost_attribution"), dict)
+        else {}
+    )
+    app.state.cost_attribution = CostAttributionEngine(cost_attribution_cfg)
     feed_cfg = (
         current_version.policy.get("threat_feed")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("threat_feed"), dict)
@@ -190,6 +204,10 @@ def create_api_app(
     app.state.benchmark_results = {}
     app.state.dna_store = ContextDNAStore(str(policy_file.parent / ".orchesis" / "dna"))
     app.state.agent_scorecard = AgentScorecard()
+    app.state.tool_call_analyzer = ToolCallAnalyzer()
+    app.state.memory_tracker = MemoryTracker()
+    app.state.intent_classifier = IntentClassifier()
+    app.state.response_analyzer = ResponseAnalyzer()
     community_cfg = (
         current_version.policy.get("community")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("community"), dict)
@@ -198,6 +216,7 @@ def create_api_app(
     app.state.community_intel = CommunityIntel(community_cfg)
     app.state.notifications: list[dict[str, Any]] = []
     app.state.notifications_lock = threading.Lock()
+    app.state.agent_lifecycle = AgentLifecycleManager()
     app.state.api_limiter = ApiRateLimiter()
     anomaly_cfg = (
         current_version.policy.get("anomaly_alerts")
@@ -747,6 +766,11 @@ def create_api_app(
         report["benchmark_comparison"] = generator.get_benchmark_comparison(report)
         return report
 
+    def _build_cost_attribution_payload() -> dict[str, Any]:
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        return app.state.cost_attribution.attribute(events)
+
     def _build_budget_advice_payload() -> dict[str, Any]:
         source = Path(app.state.decisions_log)
         events = read_events_from_jsonl(source) if source.exists() else []
@@ -777,6 +801,41 @@ def create_api_app(
     def _build_pipeline_debugger(policy: dict[str, Any] | None = None) -> PipelineDebugger:
         effective_policy = policy if isinstance(policy, dict) else current_version.policy
         return PipelineDebugger(engine=evaluate, policy=effective_policy)
+
+    def _build_tool_session_payload(session_id: str) -> dict[str, Any]:
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        analyzer = app.state.tool_call_analyzer
+        return analyzer.get_session_tool_stats(session_id=session_id, decisions_log=events)
+
+    def _hydrate_memory_session(session_id: str) -> None:
+        tracker = app.state.memory_tracker
+        current = tracker.get_memory_stats(session_id)
+        if int(current.get("message_count", 0) or 0) > 0:
+            return
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        messages: list[dict[str, Any]] = []
+        for event in events:
+            snapshot = getattr(event, "state_snapshot", {})
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            sid = str(snapshot.get("session_id", "") or "")
+            if sid != str(session_id):
+                continue
+            embedded = snapshot.get("messages")
+            if isinstance(embedded, list):
+                for item in embedded:
+                    if isinstance(item, dict):
+                        messages.append(item)
+            prompt = snapshot.get("prompt", snapshot.get("input"))
+            if isinstance(prompt, str) and prompt.strip():
+                messages.append({"role": "user", "content": prompt})
+            tool_name = str(getattr(event, "tool", "") or "").strip()
+            if tool_name:
+                messages.append({"role": "assistant", "content": f"tool:{tool_name}"})
+        if messages:
+            tracker.record(str(session_id), messages)
 
     def _build_request_inspection(request_id: str) -> dict[str, Any]:
         source = Path(app.state.decisions_log)
@@ -1438,6 +1497,41 @@ def create_api_app(
             raise HTTPException(status_code=404, detail={"error": "group not found"})
         return {"ok": True, "group_id": group_id}
 
+    @app.post("/api/v1/compliance/check-policy")
+    def compliance_check_policy(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        candidate = payload.get("policy")
+        if not isinstance(candidate, dict):
+            candidate = app.state.current_version.policy
+        return app.state.compliance_checker.check_policy(candidate)
+
+    @app.post("/api/v1/compliance/check-request")
+    def compliance_check_request(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        request_payload = payload.get("request") if isinstance(payload.get("request"), dict) else payload
+        candidate = payload.get("policy")
+        if not isinstance(candidate, dict):
+            candidate = app.state.current_version.policy
+        return app.state.compliance_checker.check_request(request_payload, candidate)
+
+    @app.get("/api/v1/compliance/certificate")
+    def compliance_certificate(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        result = app.state.compliance_checker.check_policy(app.state.current_version.policy)
+        return {
+            "compliant": bool(result.get("compliant", False)),
+            "score": float(result.get("score", 0.0)),
+            "certificate": result.get("certificate"),
+        }
+
     @app.get("/api/v1/compliance/report/{agent_id}")
     def compliance_report_endpoint(
         agent_id: str,
@@ -1708,6 +1802,136 @@ def create_api_app(
         debugger = _build_pipeline_debugger()
         return debugger.compare_policies(request_payload, policy_a, policy_b)
 
+    @app.post("/api/v1/intent/classify")
+    def classify_intent_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        text = body.get("text", "")
+        if not isinstance(text, str):
+            text = str(text)
+        return app.state.intent_classifier.classify(text)
+
+    @app.post("/api/v1/intent/batch")
+    def classify_intent_batch_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        messages = body.get("messages", [])
+        if not isinstance(messages, list):
+            messages = []
+        classifications = app.state.intent_classifier.batch_classify(messages)
+        return {
+            "classifications": classifications,
+            "session_risk": app.state.intent_classifier.get_session_risk(classifications),
+        }
+
+    @app.get("/api/v1/intent/stats")
+    def intent_stats_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.intent_classifier.get_stats()
+
+    @app.post("/api/v1/response/analyze")
+    def response_analyze_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body.get("response") if isinstance(body.get("response"), dict) else body
+        return app.state.response_analyzer.analyze(payload if isinstance(payload, dict) else {})
+
+    @app.post("/api/v1/response/check-leakage")
+    def response_check_leakage_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body.get("response") if isinstance(body.get("response"), dict) else body
+        response_payload = payload if isinstance(payload, dict) else {}
+        return {"issues": app.state.response_analyzer.check_for_leakage(response_payload)}
+
+    @app.post("/api/v1/response/check-hallucination")
+    def response_check_hallucination_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body.get("response") if isinstance(body.get("response"), dict) else body
+        response_payload = payload if isinstance(payload, dict) else {}
+        return app.state.response_analyzer.check_for_hallucination_signals(response_payload)
+
+    @app.post("/api/v1/tools/analyze")
+    def analyze_tools_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        tool_calls = body.get("tool_calls") if isinstance(body.get("tool_calls"), list) else []
+        return app.state.tool_call_analyzer.analyze(tool_calls)
+
+    @app.get("/api/v1/tools/risk/{tool_name}")
+    def get_tool_risk_endpoint(
+        tool_name: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        level = app.state.tool_call_analyzer.get_tool_risk(tool_name)
+        return {"tool": tool_name, "risk_level": level}
+
+    @app.get("/api/v1/tools/session/{session_id}")
+    def get_session_tool_stats_endpoint(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return _build_tool_session_payload(session_id)
+
+    @app.get("/api/v1/memory/{session_id}/stats")
+    def get_memory_stats_endpoint(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        _hydrate_memory_session(session_id)
+        return app.state.memory_tracker.get_memory_stats(session_id)
+
+    @app.get("/api/v1/memory/{session_id}/pressure")
+    def get_memory_pressure_endpoint(
+        session_id: str,
+        model: str = "gpt-4o-mini",
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        _hydrate_memory_session(session_id)
+        payload = app.state.memory_tracker.get_context_pressure(session_id, model)
+        payload["session_id"] = session_id
+        payload["model"] = model
+        return payload
+
+    @app.post("/api/v1/memory/{session_id}/check-poisoning")
+    def check_memory_poisoning_endpoint(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        _hydrate_memory_session(session_id)
+        payload = app.state.memory_tracker.detect_poisoning(session_id)
+        payload["session_id"] = session_id
+        return payload
+
+    @app.delete("/api/v1/memory/{session_id}")
+    def clear_memory_session_endpoint(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        app.state.memory_tracker.clear_session(session_id)
+        return {"ok": True, "session_id": session_id}
+
     @app.get("/api/v1/ari/{agent_id}")
     def get_ari(
         agent_id: str,
@@ -1958,6 +2182,44 @@ def create_api_app(
         model.fit(points)
         return model.get_breakeven(monthly_budget=float(budget))
 
+    @app.get("/api/v1/cost-attribution")
+    def cost_attribution(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return _build_cost_attribution_payload()
+
+    @app.get("/api/v1/cost-attribution/chargebacks")
+    def cost_attribution_chargebacks(
+        period: str = "month",
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        _build_cost_attribution_payload()
+        return {"period": period, "chargebacks": app.state.cost_attribution.get_chargebacks(period=period)}
+
+    @app.get("/api/v1/cost-attribution/teams/{team}")
+    def cost_attribution_team(
+        team: str,
+        days_ahead: int = 30,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        _build_cost_attribution_payload()
+        return {
+            "team": team,
+            "budget_status": app.state.cost_attribution.get_budget_status(team),
+            "forecast": app.state.cost_attribution.forecast_by_team(team, days_ahead=max(1, int(days_ahead))),
+        }
+
+    @app.post("/api/v1/cost-attribution/rules")
+    def cost_attribution_add_rule(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        app.state.cost_attribution.add_rule(payload)
+        return {"ok": True, "rule": payload}
+
     @app.get("/api/v1/heatmap")
     def session_heatmap(
         days: int = 7,
@@ -2133,6 +2395,85 @@ def create_api_app(
         generator = TokenYieldReportGenerator()
         report = _build_token_yield_report(period)
         return {"period": period, "markdown": generator.export_markdown(report)}
+
+    @app.post("/api/v1/lifecycle/register")
+    def lifecycle_register(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        agent_id = str(payload.get("agent_id", "")).strip()
+        metadata = payload.get("metadata")
+        try:
+            return app.state.agent_lifecycle.register(agent_id, metadata if isinstance(metadata, dict) else None)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @app.get("/api/v1/lifecycle/{agent_id}")
+    def lifecycle_get_state(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        try:
+            return app.state.agent_lifecycle.get_state(agent_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail={"error": "agent not found"}) from exc
+
+    @app.post("/api/v1/lifecycle/{agent_id}/transition")
+    def lifecycle_transition(
+        agent_id: str,
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        new_state = str(payload.get("new_state", "")).strip()
+        reason = str(payload.get("reason", ""))
+        if not new_state:
+            raise HTTPException(status_code=400, detail={"error": "new_state is required"})
+        ok = app.state.agent_lifecycle.transition(agent_id, new_state, reason)
+        if not ok:
+            raise HTTPException(status_code=400, detail={"error": "transition not allowed"})
+        return app.state.agent_lifecycle.get_state(agent_id)
+
+    @app.get("/api/v1/lifecycle/state/{state}")
+    def lifecycle_list_by_state(
+        state: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        rows = app.state.agent_lifecycle.list_by_state(state)
+        return {"state": state, "agents": rows, "count": len(rows)}
+
+    @app.post("/api/v1/lifecycle/{agent_id}/retire")
+    def lifecycle_retire(
+        agent_id: str,
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        reason = str(payload.get("reason", "retire"))
+        ok = app.state.agent_lifecycle.retire(agent_id, reason)
+        if not ok:
+            raise HTTPException(status_code=400, detail={"error": "transition not allowed"})
+        return app.state.agent_lifecycle.get_state(agent_id)
+
+    @app.post("/api/v1/lifecycle/{agent_id}/ban")
+    def lifecycle_ban(
+        agent_id: str,
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        reason = str(payload.get("reason", "ban"))
+        ok = app.state.agent_lifecycle.ban(agent_id, reason)
+        if not ok:
+            raise HTTPException(status_code=400, detail={"error": "transition not allowed"})
+        return app.state.agent_lifecycle.get_state(agent_id)
 
     @app.get("/api/v1/changelog")
     def changelog_endpoint() -> dict[str, Any]:
