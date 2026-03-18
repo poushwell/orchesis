@@ -1,6 +1,6 @@
 """Orchesis — Runtime Gateway for AI Agents."""
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 from orchesis.engine import Decision, PolicyEngine
 from orchesis.scanner import McpConfigScanner, PolicyScanner, SkillScanner

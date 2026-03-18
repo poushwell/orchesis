@@ -90,31 +90,18 @@
 - CLI: `orchesis fuzz`, `orchesis scenarios`, `orchesis corpus`, `orchesis audit --stats/--anomalies/--export`
 - `THREAT_MODEL.md` v2 with formal guarantees table
 
-## [0.3.0] - 2026-02-28
+## [0.3.0] - 2026-03-18
 
 ### Added
-- Agent Identity Model with trust tiers (BLOCKED->PRINCIPAL)
-- Capability-based tool access enforcement
-- AgentRegistry loaded from policy YAML
-- Per-agent overrides (cost, budget, rate limit)
-- Policy versioning with rollback support
-- Persistent policy history across runs
-- Session-scoped state isolation
-- CLI: `orchesis agents`, `policy-history`, `rollback`
-- Structured telemetry with `DecisionEvent`
-- Deterministic replay engine with forensic CLI
-- Policy hot-reload without restart
-- Buffered persistence for high-throughput
+- Major A-T feature expansion with 60+ modules and 100+ API endpoints across security, compliance, cost, reliability, and operations.
+- New governance surfaces including real-time compliance checks, session groups, incident management, and searchable knowledge base APIs.
+- Cost intelligence stack updates: forecasting, token yield reporting, and team-level cost attribution with chargeback views.
+- Extended Overwatch and forensic workflows with richer incident timelines, replay, reporting, and changelog integration.
+- Additional dashboard and API capabilities for production visibility and policy control.
 
-### Changed
-- Evaluation order: `identity_check` runs before all policy rules
-- State keys now include `session_id` for finer isolation
-- Engine uses dispatch table instead of monolithic `if/elif` rule chain
-
-### Security
-- 14 adversarial vulnerabilities fixed (see `docs/THREAT_MODEL.md`)
-- Path traversal, SQL bypass, and cost manipulation hardened
-- Fail-closed guarantees formalized
+### Quality
+- Test suite expanded to 3505 passing tests (4 skipped in full run).
+- Packaging and release metadata prepared for PyPI `0.3.0`.
 
 ## [0.2.0] - 2026-02-28
 

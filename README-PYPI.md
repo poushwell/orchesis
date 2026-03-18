@@ -1,7 +1,7 @@
 ![Orchesis](https://raw.githubusercontent.com/poushwell/orchesis/main/docs/banner-light.png)
 
 [![PyPI](https://img.shields.io/pypi/v/orchesis?color=7c3aed&label=PyPI)](https://pypi.org/project/orchesis/)
-[![Tests](https://img.shields.io/badge/tests-2969%20passing-22c55e)](https://github.com/poushwell/orchesis)
+[![Tests](https://img.shields.io/badge/tests-3517%20passing-22c55e)](https://github.com/poushwell/orchesis)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 [![Stars](https://img.shields.io/github/stars/poushwell/orchesis?style=flat&color=7c3aed)](https://github.com/poushwell/orchesis)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-green)
@@ -59,13 +59,15 @@ duplicate context across providers.
 | Metric | Value |
 |--------|-------|
 | Pipeline phases | 17 |
-| Threat signatures | 25 across 10 categories |
+| Threat signatures | 25+ |
 | Proxy overhead | 0.8% measured |
 | Context collapse | 12x growth caught |
 | MAST coverage | 78.6% |
 | OWASP coverage | 80% |
-| Tests passing | 2,969 |
+| Tests passing | 3517 |
 | Dependencies | 0 (stdlib only) |
+| Modules | 60+ |
+| API endpoints | 100+ |
 
 ## Free MCP Security Scanner
 
