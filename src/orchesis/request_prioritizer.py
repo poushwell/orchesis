@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
 
 class RequestPrioritizer:
     """Assigns priority to requests for queue management."""
+
+    MAX_ENTRIES = 10_000
 
     PRIORITY_LEVELS = {
         "critical": 0,  # system prompts, safety checks
@@ -25,6 +28,7 @@ class RequestPrioritizer:
         self._rate_limits: dict[str, float] = {}
         self._last_emit_ts: dict[str, float] = {}
         self._served_timestamps: list[float] = []
+        self._lock = threading.Lock()
 
     @staticmethod
     def _extract_text(payload: dict[str, Any]) -> str:
@@ -64,68 +68,79 @@ class RequestPrioritizer:
         chosen = str(priority or self.assign_priority(request)).strip().lower()
         if chosen not in self.PRIORITY_LEVELS:
             chosen = self.default_priority
-        rps = float(self._rate_limits.get(chosen, 0.0) or 0.0)
-        now = time.time()
-        if rps > 0.0:
-            min_interval = 1.0 / rps
-            last = float(self._last_emit_ts.get(chosen, 0.0) or 0.0)
-            if last > 0.0 and (now - last) < min_interval:
-                return -1
-            self._last_emit_ts[chosen] = now
-        row = {
-            "request": dict(request) if isinstance(request, dict) else {},
-            "priority": chosen,
-            "queued_at": now,
-        }
-        self._queue.append(row)
-        # Order by priority rank then queue time.
-        self._queue.sort(
-            key=lambda item: (
-                int(self.PRIORITY_LEVELS.get(str(item.get("priority", self.default_priority)), 99)),
-                float(item.get("queued_at", 0.0) or 0.0),
+        with self._lock:
+            rps = float(self._rate_limits.get(chosen, 0.0) or 0.0)
+            now = time.time()
+            if rps > 0.0:
+                min_interval = 1.0 / rps
+                last = float(self._last_emit_ts.get(chosen, 0.0) or 0.0)
+                if last > 0.0 and (now - last) < min_interval:
+                    return -1
+                self._last_emit_ts[chosen] = now
+            row = {
+                "request": dict(request) if isinstance(request, dict) else {},
+                "priority": chosen,
+                "queued_at": now,
+            }
+            self._queue.append(row)
+            if len(self._queue) > self.MAX_ENTRIES:
+                # Evict oldest queued entries to keep memory bounded.
+                overflow = len(self._queue) - self.MAX_ENTRIES
+                if overflow > 0:
+                    del self._queue[:overflow]
+            # Order by priority rank then queue time.
+            self._queue.sort(
+                key=lambda item: (
+                    int(self.PRIORITY_LEVELS.get(str(item.get("priority", self.default_priority)), 99)),
+                    float(item.get("queued_at", 0.0) or 0.0),
+                )
             )
-        )
-        for idx, item in enumerate(self._queue):
-            if item is row:
-                return idx
-        return max(0, len(self._queue) - 1)
+            for idx, item in enumerate(self._queue):
+                if item is row:
+                    return idx
+            return max(0, len(self._queue) - 1)
 
     def dequeue(self) -> dict | None:
         """Get next request by priority."""
-        if not self._queue:
-            return None
-        row = self._queue.pop(0)
-        now = time.time()
-        self._served_timestamps.append(now)
-        cutoff = now - 60.0
-        self._served_timestamps = [ts for ts in self._served_timestamps if ts >= cutoff]
-        request = row.get("request")
-        return dict(request) if isinstance(request, dict) else {}
+        with self._lock:
+            if not self._queue:
+                return None
+            row = self._queue.pop(0)
+            now = time.time()
+            self._served_timestamps.append(now)
+            cutoff = now - 60.0
+            self._served_timestamps = [ts for ts in self._served_timestamps if ts >= cutoff]
+            if len(self._served_timestamps) > self.MAX_ENTRIES:
+                self._served_timestamps = self._served_timestamps[-self.MAX_ENTRIES :]
+            request = row.get("request")
+            return dict(request) if isinstance(request, dict) else {}
 
     def get_queue_stats(self) -> dict:
-        counts = {key: 0 for key in self.PRIORITY_LEVELS.keys()}
-        now = time.time()
-        waits = []
-        for item in self._queue:
-            pr = str(item.get("priority", self.default_priority))
-            if pr in counts:
-                counts[pr] += 1
-            queued_at = float(item.get("queued_at", now) or now)
-            waits.append(max(0.0, (now - queued_at) * 1000.0))
-        cutoff = now - 60.0
-        served = [ts for ts in self._served_timestamps if ts >= cutoff]
-        self._served_timestamps = served
-        avg_wait = (sum(waits) / float(len(waits))) if waits else 0.0
-        return {
-            "total": int(len(self._queue)),
-            "by_priority": counts,
-            "avg_wait_ms": float(round(avg_wait, 3)),
-            "throughput_per_min": float(len(served)),
-        }
+        with self._lock:
+            counts = {key: 0 for key in self.PRIORITY_LEVELS.keys()}
+            now = time.time()
+            waits = []
+            for item in self._queue:
+                pr = str(item.get("priority", self.default_priority))
+                if pr in counts:
+                    counts[pr] += 1
+                queued_at = float(item.get("queued_at", now) or now)
+                waits.append(max(0.0, (now - queued_at) * 1000.0))
+            cutoff = now - 60.0
+            served = [ts for ts in self._served_timestamps if ts >= cutoff]
+            self._served_timestamps = served
+            avg_wait = (sum(waits) / float(len(waits))) if waits else 0.0
+            return {
+                "total": int(len(self._queue)),
+                "by_priority": counts,
+                "avg_wait_ms": float(round(avg_wait, 3)),
+                "throughput_per_min": float(len(served)),
+            }
 
     def set_rate_limit(self, priority: str, rps: float) -> None:
         """Set requests-per-second limit per priority level."""
         key = str(priority or "").strip().lower()
         if key not in self.PRIORITY_LEVELS:
             return
-        self._rate_limits[key] = max(0.0, float(rps or 0.0))
+        with self._lock:
+            self._rate_limits[key] = max(0.0, float(rps or 0.0))

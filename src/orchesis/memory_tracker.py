@@ -9,6 +9,8 @@ from typing import Any
 class MemoryTracker:
     """Tracks agent memory usage and detects memory poisoning."""
 
+    MAX_SESSIONS = 10_000
+
     _MODEL_WINDOWS = {
         "gpt-4o": 128000,
         "gpt-4o-mini": 128000,
@@ -20,6 +22,7 @@ class MemoryTracker:
     def __init__(self, config: dict | None = None):
         cfg = config if isinstance(config, dict) else {}
         self.max_memory_entries = int(cfg.get("max_entries", 1000))
+        self.max_sessions = int(cfg.get("max_sessions", self.MAX_SESSIONS))
         self._sessions: dict[str, dict[str, Any]] = {}
 
     @staticmethod
@@ -63,17 +66,32 @@ class MemoryTracker:
         """Record message history for session."""
         sid = str(session_id or "")
         rows = [self._as_dict(item) for item in messages if isinstance(self._as_dict(item), dict)]
+        now_iso = self._now_iso()
         entry = {
-            "timestamp": self._now_iso(),
+            "timestamp": now_iso,
             "message_count": len(rows),
             "estimated_tokens": self._estimate_tokens(rows),
             "messages": rows,
         }
-        session = self._sessions.setdefault(sid, {"entries": []})
+        session = self._sessions.setdefault(sid, {"entries": [], "last_updated": now_iso})
+        session["last_updated"] = now_iso
         entries = session.setdefault("entries", [])
         entries.append(entry)
         if len(entries) > self.max_memory_entries:
             session["entries"] = entries[-self.max_memory_entries :]
+        self._evict_sessions_if_needed()
+
+    def _evict_sessions_if_needed(self) -> None:
+        cap = max(1, int(self.max_sessions))
+        if len(self._sessions) <= cap:
+            return
+        ordered = sorted(
+            self._sessions.items(),
+            key=lambda item: str(item[1].get("last_updated", "")),
+        )
+        overflow = len(self._sessions) - cap
+        for session_id, _ in ordered[:overflow]:
+            self._sessions.pop(session_id, None)
 
     def get_memory_stats(self, session_id: str) -> dict:
         sid = str(session_id or "")

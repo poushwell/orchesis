@@ -10,6 +10,8 @@ from typing import Any
 class AnomalyAlertManager:
     """Generates alerts when agent behavior deviates from baseline."""
 
+    MAX_ENTRIES = 10_000
+
     ALERT_TYPES = {
         "cost_spike": "Cost increased >3x vs baseline",
         "tool_abuse": "Unusual tool call frequency",
@@ -70,6 +72,9 @@ class AnomalyAlertManager:
             "dismissed": False,
         }
         self._alerts.append(alert)
+        if len(self._alerts) > self.MAX_ENTRIES:
+            # Keep most recent alerts only.
+            self._alerts = self._alerts[-self.MAX_ENTRIES :]
         return alert
 
     def check(self, agent_id: str, current_stats: dict) -> list[dict]:

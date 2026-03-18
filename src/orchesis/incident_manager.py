@@ -12,9 +12,13 @@ class IncidentManager:
 
     SEVERITIES = ["low", "medium", "high", "critical"]
     STATUSES = ["open", "investigating", "mitigated", "resolved", "false_positive"]
+    MAX_ENTRIES = 10_000
+    MAX_TIMELINE_ENTRIES = 200
+    MAX_MITIGATIONS = 200
 
     def __init__(self):
         self._incidents: dict[str, dict[str, Any]] = {}
+        self._order: list[str] = []
 
     @staticmethod
     def _now_iso() -> str:
@@ -46,7 +50,15 @@ class IncidentManager:
             "mitigations": [],
         }
         self._incidents[incident_id] = row
+        self._order.append(incident_id)
+        self._trim_if_needed()
         return dict(row)
+
+    def _trim_if_needed(self) -> None:
+        cap = max(1, int(self.MAX_ENTRIES))
+        while len(self._order) > cap:
+            oldest = self._order.pop(0)
+            self._incidents.pop(oldest, None)
 
     def update_status(self, incident_id: str, status: str, note: str = "") -> bool:
         row = self._incidents.get(incident_id)
@@ -64,6 +76,8 @@ class IncidentManager:
                 "note": str(note or ""),
             }
         )
+        if len(row["timeline"]) > self.MAX_TIMELINE_ENTRIES:
+            row["timeline"] = row["timeline"][-self.MAX_TIMELINE_ENTRIES :]
         if normalized in {"resolved", "false_positive"}:
             row["resolved_at"] = self._now_iso()
         return True
@@ -76,6 +90,8 @@ class IncidentManager:
         if not action_text:
             return False
         row["mitigations"].append(action_text)
+        if len(row["mitigations"]) > self.MAX_MITIGATIONS:
+            row["mitigations"] = row["mitigations"][-self.MAX_MITIGATIONS :]
         row["timeline"].append(
             {
                 "at": self._now_iso(),
@@ -83,6 +99,8 @@ class IncidentManager:
                 "note": action_text,
             }
         )
+        if len(row["timeline"]) > self.MAX_TIMELINE_ENTRIES:
+            row["timeline"] = row["timeline"][-self.MAX_TIMELINE_ENTRIES :]
         return True
 
     def get_incident(self, incident_id: str) -> dict | None:
@@ -94,6 +112,7 @@ class IncidentManager:
         status: str | None = None,
         severity: str | None = None,
         agent_id: str | None = None,
+        limit: int = 1000,
     ) -> list[dict]:
         rows = list(self._incidents.values())
         if status is not None:
@@ -106,7 +125,8 @@ class IncidentManager:
             wanted = str(agent_id).strip()
             rows = [row for row in rows if str(row.get("agent_id", "")) == wanted]
         rows.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
-        return [dict(row) for row in rows]
+        cap = max(1, min(10_000, int(limit)))
+        return [dict(row) for row in rows[:cap]]
 
     @staticmethod
     def _parse_ts(value: Any) -> datetime | None:

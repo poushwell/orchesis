@@ -8,10 +8,13 @@ from typing import Any
 class FleetCoordinator:
     """Coordinates multiple agents - shared context, load balancing."""
 
+    MAX_ENTRIES = 10_000
+
     def __init__(self, config: dict | None = None):
         self._config = config if isinstance(config, dict) else {}
         self._agents: dict[str, dict[str, Any]] = {}
         self._shared_context: dict[str, str] = {}
+        self._shared_context_order: list[str] = []
         self._tasks_routed = 0
 
     def register_agent(self, agent_id: str, capabilities: list[str]) -> dict:
@@ -67,7 +70,10 @@ class FleetCoordinator:
                 context = {}
             context[key] = context_value
             chosen["context"] = context
-            self._shared_context[f"{chosen['agent_id']}:{key}"] = context_value
+            context_id = f"{chosen['agent_id']}:{key}"
+            self._shared_context[context_id] = context_value
+            self._shared_context_order.append(context_id)
+            self._trim_shared_context()
         return str(chosen.get("agent_id", ""))
 
     def share_context(self, from_agent: str, to_agent: str, context_key: str) -> bool:
@@ -90,8 +96,18 @@ class FleetCoordinator:
             dst_context = {}
         dst_context[key] = value
         self._agents[dst]["context"] = dst_context
-        self._shared_context[f"{dst}:{key}"] = value
+        context_id = f"{dst}:{key}"
+        self._shared_context[context_id] = value
+        self._shared_context_order.append(context_id)
+        self._trim_shared_context()
         return True
+
+    def _trim_shared_context(self) -> None:
+        cap = max(1, int(self.MAX_ENTRIES))
+        while len(self._shared_context_order) > cap:
+            oldest = self._shared_context_order.pop(0)
+            if oldest not in self._shared_context_order:
+                self._shared_context.pop(oldest, None)
 
     def get_fleet_status(self) -> dict:
         statuses = {"active": 0, "idle": 0, "degraded": 0}

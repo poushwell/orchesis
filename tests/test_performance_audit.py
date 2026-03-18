@@ -17,6 +17,12 @@ from orchesis.entropy_detector import EntropyDetector
 from orchesis.message_chain import validate_tool_chain
 from orchesis.ngram_profiler import NgramProfiler, cosine_similarity
 from orchesis.openclaw_auditor import OpenClawAuditor
+from orchesis.context_router import ContextStrategyRouter
+from orchesis.cost_optimizer import CostOptimizer
+from orchesis.context_compression_v2 import ContextCompressionV2
+from orchesis.request_sampler import RequestSampler
+from orchesis.request_prioritizer import RequestPrioritizer
+from orchesis.context_window_optimizer import ContextWindowOptimizer
 from orchesis.session_risk import RiskSignal, SessionRiskAccumulator
 from orchesis.structural_patterns import StructuralPatternDetector
 from orchesis.telemetry_export import TelemetryRecord
@@ -221,6 +227,12 @@ def _module_results() -> dict[str, dict[str, float]]:
     ngram_cold = NgramProfiler({"baseline_messages": 20, "window_size": 10, "min_tokens": 50, "top_k": 200})
     risk_cold = SessionRiskAccumulator()
     ars_cold = AgentReliabilityScore()
+    context_router = ContextStrategyRouter()
+    cost_optimizer = CostOptimizer({"strategies": ["trim_whitespace", "remove_redundant_context"]})
+    compression_v2 = ContextCompressionV2({"algorithm": "importance_scoring", "target_ratio": 0.7})
+    sampler = RequestSampler({"strategy": "random", "rate": 0.5, "seed": 1337})
+    context_window_optimizer = ContextWindowOptimizer({"safety_margin": 0.1})
+    prioritizer = RequestPrioritizer({"default": "normal"})
 
     def full_pipeline_cold() -> None:
         entropy_cold.check("cold-agent", {"messages": [{"role": "assistant", "content": text_500}]})
@@ -294,6 +306,27 @@ def _module_results() -> dict[str, dict[str, float]]:
                 error_type="",
             )
         ),
+        "context_router_classify": benchmark(
+            lambda: context_router.classify(
+                request_10["messages"],
+                ["search", "read_file"],
+            )
+        ),
+        "cost_optimizer_optimize": benchmark(lambda: cost_optimizer.optimize(request_10["messages"])),
+        "context_compression_v2_compress": benchmark(lambda: compression_v2.compress(request_10["messages"], budget_tokens=1200)),
+        "request_sampler_should_record": benchmark(lambda: sampler.should_record({"decision": "ALLOW", "risk_score": 0.2})),
+        "context_window_optimizer_optimize": benchmark(
+            lambda: context_window_optimizer.optimize_for_model(request_10["messages"], "gpt-4o-mini")
+        ),
+        "request_prioritizer_assign_priority": benchmark(
+            lambda: prioritizer.assign_priority(
+                {
+                    "messages": request_10["messages"],
+                    "role": "user",
+                    "batch_size": 1,
+                }
+            )
+        ),
         "all_detectors_combined": benchmark(full_pipeline_warm),
         "all_detectors_cold_start": benchmark(full_pipeline_cold),
     }
@@ -365,6 +398,18 @@ def test_perf_all_detectors_combined() -> None:
 
 def test_perf_all_detectors_cold_start() -> None:
     assert _module_results()["all_detectors_cold_start"]["mean_us"] < _th(7000.0)
+
+
+def test_perf_context_router_classify() -> None:
+    assert _module_results()["context_router_classify"]["mean_us"] < _th(500.0)
+
+
+def test_perf_cost_optimizer_optimize() -> None:
+    assert _module_results()["cost_optimizer_optimize"]["mean_us"] < _th(500.0)
+
+
+def test_perf_request_sampler_should_record() -> None:
+    assert _module_results()["request_sampler_should_record"]["mean_us"] < _th(500.0)
 
 
 def test_perf_pipeline_under_load() -> None:

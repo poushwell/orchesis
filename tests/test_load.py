@@ -7,6 +7,11 @@ from concurrent.futures import ThreadPoolExecutor
 from time import perf_counter, perf_counter_ns
 
 from orchesis.engine import evaluate
+from orchesis.anomaly_alerts import AnomalyAlertManager
+from orchesis.memory_tracker import MemoryTracker
+from orchesis.request_prioritizer import RequestPrioritizer
+from orchesis.fleet_coordinator import FleetCoordinator
+from orchesis.incident_manager import IncidentManager
 from orchesis.models import Decision
 from orchesis.state import RateLimitTracker
 
@@ -210,3 +215,78 @@ def test_state_persistence_under_load(tmp_path) -> None:
     reloaded = RateLimitTracker(persist_path=state_path)
     count = reloaded.get_count("run_sql", window_seconds=3600, agent_id="persist_agent")
     assert count == 1000
+
+
+def test_memory_bounded_under_load() -> None:
+    class _DNAStoreStub:
+        class _DNA:
+            baseline = {
+                "cost_per_request": 0.01,
+                "tool_call_frequency": 0.1,
+                "avg_prompt_length": 120.0,
+                "session_duration_avg": 2000.0,
+                "error_rate": 0.01,
+                "cache_hit_rate": 0.7,
+            }
+
+        def get(self, _agent_id: str):
+            return self._DNA()
+
+    old_alert_cap = AnomalyAlertManager.MAX_ENTRIES
+    old_queue_cap = RequestPrioritizer.MAX_ENTRIES
+    old_shared_cap = FleetCoordinator.MAX_ENTRIES
+    old_incident_cap = IncidentManager.MAX_ENTRIES
+    AnomalyAlertManager.MAX_ENTRIES = 256
+    RequestPrioritizer.MAX_ENTRIES = 256
+    FleetCoordinator.MAX_ENTRIES = 256
+    IncidentManager.MAX_ENTRIES = 256
+    try:
+        alerts = AnomalyAlertManager(_DNAStoreStub())
+        tracker = MemoryTracker({"max_entries": 10, "max_sessions": 128})
+        prioritizer = RequestPrioritizer()
+        fleet = FleetCoordinator()
+        incidents = IncidentManager()
+
+        for idx in range(600):
+            agent = f"agent-{idx}"
+            fleet.register_agent(agent, ["general"])
+            _ = fleet.assign_task(
+                {
+                    "required_capabilities": ["general"],
+                    "context_key": f"k{idx}",
+                    "context_value": f"v{idx}",
+                }
+            )
+            tracker.record(
+                f"session-{idx}",
+                [{"role": "user", "content": f"message {idx} " + ("x" * 30)}],
+            )
+            prioritizer.enqueue(
+                {
+                    "role": "user",
+                    "messages": [{"role": "user", "content": f"task {idx}"}],
+                }
+            )
+            alerts.check(
+                agent,
+                {
+                    "cost_per_request": 1.0,
+                    "tool_call_frequency": 1.0,
+                    "avg_prompt_length": 2500.0,
+                    "session_duration_avg": 10000.0,
+                    "error_rate": 0.9,
+                    "cache_hit_rate": 0.0,
+                },
+            )
+            _ = incidents.create({"severity": "medium", "type": "load", "description": "under load"}, agent)
+
+        assert len(alerts._alerts) <= alerts.MAX_ENTRIES
+        assert len(tracker._sessions) <= tracker.max_sessions
+        assert len(prioritizer._queue) <= prioritizer.MAX_ENTRIES
+        assert len(fleet._shared_context) <= fleet.MAX_ENTRIES
+        assert len(incidents._incidents) <= incidents.MAX_ENTRIES
+    finally:
+        AnomalyAlertManager.MAX_ENTRIES = old_alert_cap
+        RequestPrioritizer.MAX_ENTRIES = old_queue_cap
+        FleetCoordinator.MAX_ENTRIES = old_shared_cap
+        IncidentManager.MAX_ENTRIES = old_incident_cap
