@@ -135,6 +135,36 @@ def test_theme_toggle_button_present() -> None:
     assert "toggleTheme()" in html
 
 
+def test_perf_mode_toggle_present() -> None:
+    html = get_dashboard_html()
+    assert 'id="perf-toggle"' in html
+    assert "togglePerfMode()" in html
+    assert "Performance mode" in html
+
+
+def test_poll_intervals_defined() -> None:
+    html = get_dashboard_html()
+    assert "const POLL_INTERVALS = {" in html
+    assert "normal: {" in html
+    assert "performance: {" in html
+    assert "shield: 3000" in html
+    assert "shield: 30000" in html
+
+
+def test_lazy_tab_loading_logic() -> None:
+    html = get_dashboard_html()
+    assert "const loadedTabs = new Set(['shield']);" in html
+    assert "if (!loadedTabs.has(tab)) {" in html
+    assert "loadedTabs.add(tab);" in html
+    assert "pollTab(tab);" in html
+
+
+def test_perf_mode_localStorage_key() -> None:
+    html = get_dashboard_html()
+    assert "localStorage.getItem('orchesis-perf')" in html
+    assert "localStorage.setItem('orchesis-perf', perfMode);" in html
+
+
 def test_light_theme_css_variables_defined() -> None:
     html = get_dashboard_html()
     assert ':root[data-theme="light"]' in html

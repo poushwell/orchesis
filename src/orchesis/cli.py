@@ -93,6 +93,7 @@ from orchesis.templates import TEMPLATE_NAMES, load_template_text
 from orchesis.policy_templates import PolicyTemplateManager, POLICY_TEMPLATES
 from orchesis.policy_diff import PolicyDiff
 from orchesis.evidence_record import EvidenceRecord
+from orchesis.migrator import PolicyMigrator
 from orchesis import __version__
 
 DEFAULT_KEYS_DIR = Path(".orchesis") / "keys"
@@ -1680,6 +1681,63 @@ def reload_command(config_path: str, port: int | None) -> None:
                 resolved_port = max(1, int(port_from_cfg))
     payload = _post_proxy_control(resolved_port, "/api/v1/policy/reload", {})
     click.echo(f"✓ Policy reloaded (version: {payload.get('version', 'unknown')})")
+
+
+@main.command("migrate")
+@click.option("--config", "config_path", type=click.Path(exists=True), default="orchesis.yaml")
+@click.option("--target", "target_version", default=None)
+@click.option("--dry-run", "dry_run_mode", is_flag=True, default=False)
+@click.option("--no-backup", "no_backup", is_flag=True, default=False)
+def migrate_command(config_path: str, target_version: str | None, dry_run_mode: bool, no_backup: bool) -> None:
+    """Migrate orchesis policy file between versions."""
+    path = Path(config_path)
+    if not path.exists():
+        raise click.ClickException(f"Config not found: {config_path}")
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (YAMLError, OSError) as error:
+        raise click.ClickException(f"Failed to load config: {error}") from error
+    policy = raw if isinstance(raw, dict) else {}
+
+    migrator = PolicyMigrator()
+    detected = migrator.detect_version(policy)
+    resolved_target = str(target_version).strip() if isinstance(target_version, str) and target_version.strip() else ""
+    if not resolved_target:
+        if detected == "0.1.x":
+            resolved_target = "0.2.x"
+        elif detected == "0.2.x":
+            resolved_target = "0.3.x"
+        else:
+            resolved_target = "0.3.x"
+
+    result = migrator.dry_run(policy, resolved_target) if dry_run_mode else migrator.migrate(policy, resolved_target)
+    changes = list(result.get("changes", [])) if isinstance(result, dict) else []
+    warnings = list(result.get("warnings", [])) if isinstance(result, dict) else []
+    migrated_policy = result.get("policy", policy) if isinstance(result, dict) else policy
+
+    click.echo(f"Detected version: {detected}")
+    click.echo(f"Target version:   {resolved_target}")
+    click.echo("Changes:")
+    if changes:
+        for line in changes:
+            click.echo(f"  {line}")
+    else:
+        click.echo("  (no changes)")
+    if warnings:
+        click.echo("Warnings:")
+        for line in warnings:
+            click.echo(f"  - {line}")
+
+    if dry_run_mode:
+        click.echo("✓ Dry run complete")
+        return
+
+    if not no_backup:
+        backup_path = migrator.backup(str(path))
+        click.echo(f"Backup saved: {backup_path}")
+
+    path.write_text(yaml.safe_dump(migrated_policy, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    click.echo("✓ Migration complete")
 
 
 @main.command("mcp-proxy")

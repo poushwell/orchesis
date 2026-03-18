@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import time
+import io
+import zipfile
 import hashlib
 import threading
 from collections import defaultdict
@@ -54,6 +56,7 @@ from orchesis.pipeline import check_budget
 from orchesis.evidence_record import EvidenceRecord
 from orchesis.cost_analytics import CostAnalytics
 from orchesis.cost_forecast import CostForecaster
+from orchesis.session_heatmap import SessionHeatmap
 from orchesis.budget_advisor import BudgetAdvisor
 from orchesis.session_replay import SessionReplay
 from orchesis.community_intel import CommunityIntel
@@ -63,6 +66,7 @@ from orchesis.threat_feed import ThreatFeed
 from orchesis.signature_editor import SignatureEditor
 from orchesis.alert_rules import AlertRule, AlertRulesEngine
 from orchesis.agent_graph import AgentCollaborationGraph
+from orchesis.geo_intel import GeoIntel
 from orchesis.tenants import TenantManager
 from orchesis import __version__
 
@@ -452,6 +456,66 @@ def create_api_app(
         filtered = [event for event in events if str(getattr(event, "agent_id", "")) == str(agent_id)]
         return ComplianceReportGenerator().generate(agent_id=str(agent_id), decisions_log=filtered)
 
+    def _build_export_zip() -> bytes:
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        agent_ids = sorted(
+            {
+                str(getattr(event, "agent_id", "") or "__global__")
+                for event in events
+                if str(getattr(event, "agent_id", "") or "").strip()
+            }
+            | set(app.state.dna_store.list_agents())
+        )
+        if not agent_ids:
+            agent_ids = ["__global__"]
+        session_id = "__global__"
+        for event in events:
+            snapshot = getattr(event, "state_snapshot", {})
+            if isinstance(snapshot, dict):
+                candidate = _extract_session_id(snapshot)
+                if isinstance(candidate, str) and candidate.strip():
+                    session_id = candidate.strip()
+                    break
+        evidence_record = _build_evidence_record(session_id)
+        compliance_report = _build_compliance_report(agent_ids[0])
+        profile_builder = AgentIntelligenceProfile()
+        profiles = [
+            profile_builder.build(
+                agent_id=agent_id,
+                dna_store=app.state.dna_store,
+                health_score={"agent_id": agent_id, "score": 0.0, "grade": "N/A"},
+                decisions_log=app.state.decisions_log,
+            )
+            for agent_id in agent_ids
+        ]
+        benchmark_results = app.state.benchmark_results.get("latest", {})
+        decisions_raw = source.read_text(encoding="utf-8") if source.exists() else ""
+        manifest = {
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "version": __version__,
+            "decisions_count": len(events),
+            "session_id": session_id,
+            "agents_count": len(agent_ids),
+            "files": [
+                "decisions.jsonl",
+                "evidence_record.json",
+                "compliance_report.json",
+                "agent_profiles.json",
+                "benchmark_results.json",
+                "export_manifest.json",
+            ],
+        }
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("decisions.jsonl", decisions_raw)
+            zf.writestr("evidence_record.json", json.dumps(evidence_record, ensure_ascii=False, indent=2))
+            zf.writestr("compliance_report.json", json.dumps(compliance_report, ensure_ascii=False, indent=2))
+            zf.writestr("agent_profiles.json", json.dumps(profiles, ensure_ascii=False, indent=2))
+            zf.writestr("benchmark_results.json", json.dumps(benchmark_results, ensure_ascii=False, indent=2))
+            zf.writestr("export_manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        return buffer.getvalue()
+
     def _build_context_budget_payload(session_id: str | None = None) -> dict[str, Any]:
         source = Path(app.state.decisions_log)
         events = read_events_from_jsonl(source) if source.exists() else []
@@ -528,6 +592,16 @@ def create_api_app(
                 }
             )
         return points
+
+    def _build_session_heatmap_payload(days: int = 7) -> dict[str, Any]:
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        return SessionHeatmap().compute(events, days=days)
+
+    def _build_session_heatmap_daily() -> list[dict[str, Any]]:
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        return SessionHeatmap().get_daily_summary(events)
 
     def _build_budget_advice_payload() -> dict[str, Any]:
         source = Path(app.state.decisions_log)
@@ -1537,6 +1611,20 @@ def create_api_app(
         model.fit(points)
         return model.get_breakeven(monthly_budget=float(budget))
 
+    @app.get("/api/v1/heatmap")
+    def session_heatmap(
+        days: int = 7,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        safe_days = max(1, min(31, int(days)))
+        return _build_session_heatmap_payload(days=safe_days)
+
+    @app.get("/api/v1/heatmap/daily")
+    def session_heatmap_daily(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {"days": 7, "summary": _build_session_heatmap_daily()}
+
     @app.get("/api/v1/budget/advice")
     def budget_advice(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
@@ -1894,6 +1982,28 @@ def create_api_app(
         _require_auth(authorization)
         return _build_rate_limit_status_payload()
 
+    @app.get("/api/v1/geo/classify")
+    def geo_classify(
+        ip: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return GeoIntel().classify_ip(ip)
+
+    @app.post("/api/v1/geo/scan-ssrf")
+    def geo_scan_ssrf(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        text = payload.get("text")
+        if isinstance(text, str):
+            source = text
+        else:
+            source = json.dumps(payload, ensure_ascii=False)
+        return GeoIntel().scan_for_ssrf(source)
+
     @app.get("/api/v1/benchmark/cases")
     def benchmark_cases(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
@@ -1947,6 +2057,14 @@ def create_api_app(
         if isinstance(latest, dict):
             return {"results": latest, "saved_runs": len(app.state.benchmark_results)}
         return {"results": None, "saved_runs": 0}
+
+    @app.get("/api/v1/export/all")
+    def export_all(authorization: str | None = Header(default=None)) -> Response:
+        _require_auth(authorization)
+        payload = _build_export_zip()
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        headers = {"Content-Disposition": f'attachment; filename="orchesis-export-{stamp}.zip"'}
+        return Response(content=payload, media_type="application/zip", headers=headers)
 
     @app.get("/api/v1/mcp/monitor/status")
     def mcp_monitor_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:

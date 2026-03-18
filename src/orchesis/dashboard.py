@@ -927,6 +927,64 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       font-size: 13px;
     }
     .savings-breakdown span { color: var(--ok); font-weight: 700; }
+    .heatmap-panel {
+      border: 1px solid var(--border);
+      background: rgba(168, 85, 247, 0.04);
+    }
+    .heatmap-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .heatmap-grid {
+      display: grid;
+      gap: 4px;
+      grid-template-columns: 44px repeat(24, minmax(10px, 1fr));
+      width: 100%;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+    .heatmap-hour-label {
+      font-size: 10px;
+      color: var(--text-secondary);
+      text-align: center;
+      line-height: 14px;
+    }
+    .heatmap-day-label {
+      font-size: 11px;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      min-height: 14px;
+    }
+    .heatmap-cell {
+      min-height: 14px;
+      border-radius: 3px;
+      border: 1px solid rgba(255,255,255,0.08);
+      cursor: pointer;
+      transition: transform 0.12s ease, border-color 0.12s ease;
+    }
+    .heatmap-cell:hover {
+      transform: translateY(-1px);
+      border-color: rgba(255,255,255,0.4);
+    }
+    .heatmap-meta {
+      margin-top: 8px;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+    .heatmap-tooltip {
+      margin-top: 6px;
+      min-height: 14px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
     .flow-graph {
       background: rgba(0,0,0,0.2);
       border-radius: var(--radius-sm);
@@ -1216,6 +1274,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         <span class="badge"><span id="conn-dot" class="conn-dot"></span><span id="conn-text">Connected</span></span>
         <span class="badge" id="perf-indicator">[⚡ Standard mode] | Orchesis v0.2.1 | Connected</span>
         <span class="badge" id="status-badge">Status: --</span>
+        <button id="export-all-btn" onclick="exportAll()">⬇️ Export</button>
         <button id="perf-toggle" onclick="togglePerfMode()" title="Performance mode">⚡</button>
         <button id="theme-toggle" onclick="toggleTheme()">☀️</button>
         <div id="notif-bell" onclick="toggleNotifications()">🔔 <span id="notif-count" class="badge">0</span></div>
@@ -1391,6 +1450,19 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
           </div>
           <div id="savings-breakdown" class="savings-grid"></div>
         </div>
+      </div>
+      <div class="panel heatmap-panel">
+        <div class="heatmap-head">
+          <div><strong>Session Activity Heatmap (7d)</strong></div>
+          <div class="subtle">Requests by day/hour</div>
+        </div>
+        <div id="session-heatmap-grid" class="heatmap-grid"></div>
+        <div class="heatmap-meta">
+          <span id="session-heatmap-peak">Peak: --</span>
+          <span id="session-heatmap-quiet">Quiet: --</span>
+          <span id="session-heatmap-total">Total: 0</span>
+        </div>
+        <div id="session-heatmap-tooltip" class="heatmap-tooltip">Hover a cell to inspect count, cost, and blocked requests.</div>
       </div>
       <div class="panel savings-card">
         <h3 style="margin:0 0 8px 0;">💰 Savings Today</h3>
@@ -2005,6 +2077,22 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       await navigator.clipboard.writeText(url);
       showToast("Link copied!");
     }
+    async function exportAll() {
+      const token = String((window && window.API_TOKEN) || localStorage.getItem("API_TOKEN") || "").trim();
+      const headers = token ? { "Authorization": `Bearer ${token}` } : {};
+      const resp = await fetch("/api/v1/export/all", { headers, cache: "no-store" });
+      if(!resp.ok){ throw new Error(`export failed (${resp.status})`); }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `orchesis-export-${Date.now()}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast("Export downloaded");
+    }
     function mockOverwatchData(){
       return {
         summary: {
@@ -2550,6 +2638,82 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       renderTokenYield(tokenYield || {});
       renderContextBudget(contextBudget || {});
       renderRateLimits(rateLimits || {});
+    }
+
+    function renderSessionHeatmap(payload){
+      const gridEl = document.getElementById("session-heatmap-grid");
+      const tooltipEl = document.getElementById("session-heatmap-tooltip");
+      const peakEl = document.getElementById("session-heatmap-peak");
+      const quietEl = document.getElementById("session-heatmap-quiet");
+      const totalEl = document.getElementById("session-heatmap-total");
+      if(!gridEl){ return; }
+      const model = (payload && typeof payload === "object") ? payload : {};
+      const cells = Array.isArray(model.cells) ? model.cells : [];
+      if(cells.length === 0){
+        gridEl.innerHTML = `<div class="empty" style="grid-column: 1 / -1;">No heatmap activity data.</div>`;
+        if(peakEl){ peakEl.textContent = "Peak: --"; }
+        if(quietEl){ quietEl.textContent = "Quiet: --"; }
+        if(totalEl){ totalEl.textContent = "Total: 0"; }
+        return;
+      }
+
+      const days = [];
+      const grouped = {};
+      cells.forEach((cell)=>{
+        const day = String(cell.day || "");
+        if(!grouped[day]){
+          grouped[day] = {};
+          days.push(day);
+        }
+        grouped[day][Number(cell.hour || 0)] = cell;
+      });
+
+      const nodes = [];
+      nodes.push(`<div></div>`);
+      for(let hour = 0; hour < 24; hour += 1){
+        nodes.push(`<div class="heatmap-hour-label">${hour}</div>`);
+      }
+
+      days.forEach((day)=>{
+        nodes.push(`<div class="heatmap-day-label">${escapeHtml(day)}</div>`);
+        for(let hour = 0; hour < 24; hour += 1){
+          const cell = grouped[day][hour] || { count: 0, cost: 0, blocked: 0, intensity: 0 };
+          const intensity = Math.max(0, Math.min(1, Number(cell.intensity || 0)));
+          const alpha = (0.08 + intensity * 0.78).toFixed(3);
+          const blocked = Number(cell.blocked || 0);
+          const style = blocked > 0
+            ? `background: rgba(239, 68, 68, ${Math.max(0.25, intensity).toFixed(3)});`
+            : `background: rgba(168, 85, 247, ${alpha});`;
+          nodes.push(
+            `<div class="heatmap-cell" data-day="${escapeHtml(day)}" data-hour="${hour}" data-count="${Number(cell.count || 0)}" data-cost="${Number(cell.cost || 0)}" data-blocked="${blocked}" style="${style}"></div>`
+          );
+        }
+      });
+      gridEl.innerHTML = nodes.join("");
+
+      gridEl.querySelectorAll(".heatmap-cell").forEach((cell)=>{
+        cell.addEventListener("mouseenter", ()=>{
+          if(!tooltipEl){ return; }
+          const day = String(cell.getAttribute("data-day") || "");
+          const hour = Number(cell.getAttribute("data-hour") || 0);
+          const count = Number(cell.getAttribute("data-count") || 0);
+          const cost = Number(cell.getAttribute("data-cost") || 0);
+          const blocked = Number(cell.getAttribute("data-blocked") || 0);
+          tooltipEl.textContent = `${day} ${hour}:00 — requests ${fmtNum(count)}, cost ${fmtMoney(cost)}, blocked ${fmtNum(blocked)}`;
+        });
+      });
+
+      const peak = (model.peak && typeof model.peak === "object") ? model.peak : {};
+      const quiet = (model.quiet && typeof model.quiet === "object") ? model.quiet : {};
+      if(peakEl){
+        peakEl.textContent = `Peak: ${String(peak.day || "--")} ${Number(peak.hour || 0)}:00 (${fmtNum(Number(peak.count || 0))})`;
+      }
+      if(quietEl){
+        quietEl.textContent = `Quiet: ${String(quiet.day || "--")} ${Number(quiet.hour || 0)}:00 (${fmtNum(Number(quiet.count || 0))})`;
+      }
+      if(totalEl){
+        totalEl.textContent = `Total: ${fmtNum(Number(model.total_requests || 0))}`;
+      }
     }
 
     function renderTokenYield(payload){
@@ -3899,7 +4063,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     }
 
     async function pollShield(){
-      const [data, stats, savings, health, tokenYield, contextBudget, communityStatus, communityStats] = await Promise.all([
+      const [data, stats, savings, health, tokenYield, contextBudget, communityStatus, communityStats, heatmap] = await Promise.all([
         fetchData("/api/dashboard/overview"),
         fetchData("/stats"),
         fetchData("/api/v1/savings"),
@@ -3908,6 +4072,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         fetchData("/api/v1/context-budget/stats"),
         fetchData("/api/v1/community/status"),
         fetchData("/api/v1/community/stats"),
+        fetchData("/api/v1/heatmap?days=7"),
       ]);
       const now = Date.now();
       if (!rateLimitSnapshot || (now - lastRateLimitFetchMs) >= RATE_LIMIT_REFRESH_MS) {
@@ -3920,6 +4085,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       renderOverview(data, stats, savings, tokenYield, contextBudget, rateLimitSnapshot || {});
       renderAgentHealth((health && typeof health === "object") ? health : (data && data.agent_health ? data.agent_health : {}));
       renderCommunityIntel(communityStatus || {}, communityStats || {});
+      renderSessionHeatmap(heatmap || {});
     }
     async function pollAgents(){
       const data = await fetchData("/api/dashboard/agents");
