@@ -121,7 +121,38 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       --radius: 12px;
       --radius-sm: 8px;
     }
+    :root[data-hc="true"] {
+      --bg: #000000;
+      --surface: #000000;
+      --text: #ffffff;
+      --border: #ffffff;
+      --accent: #ffff00;
+      --danger: #ff6666;
+      --ok: #66ff66;
+      --panel: #000000;
+      --text-secondary: #f0f0f0;
+      --hero-radial: #000000;
+    }
     * { box-sizing: border-box; }
+    .skip-link {
+      position: absolute;
+      top: -40px;
+      left: 10px;
+      z-index: 10002;
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 8px 10px;
+      text-decoration: none;
+    }
+    .skip-link:focus {
+      top: 10px;
+    }
+    :focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
     body {
       margin: 0;
       font-family: system-ui, -apple-system, sans-serif;
@@ -289,6 +320,18 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       font-size: 14px;
     }
     #theme-toggle:hover {
+      border-color: var(--accent);
+    }
+    #hc-toggle {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--text);
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    #hc-toggle:hover {
       border-color: var(--accent);
     }
     #perf-toggle {
@@ -1259,12 +1302,13 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
   </style>
 </head>
 <body>
-  <div class="app">
+  <a href="#main-content" class="skip-link">Skip to main content</a>
+  <div class="app" id="main-content">
     <div class="topbar">
       <div class="brand"><span class="logo">🛡️ Orchesis</span><span class="subtle">Dashboard MVP</span></div>
       <div class="badges">
         <div class="search-wrap">
-          <input id="global-search" type="text" placeholder="Search agents, sessions, threats..." oninput="debounceSearch(this.value)" />
+          <input id="global-search" type="text" placeholder="Search agents, sessions, threats..." oninput="debounceSearch(this.value)" aria-label="Global search" />
           <div id="search-results" class="search-dropdown hidden">
             <div class="search-section">Agents</div>
             <div class="search-section">Sessions</div>
@@ -1274,35 +1318,36 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         <span class="badge"><span id="conn-dot" class="conn-dot"></span><span id="conn-text">Connected</span></span>
         <span class="badge" id="perf-indicator">[⚡ Standard mode] | Orchesis v0.2.1 | Connected</span>
         <span class="badge" id="status-badge">Status: --</span>
-        <button id="export-all-btn" onclick="exportAll()">⬇️ Export</button>
-        <button id="perf-toggle" onclick="togglePerfMode()" title="Performance mode">⚡</button>
-        <button id="theme-toggle" onclick="toggleTheme()">☀️</button>
-        <div id="notif-bell" onclick="toggleNotifications()">🔔 <span id="notif-count" class="badge">0</span></div>
+        <button id="export-all-btn" onclick="exportAll()" aria-label="Export all data">⬇️ Export</button>
+        <button id="perf-toggle" onclick="togglePerfMode()" title="Performance mode" aria-pressed="false" aria-label="Toggle performance mode">⚡</button>
+        <button id="theme-toggle" onclick="toggleTheme()" aria-pressed="true" aria-label="Toggle light or dark theme">☀️</button>
+        <button id="hc-toggle" onclick="toggleHighContrast()" aria-pressed="false" aria-label="Toggle high contrast mode">◑</button>
+        <button id="notif-bell" onclick="toggleNotifications()" aria-expanded="false" aria-controls="notif-panel" aria-label="Toggle notifications panel">🔔 <span id="notif-count" class="badge">0</span></button>
       </div>
     </div>
-    <div id="notif-panel" class="notif-panel hidden">
+    <div id="notif-panel" class="notif-panel hidden" role="region" aria-label="Notifications panel">
       <div class="notif-header">
-        Notifications <button onclick="clearNotifications()">Clear all</button>
+        Notifications <button onclick="clearNotifications()" aria-label="Clear all notifications">Clear all</button>
       </div>
       <div id="notif-list"></div>
     </div>
     {{DEMO_BANNER}}
 
-    <div class="tabs">
-      <button class="tab-btn active" data-tab="shield">🛡️ Shield</button>
-      <button class="tab-btn" data-tab="agents">🤖 Agents</button>
-      <button class="tab-btn" data-tab="sessions">💾 Sessions</button>
-      <button class="tab-btn" data-tab="flow">🔬 Flow X-Ray</button>
-      <button class="tab-btn" data-tab="experiments">🧪 Experiments</button>
-      <button class="tab-btn" data-tab="threats">🛡️ Threats</button>
-      <button class="tab-btn" data-tab="cache">⚡ Cache</button>
-      <button class="tab-btn" data-tab="cost">💰 Cost</button>
-      <button class="tab-btn" data-tab="compliance">📘 Compliance</button>
-      <button class="tab-btn" data-tab="overwatch">🛰️ Overwatch</button>
-      <button class="tab-btn" data-tab="approvals">✅ Approvals</button>
+    <div class="tabs" role="tablist" aria-label="Dashboard sections">
+      <button id="tab-shield" class="tab-btn active" data-tab="shield" role="tab" aria-selected="true" aria-controls="shield">🛡️ Shield</button>
+      <button id="tab-agents" class="tab-btn" data-tab="agents" role="tab" aria-selected="false" aria-controls="agents">🤖 Agents</button>
+      <button id="tab-sessions" class="tab-btn" data-tab="sessions" role="tab" aria-selected="false" aria-controls="sessions">💾 Sessions</button>
+      <button id="tab-flow" class="tab-btn" data-tab="flow" role="tab" aria-selected="false" aria-controls="flow">🔬 Flow X-Ray</button>
+      <button id="tab-experiments" class="tab-btn" data-tab="experiments" role="tab" aria-selected="false" aria-controls="experiments">🧪 Experiments</button>
+      <button id="tab-threats" class="tab-btn" data-tab="threats" role="tab" aria-selected="false" aria-controls="threats">🛡️ Threats</button>
+      <button id="tab-cache" class="tab-btn" data-tab="cache" role="tab" aria-selected="false" aria-controls="cache">⚡ Cache</button>
+      <button id="tab-cost" class="tab-btn" data-tab="cost" role="tab" aria-selected="false" aria-controls="cost">💰 Cost</button>
+      <button id="tab-compliance" class="tab-btn" data-tab="compliance" role="tab" aria-selected="false" aria-controls="compliance">📘 Compliance</button>
+      <button id="tab-overwatch" class="tab-btn" data-tab="overwatch" role="tab" aria-selected="false" aria-controls="overwatch">🛰️ Overwatch</button>
+      <button id="tab-approvals" class="tab-btn" data-tab="approvals" role="tab" aria-selected="false" aria-controls="approvals">✅ Approvals</button>
     </div>
 
-    <section id="shield" class="screen active">
+    <section id="shield" class="screen active" role="tabpanel" aria-labelledby="tab-shield">
       <div class="agent-health-widget">
         <div class="ah-head">
           <div>
@@ -1333,7 +1378,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
           </div>
         </div>
       </div>
-      <div class="hero-metrics">
+      <div class="hero-metrics" role="region" aria-label="Security metrics">
         <div class="hero-card hero-blocked">
           <div class="hero-number" id="blocked-count">0</div>
           <div class="hero-label">Threats Blocked</div>
@@ -1508,7 +1553,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       </div>
     </section>
 
-    <section id="experiments" class="screen">
+    <section id="experiments" class="screen" role="tabpanel" aria-labelledby="tab-experiments">
       <div class="grid-4">
         <div class="panel"><div class="subtle">Active Experiments</div><div id="exp-active" class="metric-value">0</div></div>
         <div class="panel"><div class="subtle">Total Assignments</div><div id="exp-assignments" class="metric-value">0</div></div>
@@ -1541,7 +1586,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       </div>
     </section>
 
-    <section id="threats" class="screen">
+    <section id="threats" class="screen" role="tabpanel" aria-labelledby="tab-threats">
       <div class="grid-4">
         <div class="panel"><div class="subtle">Signatures</div><div id="th-sigs" class="metric-value">0</div></div>
         <div class="panel"><div class="subtle">Scans</div><div id="th-scans" class="metric-value">0</div></div>
@@ -1571,7 +1616,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       </div>
     </section>
 
-    <section id="cache" class="screen">
+    <section id="cache" class="screen" role="tabpanel" aria-labelledby="tab-cache">
       <div class="grid-4">
         <div class="panel"><div class="subtle">Cache Hit Rate</div><div id="c-hit-rate" class="metric-value">0%</div></div>
         <div class="panel"><div class="subtle">Tokens Saved</div><div id="c-tokens" class="metric-value">0</div></div>
@@ -1588,7 +1633,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       </div>
     </section>
 
-    <section id="cost" class="screen">
+    <section id="cost" class="screen" role="tabpanel" aria-labelledby="tab-cost">
       <div class="grid-4">
         <div class="panel"><div class="subtle">Total Cost (period)</div><div id="cost-total" class="metric-value">$0.00</div></div>
         <div class="panel"><div class="subtle">24h Forecast</div><div id="cost-forecast" class="metric-value">$0.00</div></div>
@@ -1621,7 +1666,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       </div>
     </section>
 
-    <section id="agents" class="screen">
+    <section id="agents" class="screen" role="tabpanel" aria-labelledby="tab-agents">
       <div class="panel panel-primary">
         <div class="section-title"><strong>Agent DNA</strong></div>
         <div id="agents-empty" class="empty" style="display:none;">No agents detected yet.</div>
@@ -1664,7 +1709,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       </div>
     </section>
 
-    <section id="sessions" class="screen">
+    <section id="sessions" class="screen" role="tabpanel" aria-labelledby="tab-sessions">
       <div class="panel panel-primary">
         <div class="section-title"><strong>Time Machine Sessions</strong></div>
         <div id="sessions-empty" class="empty" style="display:none;">No sessions recorded.</div>
@@ -1675,7 +1720,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       </div>
     </section>
 
-    <section id="flow" class="screen">
+    <section id="flow" class="screen" role="tabpanel" aria-labelledby="tab-flow">
       <div class="panel panel-primary">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
           <strong class="section-title" style="margin:0;padding:0;border:0;">Flow X-Ray</strong>
@@ -1744,7 +1789,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       </div>
     </section>
 
-    <section id="compliance" class="screen">
+    <section id="compliance" class="screen" role="tabpanel" aria-labelledby="tab-compliance">
       <div class="grid-2">
         <div class="panel panel-primary">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
@@ -1797,7 +1842,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       </div>
     </section>
 
-    <section id="overwatch" class="screen">
+    <section id="overwatch" class="screen" role="tabpanel" aria-labelledby="tab-overwatch">
       <div class="ow-wrap">
         <div id="ow-summary" class="ow-summary">0 active · $0.00/day · 0 blocked · 0 pending</div>
         <div class="ow-toolbar">
@@ -1844,7 +1889,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       </div>
     </section>
 
-    <section id="approvals" class="screen">
+    <section id="approvals" class="screen" role="tabpanel" aria-labelledby="tab-approvals">
       <div class="panel panel-primary">
         <div class="section-title"><strong>PENDING APPROVALS (<span id="ap-pending-count">0</span>)</strong></div>
         <div id="approvals-pending" style="margin-top:10px;"></div>
@@ -1935,6 +1980,13 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       cache_milestone: { icon: "🔵", fallback: "Cache milestone" },
       loop_detected: { icon: "⚪", fallback: "Loop detected" },
     };
+    const HC_COLORS = {
+      bg: "#000000",
+      text: "#ffffff",
+      accent: "#ffff00",
+      danger: "#ff6666",
+      success: "#66ff66",
+    };
     const sparkHistory = {};
     const SPARK_MAX = 20;
     function applyTheme(theme){
@@ -1942,7 +1994,40 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       document.documentElement.setAttribute("data-theme", next);
       localStorage.setItem("orchesis-theme", next);
       const btn = document.getElementById("theme-toggle");
-      if(btn){ btn.textContent = next === "dark" ? "☀️" : "🌙"; }
+      if(btn){
+        btn.textContent = next === "dark" ? "☀️" : "🌙";
+        btn.setAttribute("aria-pressed", next === "dark" ? "true" : "false");
+      }
+    }
+    function applyHighContrast(enabled){
+      const isEnabled = enabled === true || String(enabled) === "true";
+      document.documentElement.setAttribute("data-hc", isEnabled ? "true" : "false");
+      localStorage.setItem("orchesis-hc", isEnabled ? "true" : "false");
+      const root = document.documentElement;
+      const resetKeys = ["bg", "text", "accent", "danger", "success", "surface", "border", "panel", "text-secondary", "hero-radial"];
+      if(isEnabled){
+        root.style.setProperty("--bg", HC_COLORS.bg);
+        root.style.setProperty("--surface", HC_COLORS.bg);
+        root.style.setProperty("--text", HC_COLORS.text);
+        root.style.setProperty("--border", HC_COLORS.text);
+        root.style.setProperty("--accent", HC_COLORS.accent);
+        root.style.setProperty("--danger", HC_COLORS.danger);
+        root.style.setProperty("--ok", HC_COLORS.success);
+        root.style.setProperty("--panel", HC_COLORS.bg);
+        root.style.setProperty("--text-secondary", HC_COLORS.text);
+        root.style.setProperty("--hero-radial", HC_COLORS.bg);
+      } else {
+        resetKeys.forEach((k)=> root.style.removeProperty(`--${k}`));
+      }
+      const btn = document.getElementById("hc-toggle");
+      if(btn){
+        btn.setAttribute("aria-pressed", isEnabled ? "true" : "false");
+        btn.textContent = isEnabled ? "◐" : "◑";
+      }
+    }
+    function toggleHighContrast() {
+      const hc = document.documentElement.getAttribute("data-hc") === "true";
+      applyHighContrast(!hc);
     }
     function toggleTheme() {
       const current = document.documentElement.getAttribute("data-theme");
@@ -2042,8 +2127,13 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     }
     function toggleNotifications() {
       const panel = document.getElementById("notif-panel");
+      const bell = document.getElementById("notif-bell");
       if (!panel) return;
       panel.classList.toggle("hidden");
+      if (bell) {
+        const expanded = panel.classList.contains("hidden") ? "false" : "true";
+        bell.setAttribute("aria-expanded", expanded);
+      }
     }
     function clearNotifications() {
       notifications.length = 0;
@@ -2363,6 +2453,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       }
       if(perfToggle){
         perfToggle.style.opacity = perfMode ? "1" : "0.4";
+        perfToggle.setAttribute("aria-pressed", perfMode ? "true" : "false");
       }
     }
 
@@ -4191,11 +4282,16 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
 
     function switchTab(tab){
       currentTab = tab;
-      document.querySelectorAll(".tab-btn").forEach((btn)=>{
-        btn.classList.toggle("active", btn.dataset.tab === tab);
+      document.querySelectorAll(".tab-btn[data-tab]").forEach((btn)=>{
+        const isActive = btn.dataset.tab === tab;
+        btn.classList.toggle("active", isActive);
+        btn.setAttribute("aria-selected", isActive ? "true" : "false");
+        btn.setAttribute("tabindex", isActive ? "0" : "-1");
       });
       document.querySelectorAll(".screen").forEach((el)=>{
-        el.classList.toggle("active", el.id === tab);
+        const isActive = el.id === tab;
+        el.classList.toggle("active", isActive);
+        el.setAttribute("aria-hidden", isActive ? "false" : "true");
       });
       if (!loadedTabs.has(tab)) {
         loadedTabs.add(tab);
@@ -4390,7 +4486,9 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     async function boot(){
       const savedTheme = localStorage.getItem("orchesis-theme") || "dark";
       applyTheme(savedTheme);
+      applyHighContrast(localStorage.getItem("orchesis-hc") === "true");
       bindUI();
+      switchTab("shield");
       renderNotifications();
       renderPerfIndicator();
       await pollShield();

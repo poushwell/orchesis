@@ -47,6 +47,7 @@ from orchesis.config import (
     validate_policy_warnings,
 )
 from orchesis.cost_reporter import CostReporter
+from orchesis.token_yield_report import TokenYieldReportGenerator
 from orchesis.engine import evaluate, get_cost_tracker, get_loop_detector_stats, reset_cost_tracker_daily
 from orchesis.forensics import ForensicsEngine
 from orchesis.drift import DriftDetector
@@ -3507,6 +3508,85 @@ def reliability_report(output_format: str) -> None:
     click.echo(generator.to_markdown(report))
 
 
+@main.command("token-yield-report")
+@click.option("--period", default="24h", show_default=True, help="Window: e.g. 24h, 7d")
+@click.option("--format", "output_format", type=click.Choice(["text", "markdown"]), default="text")
+@click.option("--decisions", "decisions_path", default=str(DEFAULT_DECISIONS_PATH), show_default=True)
+@click.option("--output", "output_path", type=click.Path(), default=None)
+def token_yield_report_command(
+    period: str,
+    output_format: str,
+    decisions_path: str,
+    output_path: str | None,
+) -> None:
+    """Generate Token Yield report from decisions history."""
+
+    def _period_to_hours(raw: str) -> int:
+        value = str(raw or "24h").strip().lower()
+        if value.endswith("h"):
+            try:
+                return max(1, min(24 * 31, int(value[:-1])))
+            except ValueError:
+                return 24
+        if value.endswith("d"):
+            try:
+                return max(1, min(31, int(value[:-1]))) * 24
+            except ValueError:
+                return 24
+        return 24
+
+    source = Path(decisions_path)
+    events = read_events_from_jsonl(source) if source.exists() else []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_period_to_hours(period))
+
+    rows: list[dict[str, Any]] = []
+    for event in events:
+        ts_raw = str(getattr(event, "timestamp", "") or "")
+        try:
+            ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        else:
+            ts = ts.astimezone(timezone.utc)
+        if ts < cutoff:
+            continue
+        snapshot = event.state_snapshot if isinstance(event.state_snapshot, dict) else {}
+        prompt = snapshot.get("prompt_tokens", snapshot.get("prompt_length", 0))
+        completion = snapshot.get("completion_tokens", 0)
+        rows.append(
+            {
+                "session_id": str(snapshot.get("session_id", "__global__")),
+                "agent_id": str(getattr(event, "agent_id", "unknown") or "unknown"),
+                "model": str(snapshot.get("model", "unknown") or "unknown"),
+                "prompt_tokens": int(prompt) if isinstance(prompt, int | float) else 0,
+                "completion_tokens": int(completion) if isinstance(completion, int | float) else 0,
+                "cache_hit": bool(snapshot.get("cache_hit", False)),
+                "unique_content_ratio": (
+                    float(snapshot.get("unique_content_ratio"))
+                    if isinstance(snapshot.get("unique_content_ratio"), int | float)
+                    else 1.0
+                ),
+                "cost": float(getattr(event, "cost", 0.0) or 0.0),
+                "context_collapse": bool(snapshot.get("context_collapse", False)),
+            }
+        )
+
+    generator = TokenYieldReportGenerator()
+    report = generator.generate(rows, period=period)
+    report["benchmark_comparison"] = generator.get_benchmark_comparison(report)
+    rendered = generator.export_markdown(report) if output_format == "markdown" else generator.export_text(report)
+
+    if isinstance(output_path, str) and output_path.strip():
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(rendered, encoding="utf-8")
+        click.echo(f"Token Yield report written to {target}")
+        return
+    click.echo(rendered)
+
+
 def _load_experiment_data(data_path: str) -> list[dict[str, Any]]:
     source = Path(data_path)
     text = source.read_text(encoding="utf-8")
@@ -3740,6 +3820,67 @@ def benchmark_command(
         fmt = "csv" if suffix == ".csv" else "json"
         BenchmarkSuite.export_report(report, export_path, fmt=fmt)
         click.echo(f"Exported report to {export_path}")
+
+
+@main.command("update")
+@click.option("--check", "check_only", is_flag=True, default=False, help="Check only; do not install")
+@click.option("--install", "do_install", is_flag=True, default=False, help="Install update automatically")
+@click.option("--channel", type=click.Choice(["stable", "beta"], case_sensitive=False), default="stable")
+def update_command(check_only: bool, do_install: bool, channel: str) -> None:
+    """Check for and optionally install Orchesis updates."""
+
+    def _version_key(value: str) -> tuple[int, ...]:
+        parts: list[int] = []
+        for chunk in str(value).replace("-", ".").split("."):
+            if chunk.isdigit():
+                parts.append(int(chunk))
+                continue
+            digits = "".join(ch for ch in chunk if ch.isdigit())
+            if digits:
+                parts.append(int(digits))
+        return tuple(parts)
+
+    click.echo("Checking for updates...")
+    current = str(__version__)
+    click.echo(f"Current version: {current}")
+    url = "https://pypi.org/pypi/orchesis/json"
+    latest: str | None = None
+    try:
+        with urlopen(url, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        info = payload.get("info", {}) if isinstance(payload, dict) else {}
+        latest_raw = info.get("version")
+        if isinstance(latest_raw, str) and latest_raw.strip():
+            latest = latest_raw.strip()
+    except Exception:
+        latest = None
+
+    if latest is None:
+        click.echo("Latest version:  unknown")
+        click.echo("Could not check updates (network error).")
+        return
+
+    click.echo(f"Latest version:  {latest}")
+    if _version_key(latest) <= _version_key(current):
+        click.echo(f"✓ Orchesis {current} is up to date")
+        return
+
+    click.echo("Update available!")
+    if check_only:
+        return
+    if do_install:
+        cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "orchesis"]
+        if str(channel).lower() == "beta":
+            cmd.append("--pre")
+        result = subprocess.run(cmd, check=False)
+        if int(result.returncode) == 0:
+            click.echo("Update installed successfully.")
+        else:
+            click.echo("Update installation failed.")
+        return
+    click.echo("")
+    click.echo("Run: pip install --upgrade orchesis")
+    click.echo("Or:  orchesis update --install  (auto-installs)")
 
 
 @main.command("publish")

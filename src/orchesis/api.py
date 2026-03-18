@@ -62,6 +62,7 @@ from orchesis.session_replay import SessionReplay
 from orchesis.community_intel import CommunityIntel
 from orchesis.request_inspector import RequestInspector
 from orchesis.token_yield import TokenYieldTracker
+from orchesis.token_yield_report import TokenYieldReportGenerator
 from orchesis.threat_feed import ThreatFeed
 from orchesis.signature_editor import SignatureEditor
 from orchesis.alert_rules import AlertRule, AlertRulesEngine
@@ -602,6 +603,56 @@ def create_api_app(
         source = Path(app.state.decisions_log)
         events = read_events_from_jsonl(source) if source.exists() else []
         return SessionHeatmap().get_daily_summary(events)
+
+    def _period_hours(period: str) -> int:
+        value = str(period or "24h").strip().lower()
+        if value.endswith("h"):
+            try:
+                return max(1, min(24 * 31, int(value[:-1])))
+            except ValueError:
+                return 24
+        if value.endswith("d"):
+            try:
+                return max(1, min(31, int(value[:-1]))) * 24
+            except ValueError:
+                return 24
+        return 24
+
+    def _build_token_yield_report(period: str) -> dict[str, Any]:
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=_period_hours(period))
+        rows: list[dict[str, Any]] = []
+        for event in events:
+            ts = _parse_health_ts(str(getattr(event, "timestamp", "") or ""))
+            if ts is None or ts < cutoff:
+                continue
+            snapshot = getattr(event, "state_snapshot", {})
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            prompt = snapshot.get("prompt_tokens", snapshot.get("prompt_length", 0))
+            completion = snapshot.get("completion_tokens", 0)
+            rows.append(
+                {
+                    "session_id": str(snapshot.get("session_id", "__global__")),
+                    "agent_id": str(getattr(event, "agent_id", "unknown") or "unknown"),
+                    "model": str(snapshot.get("model", "unknown") or "unknown"),
+                    "prompt_tokens": int(prompt) if isinstance(prompt, int | float) else 0,
+                    "completion_tokens": int(completion) if isinstance(completion, int | float) else 0,
+                    "cache_hit": bool(snapshot.get("cache_hit", False)),
+                    "unique_content_ratio": (
+                        float(snapshot.get("unique_content_ratio"))
+                        if isinstance(snapshot.get("unique_content_ratio"), int | float)
+                        else 1.0
+                    ),
+                    "cost": float(getattr(event, "cost", 0.0) or 0.0),
+                    "context_collapse": bool(snapshot.get("context_collapse", False)),
+                }
+            )
+        generator = TokenYieldReportGenerator()
+        report = generator.generate(rows, period=period)
+        report["benchmark_comparison"] = generator.get_benchmark_comparison(report)
+        return report
 
     def _build_budget_advice_payload() -> dict[str, Any]:
         source = Path(app.state.decisions_log)
@@ -1755,15 +1806,37 @@ def create_api_app(
     @app.get("/api/v1/token-yield/{session_id}")
     def token_yield_session(
         session_id: str,
+        request: Request,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_auth(authorization)
+        if str(session_id).strip().lower() == "report":
+            period = str(request.query_params.get("period", "24h"))
+            return _build_token_yield_report(period)
         return app.state.token_yield.get_yield(session_id)
 
     @app.get("/api/v1/token-yield/global")
     def token_yield_global(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
         return app.state.token_yield.get_global_stats()
+
+    @app.get("/api/v1/token-yield/report")
+    def token_yield_report(
+        period: str = "24h",
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return _build_token_yield_report(period)
+
+    @app.get("/api/v1/token-yield/report/markdown")
+    def token_yield_report_markdown(
+        period: str = "24h",
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        generator = TokenYieldReportGenerator()
+        report = _build_token_yield_report(period)
+        return {"period": period, "markdown": generator.export_markdown(report)}
 
     @app.get("/api/v1/threat-feed/status")
     def threat_feed_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:

@@ -233,6 +233,35 @@ def test_search_results_markup() -> None:
     assert "navigateTo(" in html
 
 
+def test_aria_roles_present() -> None:
+    html = get_dashboard_html()
+    assert 'role="tablist"' in html
+    assert 'role="tab"' in html
+    assert 'role="tabpanel"' in html
+    assert 'aria-label="Toggle performance mode"' in html
+    assert 'role="region" aria-label="Security metrics"' in html
+
+
+def test_skip_link_present() -> None:
+    html = get_dashboard_html()
+    assert '<a href="#main-content" class="skip-link">Skip to main content</a>' in html
+    assert 'id="main-content"' in html
+
+
+def test_high_contrast_toggle() -> None:
+    html = get_dashboard_html()
+    assert 'id="hc-toggle"' in html
+    assert "const HC_COLORS = {" in html
+    assert "function toggleHighContrast()" in html
+    assert 'localStorage.setItem("orchesis-hc"' in html
+
+
+def test_focus_styles_defined() -> None:
+    html = get_dashboard_html()
+    assert ":focus-visible {" in html
+    assert "outline: 2px solid var(--accent);" in html
+
+
 def test_dashboard_html_size_reasonable() -> None:
     html = get_dashboard_html()
     assert len(html) > 5_000
