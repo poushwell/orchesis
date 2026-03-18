@@ -74,6 +74,8 @@ from orchesis.scanner_server import run_scanner_http_server
 from orchesis.scenarios import AdversarialScenarios
 from orchesis.experiment_runner import NLCEExperimentRunner
 from orchesis.nlce_exporter import NLCEPaperExporter
+from orchesis.nlce_paper import NLCEPaper
+from orchesis.arxiv_validator import ArxivSubmissionValidator
 from orchesis.vibe_audit import VibeCodeAuditor
 from orchesis.integrity import IntegrityMonitor, build_integrity_alert_callback
 from orchesis.hooks import ClaudeCodeHooks, evaluate_hook_tool, log_hook_tool
@@ -98,7 +100,9 @@ from orchesis.structured_log import StructuredLogger
 from orchesis.templates import TEMPLATE_NAMES, load_template_text
 from orchesis.policy_templates import PolicyTemplateManager, POLICY_TEMPLATES
 from orchesis.policy_diff import PolicyDiff
+from orchesis.policy_spec import PolicySpec
 from orchesis.evidence_record import EvidenceRecord
+from orchesis.arc_readiness import AgentReadinessCertifier
 from orchesis.migrator import PolicyMigrator
 from orchesis.backup_manager import BackupManager
 from orchesis import __version__
@@ -3762,6 +3766,112 @@ def nlce_export_command(output_dir: str, section: str | None) -> None:
     click.echo(json.dumps(files, ensure_ascii=False, indent=2))
 
 
+@main.command("nlce-paper")
+@click.option("--generate", "generate_all", is_flag=True, default=False, help="Generate full paper package")
+@click.option(
+    "--section",
+    "section",
+    type=click.Choice(["abstract", "results-table"], case_sensitive=False),
+    default=None,
+    help="Generate one section",
+)
+@click.option("--checklist", "show_checklist", is_flag=True, default=False, help="Show arXiv checklist")
+@click.option("--export-latex", "export_latex", is_flag=True, default=False, help="Export LaTeX package")
+@click.option("--output", "output_dir", default="paper", show_default=True, help="Output directory")
+def nlce_paper_command(
+    generate_all: bool,
+    section: str | None,
+    show_checklist: bool,
+    export_latex: bool,
+    output_dir: str,
+) -> None:
+    """Generate full NLCE paper package."""
+    paper = NLCEPaper()
+    target = Path(output_dir)
+    target.mkdir(parents=True, exist_ok=True)
+
+    if show_checklist:
+        click.echo(json.dumps(paper.get_submission_checklist(), ensure_ascii=False, indent=2))
+        return
+
+    selected = str(section or "").strip().lower()
+    if selected == "abstract":
+        path = target / "abstract.md"
+        path.write_text(paper.generate_abstract() + "\n", encoding="utf-8")
+        click.echo(str(path))
+        return
+    if selected == "results-table":
+        path = target / "results_table.tex"
+        path.write_text(paper.generate_results_table(), encoding="utf-8")
+        click.echo(str(path))
+        return
+
+    if export_latex:
+        files = paper.export_latex(str(target))
+        click.echo(json.dumps(files, ensure_ascii=False, indent=2))
+        return
+
+    if generate_all or (not section and not show_checklist and not export_latex):
+        files = paper.export_markdown(str(target))
+        click.echo(json.dumps(files, ensure_ascii=False, indent=2))
+        return
+
+
+def _load_paper_from_dir(paper_dir: str) -> dict[str, Any]:
+    root = Path(paper_dir)
+    payload: dict[str, Any] = {}
+    json_path = root / "paper.json"
+    if json_path.exists():
+        try:
+            raw = json.loads(json_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                payload = dict(raw)
+        except json.JSONDecodeError:
+            payload = {}
+    for section in ("abstract", "introduction", "background", "methodology", "results", "discussion", "conclusion"):
+        path = root / f"{section}.md"
+        if path.exists():
+            text = path.read_text(encoding="utf-8")
+            if text.startswith("# "):
+                text = "\n".join(text.splitlines()[2:]).strip()
+            payload[section] = text
+    refs = root / "references.txt"
+    if refs.exists():
+        lines = [line.strip() for line in refs.read_text(encoding="utf-8").splitlines() if line.strip()]
+        payload["references"] = lines
+    if "title" not in payload:
+        payload["title"] = "Network-Level Context Engineering: Theory and Practice"
+    if "references" not in payload:
+        payload["references"] = []
+    return payload
+
+
+@main.command("arxiv-validate")
+@click.option("--paper", "paper_dir", type=click.Path(exists=True, file_okay=False), required=True)
+@click.option("--fix-warnings", "fix_warnings", is_flag=True, default=False)
+def arxiv_validate_command(paper_dir: str, fix_warnings: bool) -> None:
+    """Validate paper package for arXiv submission."""
+    validator = ArxivSubmissionValidator()
+    paper = _load_paper_from_dir(paper_dir)
+    result = validator.validate(paper)
+    if fix_warnings and isinstance(paper.get("references"), list):
+        refs = validator.format_references(paper["references"])
+        (Path(paper_dir) / "references.txt").write_text(refs, encoding="utf-8")
+        result = validator.validate(_load_paper_from_dir(paper_dir))
+    click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+@main.command("arxiv-package")
+@click.option("--paper", "paper_dir", type=click.Path(exists=True, file_okay=False), required=True)
+@click.option("--output", "output_dir", type=click.Path(), required=True)
+def arxiv_package_command(paper_dir: str, output_dir: str) -> None:
+    """Generate arXiv submission package files."""
+    validator = ArxivSubmissionValidator()
+    paper = _load_paper_from_dir(paper_dir)
+    pkg = validator.generate_submission_package(paper, output_dir=output_dir)
+    click.echo(json.dumps(pkg, ensure_ascii=False, indent=2))
+
+
 @main.command("vibe-audit")
 @click.option("--code", "inline_code", default=None, help="Inline code to audit")
 @click.option("--file", "file_path", type=click.Path(exists=True), default=None, help="Single file to audit")
@@ -4140,6 +4250,61 @@ def template_command(
     click.echo(f"Applied template '{template_name}' to {output_path}")
 
 
+@main.command("spec")
+@click.option("--validate", "validate_path", type=click.Path(exists=True), default=None)
+@click.option("--generate-doc", "generate_doc", is_flag=True, default=False)
+@click.option("--output", "output_path", type=click.Path(), default="spec.md")
+@click.option("--owasp-alignment", "owasp_alignment", is_flag=True, default=False)
+@click.option("--eu-ai-act-alignment", "eu_ai_act_alignment", is_flag=True, default=False)
+@click.option("--version", "show_version", is_flag=True, default=False)
+def spec_command(
+    validate_path: str | None,
+    generate_doc: bool,
+    output_path: str,
+    owasp_alignment: bool,
+    eu_ai_act_alignment: bool,
+    show_version: bool,
+) -> None:
+    """Policy-as-Code v1.0 spec utilities."""
+    selected = int(generate_doc) + int(owasp_alignment) + int(eu_ai_act_alignment) + int(show_version) + int(
+        isinstance(validate_path, str) and bool(validate_path.strip())
+    )
+    if selected == 0:
+        raise click.ClickException(
+            "Choose one action: --validate, --generate-doc, --owasp-alignment, --eu-ai-act-alignment, or --version"
+        )
+    if selected > 1:
+        raise click.ClickException("Choose only one action at a time")
+
+    spec = PolicySpec()
+    if show_version:
+        click.echo(spec.get_spec_version())
+        return
+    if owasp_alignment:
+        click.echo(json.dumps(spec.export_owasp_alignment(), ensure_ascii=False, indent=2))
+        return
+    if eu_ai_act_alignment:
+        click.echo(json.dumps(spec.export_eu_ai_act_alignment(), ensure_ascii=False, indent=2))
+        return
+    if generate_doc:
+        doc = spec.generate_spec_doc()
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(doc, encoding="utf-8")
+        click.echo(f"Spec documentation saved to {out}")
+        return
+    if isinstance(validate_path, str) and validate_path.strip():
+        path = Path(validate_path)
+        try:
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, YAMLError) as error:
+            raise click.ClickException(f"Failed to read policy: {error}") from error
+        policy = loaded if isinstance(loaded, dict) else {}
+        result = spec.validate(policy)
+        click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        raise SystemExit(0 if bool(result.get("valid", False)) else 1)
+
+
 @main.command("diff")
 @click.argument("policy_a", type=click.Path(exists=True))
 @click.argument("policy_b", type=click.Path(exists=True))
@@ -4268,6 +4433,72 @@ def ari_check_command(agent_id: str, min_score: int, config_path: str) -> None:
         raise SystemExit(0)
     click.echo(f"✗ ARI score: {score}/100 — {result.verdict}")
     raise SystemExit(1)
+
+
+@main.command("arc-check")
+@click.option("--agent", "agent_id", required=True)
+@click.option("--min-score", type=int, default=75, show_default=True)
+@click.option("--policy", "policy_path", default="orchesis.yaml", show_default=True)
+def arc_check_command(agent_id: str, min_score: int, policy_path: str) -> None:
+    """CI/CD gate for ARC readiness certification."""
+    policy: dict[str, Any] = {}
+    if Path(policy_path).exists():
+        try:
+            policy = load_policy(policy_path)
+        except Exception:
+            policy = {}
+    readiness_cfg = policy.get("agent_readiness", {}) if isinstance(policy.get("agent_readiness"), dict) else {}
+    metrics_store = readiness_cfg.get("metrics", {}) if isinstance(readiness_cfg.get("metrics"), dict) else {}
+    metrics = metrics_store.get(agent_id, {}) if isinstance(metrics_store.get(agent_id), dict) else {}
+    certifier = AgentReadinessCertifier()
+    result = certifier.certify(agent_id=agent_id, metrics=metrics, policy=policy)
+    score = float(result.get("score", 0.0))
+    if score >= float(min_score) and bool(result.get("certified", False)):
+        click.echo(f"✓ ARC score: {int(round(score))}/100 — {result.get('grade', 'ARC-C')}")
+        raise SystemExit(0)
+    click.echo(f"✗ ARC score: {int(round(score))}/100 — {result.get('grade', 'NOT_CERTIFIED')}")
+    raise SystemExit(1)
+
+
+@main.command("arc-certify")
+@click.option("--agent", "agent_id", required=True)
+@click.option("--policy", "policy_path", default="orchesis.yaml", show_default=True)
+def arc_certify_command(agent_id: str, policy_path: str) -> None:
+    """Issue ARC certificate for an agent when threshold is met."""
+    policy: dict[str, Any] = {}
+    if Path(policy_path).exists():
+        try:
+            policy = load_policy(policy_path)
+        except Exception:
+            policy = {}
+    readiness_cfg = policy.get("agent_readiness", {}) if isinstance(policy.get("agent_readiness"), dict) else {}
+    metrics_store = readiness_cfg.get("metrics", {}) if isinstance(readiness_cfg.get("metrics"), dict) else {}
+    metrics = metrics_store.get(agent_id, {}) if isinstance(metrics_store.get(agent_id), dict) else {}
+    certifier = AgentReadinessCertifier()
+    result = certifier.certify(agent_id=agent_id, metrics=metrics, policy=policy)
+    click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+    raise SystemExit(0 if bool(result.get("certified", False)) else 1)
+
+
+@main.command("arc-list")
+@click.option("--policy", "policy_path", default="orchesis.yaml", show_default=True)
+def arc_list_command(policy_path: str) -> None:
+    """List ARC certificates issued in this command run."""
+    policy: dict[str, Any] = {}
+    if Path(policy_path).exists():
+        try:
+            policy = load_policy(policy_path)
+        except Exception:
+            policy = {}
+    readiness_cfg = policy.get("agent_readiness", {}) if isinstance(policy.get("agent_readiness"), dict) else {}
+    metrics_store = readiness_cfg.get("metrics", {}) if isinstance(readiness_cfg.get("metrics"), dict) else {}
+    certifier = AgentReadinessCertifier()
+    if isinstance(metrics_store, dict):
+        for aid, metrics in metrics_store.items():
+            if isinstance(aid, str) and isinstance(metrics, dict):
+                certifier.certify(agent_id=aid, metrics=metrics, policy=policy)
+    rows = certifier.list_certificates()
+    click.echo(json.dumps({"certificates": rows, "total": len(rows)}, ensure_ascii=False, indent=2))
 
 
 @main.command("threat-feed")

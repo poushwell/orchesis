@@ -91,10 +91,15 @@ from orchesis.anomaly_predictor import AnomalyPredictor
 from orchesis.policy_optimizer import PolicyOptimizer
 from orchesis.byzantine_detector import ByzantineDetector
 from orchesis.raft_context import RaftContextProtocol
+from orchesis.gossip_protocol import GossipProtocol
 from orchesis.incident_manager import IncidentManager
 from orchesis.knowledge_base import OrchesisKnowledgeBase
 from orchesis.quorum_sensing import QuorumSensor
 from orchesis.pid_controller_v2 import PIDControllerV2
+from orchesis.kalman_estimator import KalmanStateEstimator
+from orchesis.otel_bridge import OpenTelemetryBridge
+from orchesis.vickrey_allocator import VickreyBudgetAllocator
+from orchesis.arc_readiness import AgentReadinessCertifier
 from orchesis import __version__
 
 
@@ -188,6 +193,25 @@ def create_api_app(
         else {}
     )
     app.state.pid_controller_v2 = PIDControllerV2(pid_cfg)
+    kalman_cfg = (
+        current_version.policy.get("kalman_estimator")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("kalman_estimator"), dict)
+        else {}
+    )
+    app.state.kalman_estimator = KalmanStateEstimator(kalman_cfg)
+    otel_bridge_cfg = (
+        current_version.policy.get("otel_bridge")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("otel_bridge"), dict)
+        else {}
+    )
+    app.state.otel_bridge = OpenTelemetryBridge(otel_bridge_cfg)
+    vickrey_cfg = (
+        current_version.policy.get("vickrey_allocator")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("vickrey_allocator"), dict)
+        else {}
+    )
+    app.state.vickrey_allocator = VickreyBudgetAllocator(vickrey_cfg)
+    app.state.arc_readiness = AgentReadinessCertifier()
     cost_attribution_cfg = (
         current_version.policy.get("cost_attribution")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("cost_attribution"), dict)
@@ -240,6 +264,7 @@ def create_api_app(
     app.state.policy_optimizer = PolicyOptimizer()
     app.state.byzantine_detector = ByzantineDetector()
     app.state.raft_context = RaftContextProtocol()
+    app.state.gossip_protocol = GossipProtocol()
     flywheel_cfg = (
         current_version.policy.get("data_flywheel")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("data_flywheel"), dict)
@@ -1828,6 +1853,142 @@ def create_api_app(
         metrics = {"values": values[-30:], "token_frequencies": token_freq[-30:], "latencies_ms": latencies[-30:]}
         return app.state.pid_controller_v2.get_warning_level(session_id=session_id, metrics=metrics)
 
+    @app.post("/api/v1/kalman/{session_id}/update")
+    def kalman_update(
+        session_id: str,
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        tracker = app.state.kalman_estimator
+        tracker.predict(session_id)
+        state = tracker.update(session_id, payload)
+        return {"session_id": session_id, "state": state, "alert": tracker.get_alert_level(session_id)}
+
+    @app.get("/api/v1/kalman/{session_id}/state")
+    def kalman_state(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        tracker = app.state.kalman_estimator
+        return {"session_id": session_id, "state": tracker.get_state(session_id)}
+
+    @app.get("/api/v1/kalman/{session_id}/alert")
+    def kalman_alert(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        tracker = app.state.kalman_estimator
+        return {
+            "session_id": session_id,
+            "alert": tracker.get_alert_level(session_id),
+            "state": tracker.get_state(session_id),
+        }
+
+    @app.get("/api/v1/kalman/sessions")
+    def kalman_sessions(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        tracker = app.state.kalman_estimator
+        sessions = tracker.get_all_sessions()
+        return {"sessions": sessions, "total": len(sessions)}
+
+    @app.get("/api/v1/otel/metrics")
+    def otel_metrics(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.otel_bridge.export_otlp_json()
+
+    @app.post("/api/v1/otel/flush")
+    def otel_flush(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {"flushed": int(app.state.otel_bridge.flush())}
+
+    @app.get("/api/v1/otel/stats")
+    def otel_stats(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.otel_bridge.get_stats()
+
+    @app.post("/api/v1/vickrey/bid")
+    def vickrey_bid(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        agent_id = str(payload.get("agent_id", "") or "").strip()
+        bid_tokens = payload.get("bid_tokens", 0)
+        task_priority = str(payload.get("task_priority", "medium") or "medium")
+        if not agent_id or not isinstance(bid_tokens, int | float):
+            raise HTTPException(status_code=400, detail={"error": "agent_id and bid_tokens are required"})
+        return app.state.vickrey_allocator.submit_bid(
+            agent_id=agent_id,
+            bid_tokens=int(bid_tokens),
+            task_priority=task_priority,
+        )
+
+    @app.post("/api/v1/vickrey/auction")
+    def vickrey_auction(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.vickrey_allocator.run_auction()
+
+    @app.get("/api/v1/vickrey/stats")
+    def vickrey_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.vickrey_allocator.get_auction_stats()
+
+    @app.get("/api/v1/vickrey/{agent_id}/allocation")
+    def vickrey_allocation(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {"agent_id": agent_id, "allocation": app.state.vickrey_allocator.get_allocation(agent_id)}
+
+    @app.post("/api/v1/arc/certify/{agent_id}")
+    def arc_certify(
+        agent_id: str,
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        policy = app.state.current_version.policy if isinstance(app.state.current_version.policy, dict) else {}
+        readiness_cfg = policy.get("agent_readiness", {}) if isinstance(policy.get("agent_readiness"), dict) else {}
+        metrics_store = readiness_cfg.get("metrics", {}) if isinstance(readiness_cfg.get("metrics"), dict) else {}
+        policy_metrics = metrics_store.get(agent_id, {}) if isinstance(metrics_store.get(agent_id), dict) else {}
+        provided_metrics = payload.get("metrics", {})
+        merged_metrics = dict(policy_metrics)
+        if isinstance(provided_metrics, dict):
+            merged_metrics.update(provided_metrics)
+        return app.state.arc_readiness.certify(agent_id=agent_id, metrics=merged_metrics, policy=policy)
+
+    @app.get("/api/v1/arc/{agent_id}/certificate")
+    def arc_certificate(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        matches = [item for item in app.state.arc_readiness.list_certificates() if item.get("agent_id") == agent_id]
+        if not matches:
+            raise HTTPException(status_code=404, detail={"error": "certificate not found"})
+        return matches[-1]
+
+    @app.get("/api/v1/arc/certificates")
+    def arc_certificates(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        rows = app.state.arc_readiness.list_certificates()
+        return {"certificates": rows, "total": len(rows)}
+
     @app.get("/api/v1/compliance/report/{agent_id}")
     def compliance_report_endpoint(
         agent_id: str,
@@ -2342,6 +2503,48 @@ def create_api_app(
     ) -> dict[str, Any]:
         _require_auth(authorization)
         return app.state.raft_context.get_raft_stats()
+
+    @app.post("/api/v1/gossip/broadcast")
+    def gossip_broadcast_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        key = str(body.get("key", "")).strip()
+        value = str(body.get("value", ""))
+        source_agent = str(body.get("source_agent", "")).strip()
+        if not key:
+            raise HTTPException(status_code=400, detail="key is required")
+        if not source_agent:
+            raise HTTPException(status_code=400, detail="source_agent is required")
+        message_id = app.state.gossip_protocol.broadcast(
+            key=key,
+            value=value,
+            source_agent=source_agent,
+        )
+        return {"message_id": message_id}
+
+    @app.post("/api/v1/gossip/propagate")
+    def gossip_propagate_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {"propagated": app.state.gossip_protocol.propagate()}
+
+    @app.get("/api/v1/gossip/convergence")
+    def gossip_convergence_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.gossip_protocol.get_convergence_status()
+
+    @app.get("/api/v1/gossip/{agent_id}/messages")
+    def gossip_messages_endpoint(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {"messages": app.state.gossip_protocol.receive(agent_id)}
 
     @app.post("/api/v1/tools/analyze")
     def analyze_tools_endpoint(

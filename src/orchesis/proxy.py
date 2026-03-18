@@ -87,6 +87,7 @@ from orchesis.plugin_system import (
     ResponseValidatorPlugin,
 )
 from orchesis.cost_optimizer import CostOptimizer
+from orchesis.uci_compression import UCICompressor
 from orchesis.dashboard import get_dashboard_html
 from orchesis.error_responses import ErrorResponseBuilder
 from orchesis.air_export import export_session_to_air
@@ -102,6 +103,7 @@ from orchesis.threat_intel import ThreatIntelConfig, ThreatMatcher
 from orchesis.semantic_cache import SemanticCache, SemanticCacheConfig
 from orchesis.spend_rate import SpendRateDetector, SpendWindow
 from orchesis.request_prioritizer import RequestPrioritizer
+from orchesis.injection_protocol import ContextInjectionProtocol
 from orchesis.apoptosis import ApoptosisEngine
 from orchesis.core.context_profile_logger import log_context_profile
 from orchesis.core.evidence_ledger import EvidenceLedger
@@ -2109,6 +2111,10 @@ class LLMHTTPProxy:
         self._context_router = ContextStrategyRouter()
         prioritizer_cfg = self._policy.get("request_prioritizer")
         self._prioritizer = RequestPrioritizer(prioritizer_cfg if isinstance(prioritizer_cfg, dict) else {})
+        injection_cfg = self._policy.get("injection_protocol")
+        self._injection_protocol: ContextInjectionProtocol | None = None
+        if isinstance(injection_cfg, dict):
+            self._injection_protocol = ContextInjectionProtocol(injection_cfg)
         context_window_cfg = self._policy.get("context_window_optimizer")
         self._context_window_optimizer: ContextWindowOptimizer | None = None
         if isinstance(context_window_cfg, dict) and bool(context_window_cfg.get("enabled", False)):
@@ -2155,6 +2161,10 @@ class LLMHTTPProxy:
         self._cost_optimizer: CostOptimizer | None = None
         if isinstance(cost_opt_cfg, dict) and bool(cost_opt_cfg.get("enabled", False)):
             self._cost_optimizer = CostOptimizer(cost_opt_cfg)
+        uci_cfg = self._policy.get("uci_compression")
+        self._uci_compressor: UCICompressor | None = None
+        if isinstance(uci_cfg, dict) and bool(uci_cfg.get("enabled", False)):
+            self._uci_compressor = UCICompressor(uci_cfg)
         self._server: HTTPServer | None = None
         self._start_time = time.time()
         self._stats_lock = threading.Lock()
@@ -2275,6 +2285,8 @@ class LLMHTTPProxy:
         }
         if self._cost_optimizer is not None:
             payload["cost_optimizer"] = {"savings": self._cost_optimizer.get_savings_report()}
+        if self._uci_compressor is not None:
+            payload["uci_compression"] = self._uci_compressor.get_stats()
         payload["cost_velocity"] = self._cost_velocity.get_stats()
         if self._community is not None:
             payload["community"] = self._community.get_status()
@@ -4295,6 +4307,50 @@ class LLMHTTPProxy:
         ctx.proc_result["priority"] = assigned_priority
         ctx.session_headers["X-Orchesis-Priority"] = assigned_priority
         messages = ctx.body.get("messages")
+        if self._injection_protocol is not None and isinstance(messages, list):
+            stats_obj = self.stats
+            request_count = (
+                int(getattr(stats_obj, "requests_total", 0) or 0)
+                if not isinstance(stats_obj, dict)
+                else int(stats_obj.get("requests_total", 0) or 0)
+            )
+            session_state = {
+                "session_id": str(ctx.session_id or "default"),
+                "request_count": request_count,
+            }
+            metrics = {
+                "quality_score": float(ctx.proc_result.get("quality_score", 1.0) or 1.0),
+                "budget_level": str(ctx.proc_result.get("context_budget_level", "normal")),
+            }
+            decision = self._injection_protocol.should_inject(session_state, metrics)
+            if bool(decision.get("inject", False)):
+                available_context = ctx.body.get("orchesis_context")
+                context_pool = (
+                    available_context
+                    if isinstance(available_context, list)
+                    else [
+                        item
+                        for item in messages
+                        if isinstance(item, dict) and str(item.get("role", "")).lower() in {"assistant", "system"}
+                    ]
+                )
+                selected_content = self._injection_protocol.select_content(
+                    context_pool,
+                    int(self._injection_protocol.max_injection_tokens),
+                )
+                result = self._injection_protocol.inject(messages, selected_content)
+                merged_messages = result.get("messages")
+                if isinstance(merged_messages, list):
+                    ctx.body["messages"] = validate_tool_chain(merged_messages)
+                    messages = ctx.body.get("messages")
+                ctx.proc_result["injection_protocol"] = {
+                    "inject": bool(decision.get("inject", False)),
+                    "reason": str(decision.get("reason", "")),
+                    "urgency": str(decision.get("urgency", "low")),
+                    "injected_count": int(result.get("injected_count", 0) or 0),
+                    "tokens_injected": int(result.get("tokens_injected", 0) or 0),
+                    "injection_id": str(result.get("injection_id", "")),
+                }
         if self._apoptosis is not None and self._apoptosis.enabled and isinstance(messages, list) and messages:
             findings = self._apoptosis.scan(messages)
             if findings:
@@ -4349,6 +4405,21 @@ class LLMHTTPProxy:
                 optimized_messages, opt_stats = self._cost_optimizer.optimize(messages)
                 ctx.body["messages"] = validate_tool_chain(optimized_messages)
                 ctx.proc_result["cost_optimization"] = opt_stats
+        if self._uci_compressor is not None:
+            messages = ctx.body.get("messages")
+            if isinstance(messages, list) and messages:
+                budget_tokens = int(
+                    ctx.body.get("max_completion_tokens", ctx.body.get("max_tokens", 0)) or 0
+                )
+                if budget_tokens <= 0:
+                    budget_tokens = max(1, self._context_budget.estimate_tokens(messages)) if self._context_budget else max(
+                        1, len(messages) * 80
+                    )
+                result = self._uci_compressor.compress(messages, budget_tokens)
+                compressed_messages = result.get("messages")
+                if isinstance(compressed_messages, list):
+                    ctx.body["messages"] = validate_tool_chain(compressed_messages)
+                ctx.proc_result["uci_compression"] = result
         if self._context_window_optimizer is not None:
             messages = ctx.body.get("messages")
             if isinstance(messages, list) and messages:
