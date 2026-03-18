@@ -129,6 +129,34 @@ def test_dashboard_html_contains_javascript() -> None:
     assert "const poolHitRatio =" in html
 
 
+def test_viewport_meta_present() -> None:
+    html = get_dashboard_html()
+    assert '<meta name="viewport" content="width=device-width, initial-scale=1.0">' in html
+
+
+def test_responsive_breakpoints_defined() -> None:
+    html = get_dashboard_html()
+    assert "@media (max-width: 768px)" in html
+    assert "@media (max-width: 480px)" in html
+    assert ".nav-tabs { overflow-x: auto; white-space: nowrap;" in html
+    assert ".stats-grid { grid-template-columns: repeat(2, 1fr); }" in html
+
+
+def test_mobile_nav_toggle_present() -> None:
+    html = get_dashboard_html()
+    assert "function toggleMobileNav()" in html
+    assert "nav.classList.toggle('mobile-open');" in html
+    assert 'id="mobile-nav-toggle"' in html
+    assert 'id="nav-tabs"' in html
+
+
+def test_touch_targets_sized() -> None:
+    html = get_dashboard_html()
+    assert "min-height: 44px;" in html
+    assert "button {" in html
+    assert "min-height: 36px;" in html
+
+
 def test_theme_toggle_button_present() -> None:
     html = get_dashboard_html()
     assert 'id="theme-toggle"' in html
@@ -387,6 +415,22 @@ def test_approvals_approve_button() -> None:
 def test_approvals_deny_button() -> None:
     html = get_dashboard_html()
     assert "DENY" in html
+
+
+def test_version_badge_present() -> None:
+    html = get_dashboard_html()
+    assert 'id="version-badge"' in html
+    assert "showChangelog()" in html
+    assert "v0.2.1" in html
+
+
+def test_changelog_modal_markup() -> None:
+    html = get_dashboard_html()
+    assert 'id="changelog-modal"' in html
+    assert 'id="changelog-content"' in html
+    assert "function showChangelog()" in html
+    assert "function closeChangelog()" in html
+    assert "function renderChangelog(entries)" in html
 
 
 # Overview endpoint tests (8)

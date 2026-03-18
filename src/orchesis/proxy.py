@@ -59,6 +59,7 @@ from orchesis.policy_store import PolicyStore
 from orchesis.state import RateLimitTracker
 from orchesis.structured_log import StructuredLogger
 from orchesis.telemetry import JsonlEmitter
+from orchesis.request_sampler import RequestSampler
 from orchesis.webhooks import WebhookConfig, WebhookEmitter
 from orchesis.request_parser import ParsedResponse, parse_request, parse_response
 from orchesis.recorder import SessionRecord, SessionRecorder
@@ -78,6 +79,13 @@ from orchesis.thompson_router import ThompsonRouter
 from orchesis.agent_discovery import AgentDiscovery
 from orchesis.tool_policy import ToolPolicyEngine
 from orchesis.cost_velocity import CostVelocity
+from orchesis.plugin_system import (
+    PluginRegistry,
+    RequestEnricherPlugin,
+    RequestLoggerPlugin,
+    ResponseValidatorPlugin,
+)
+from orchesis.cost_optimizer import CostOptimizer
 from orchesis.dashboard import get_dashboard_html
 from orchesis.error_responses import ErrorResponseBuilder
 from orchesis.air_export import export_session_to_air
@@ -1164,6 +1172,12 @@ def create_proxy_app(
         else {}
     )
     recording_cfg = current_policy.get("recording") if isinstance(current_policy.get("recording"), dict) else {}
+    sampling_cfg = (
+        recording_cfg.get("sampling")
+        if isinstance(recording_cfg.get("sampling"), dict)
+        else {"rate": 1.0, "strategy": "always_block", "always_record_blocks": True}
+    )
+    request_sampler = RequestSampler(sampling_cfg)
     recorder = (
         SessionRecorder(
             storage_path=str(recording_cfg.get("storage_path", ".orchesis/sessions")),
@@ -1182,7 +1196,22 @@ def create_proxy_app(
     event_bus = EventBus()
     metrics = MetricsCollector()
     decisions_log_path = os.getenv("DECISIONS_LOG_PATH", ".orchesis/decisions.jsonl")
-    _ = event_bus.subscribe(JsonlEmitter(decisions_log_path))
+    class _SampledJsonlEmitter:
+        def __init__(self, emitter: JsonlEmitter, sampler: RequestSampler) -> None:
+            self._emitter = emitter
+            self._sampler = sampler
+
+        def set_sampler(self, sampler: RequestSampler) -> None:
+            self._sampler = sampler
+
+        def emit(self, event: dict[str, Any]) -> None:
+            if isinstance(event, dict) and "decision" in event:
+                if not self._sampler.should_record(event):
+                    return
+            self._emitter.emit(event)
+
+    sampled_jsonl = _SampledJsonlEmitter(JsonlEmitter(decisions_log_path), request_sampler)
+    _ = event_bus.subscribe(sampled_jsonl)
     _ = event_bus.subscribe(metrics)
     _ = event_bus.subscribe(OTelEmitter(".orchesis/traces.jsonl"))
     webhook_subscriber_ids: list[int] = []
@@ -1350,6 +1379,12 @@ def create_proxy_app(
             recording_cfg = (
                 current_policy.get("recording") if isinstance(current_policy.get("recording"), dict) else {}
             )
+            sampling_cfg_reload = (
+                recording_cfg.get("sampling")
+                if isinstance(recording_cfg.get("sampling"), dict)
+                else {"rate": 1.0, "strategy": "always_block", "always_record_blocks": True}
+            )
+            sampled_jsonl.set_sampler(RequestSampler(sampling_cfg_reload))
             recorder = (
                 SessionRecorder(
                     storage_path=str(recording_cfg.get("storage_path", ".orchesis/sessions")),
@@ -2092,6 +2127,11 @@ class LLMHTTPProxy:
         ):
             self._tool_policy = ToolPolicyEngine(tools_cfg)
         self._cost_velocity = CostVelocity()
+        self._plugin_registry = self._build_plugin_registry(self._policy)
+        cost_opt_cfg = self._policy.get("cost_optimizer")
+        self._cost_optimizer: CostOptimizer | None = None
+        if isinstance(cost_opt_cfg, dict) and bool(cost_opt_cfg.get("enabled", False)):
+            self._cost_optimizer = CostOptimizer(cost_opt_cfg)
         self._server: HTTPServer | None = None
         self._start_time = time.time()
         self._stats_lock = threading.Lock()
@@ -2206,6 +2246,12 @@ class LLMHTTPProxy:
             payload["agent_discovery"] = self._agent_discovery.get_stats()
         if self._tool_policy is not None:
             payload["tool_policy"] = self._tool_policy.get_tool_stats()
+        payload["plugins"] = {
+            "count": len(self._plugin_registry.list_plugins()),
+            "items": self._plugin_registry.list_plugins(),
+        }
+        if self._cost_optimizer is not None:
+            payload["cost_optimizer"] = {"savings": self._cost_optimizer.get_savings_report()}
         payload["cost_velocity"] = self._cost_velocity.get_stats()
         if self._community is not None:
             payload["community"] = self._community.get_status()
@@ -4221,6 +4267,12 @@ class LLMHTTPProxy:
                 ctx.proc_result["context_original_tokens"] = int(opt_result.original_tokens)
                 ctx.proc_result["context_optimized_tokens"] = int(opt_result.optimized_tokens)
                 ctx.proc_result["context_optimizations_applied"] = list(opt_result.optimizations_applied)
+        if self._cost_optimizer is not None:
+            messages = ctx.body.get("messages")
+            if isinstance(messages, list):
+                optimized_messages, opt_stats = self._cost_optimizer.optimize(messages)
+                ctx.body["messages"] = validate_tool_chain(optimized_messages)
+                ctx.proc_result["cost_optimization"] = opt_stats
         if self._context_budget is not None and self._context_budget.enabled:
             messages = ctx.body.get("messages")
             if isinstance(messages, list) and messages:
@@ -4450,6 +4502,20 @@ class LLMHTTPProxy:
 
     def _phase_upstream(self, ctx: _RequestContext) -> bool:
         ctx.provider = self._detect_provider(ctx.parsed_req.provider, ctx.handler.headers)
+        plugin_context = {
+            "request_id": str(ctx.request_id or ""),
+            "session_id": str(ctx.session_id or "unknown"),
+            "path": str(ctx.handler.path),
+            "provider": str(ctx.provider),
+        }
+        try:
+            plugin_request = self._plugin_registry.run_request(dict(ctx.body), plugin_context)
+            if isinstance(plugin_request, dict):
+                ctx.body = plugin_request
+            ctx.proc_result["plugins_request"] = plugin_context
+        except Exception:
+            # Plugin pipeline must not break request path.
+            pass
         if (
             self._semantic_cache is not None
             and self._semantic_cache.enabled
@@ -4514,6 +4580,30 @@ class LLMHTTPProxy:
         return False
 
     def _phase_post_upstream(self, ctx: _RequestContext) -> bool:
+        plugin_context = {
+            "request_id": str(ctx.request_id or ""),
+            "session_id": str(ctx.session_id or "unknown"),
+            "path": str(ctx.handler.path),
+            "provider": str(ctx.provider),
+        }
+        try:
+            plugin_response = self._plugin_registry.run_response(
+                {"status": int(ctx.resp_status), "headers": dict(ctx.resp_headers), "body": ctx.resp_body},
+                plugin_context,
+            )
+            if isinstance(plugin_response, dict):
+                status_raw = plugin_response.get("status", ctx.resp_status)
+                headers_raw = plugin_response.get("headers", ctx.resp_headers)
+                body_raw = plugin_response.get("body", ctx.resp_body)
+                ctx.resp_status = int(status_raw) if isinstance(status_raw, int | float) else int(ctx.resp_status)
+                ctx.resp_headers = dict(headers_raw) if isinstance(headers_raw, dict) else dict(ctx.resp_headers)
+                if isinstance(body_raw, bytes):
+                    ctx.resp_body = body_raw
+                elif isinstance(body_raw, str):
+                    ctx.resp_body = body_raw.encode("utf-8")
+            ctx.proc_result["plugins_response"] = plugin_context
+        except Exception:
+            pass
         ctx.parsed_resp_obj = None
         try:
             decoded = json.loads(ctx.resp_body.decode("utf-8"))
@@ -4904,6 +4994,28 @@ class LLMHTTPProxy:
                 cost = float(ctx.proc_result.get("cost", 0.0))
                 self._semantic_cache.store(messages, model, tools or None, ctx.resp_body, tokens, cost)
         return True
+
+    @staticmethod
+    def _build_plugin_registry(policy: dict[str, Any]) -> PluginRegistry:
+        registry = PluginRegistry()
+        plugins_cfg = policy.get("plugins")
+        if not isinstance(plugins_cfg, list):
+            return registry
+        for item in plugins_cfg:
+            if not isinstance(item, dict):
+                continue
+            if not bool(item.get("enabled", True)):
+                continue
+            name = str(item.get("name", "")).strip()
+            cfg = item.get("config")
+            config = cfg if isinstance(cfg, dict) else {}
+            if name == "request_logger":
+                registry.register(RequestLoggerPlugin())
+            elif name == "request_enricher":
+                registry.register(RequestEnricherPlugin(config))
+            elif name == "response_validator":
+                registry.register(ResponseValidatorPlugin())
+        return registry
 
     def _finalize_response_recording(self, ctx: _RequestContext) -> None:
         self._inc("allowed")

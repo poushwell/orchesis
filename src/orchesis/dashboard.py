@@ -82,7 +82,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Orchesis Dashboard</title>
   <style>
     :root[data-theme="light"] {
@@ -296,9 +296,25 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       border-radius: var(--radius-sm);
       background: var(--surface);
       color: var(--text);
-      padding: 8px 12px;
+      padding: 10px 16px;
+      min-height: 44px;
       cursor: pointer;
       font-weight: 600;
+    }
+    button {
+      min-height: 36px;
+    }
+    #mobile-nav-toggle {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--text);
+      padding: 8px 12px;
+      font-size: 16px;
+      cursor: pointer;
     }
     .tab-btn.active {
       background: linear-gradient(135deg, rgba(0,229,160,0.12), rgba(0,229,160,0.06));
@@ -1296,8 +1312,28 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       .score-gauge { grid-template-columns: 1fr; }
       .ow-cards { grid-template-columns: repeat(2, minmax(220px, 1fr)); }
     }
+    /* Tablet: 768px */
+    @media (max-width: 768px) {
+      .stats-grid { grid-template-columns: repeat(2, 1fr); }
+      .grid-4 { grid-template-columns: repeat(2, minmax(160px, 1fr)); }
+      .topbar { flex-wrap: wrap; gap: 8px; }
+      #global-search { width: 150px; }
+      .nav-tabs { overflow-x: auto; white-space: nowrap; flex-wrap: nowrap; }
+      #mobile-nav-toggle { display: inline-flex; }
+      .nav-tabs { display: none; }
+      .nav-tabs.mobile-open { display: flex; }
+    }
     @media (max-width: 760px) {
       .ow-cards { grid-template-columns: 1fr; }
+    }
+    /* Mobile: 480px */
+    @media (max-width: 480px) {
+      .stats-grid { grid-template-columns: 1fr; }
+      .grid-4 { grid-template-columns: 1fr; }
+      .topbar { flex-direction: column; }
+      #global-search { width: 100%; }
+      .notif-panel { width: 100vw; right: 0; }
+      .card, .panel { padding: 12px; }
     }
   </style>
 </head>
@@ -1318,6 +1354,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         <span class="badge"><span id="conn-dot" class="conn-dot"></span><span id="conn-text">Connected</span></span>
         <span class="badge" id="perf-indicator">[⚡ Standard mode] | Orchesis v0.2.1 | Connected</span>
         <span class="badge" id="status-badge">Status: --</span>
+        <button id="mobile-nav-toggle" onclick="toggleMobileNav()" aria-label="Toggle mobile navigation">☰</button>
         <button id="export-all-btn" onclick="exportAll()" aria-label="Export all data">⬇️ Export</button>
         <button id="perf-toggle" onclick="togglePerfMode()" title="Performance mode" aria-pressed="false" aria-label="Toggle performance mode">⚡</button>
         <button id="theme-toggle" onclick="toggleTheme()" aria-pressed="true" aria-label="Toggle light or dark theme">☀️</button>
@@ -1333,7 +1370,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     </div>
     {{DEMO_BANNER}}
 
-    <div class="tabs" role="tablist" aria-label="Dashboard sections">
+    <div id="nav-tabs" class="tabs nav-tabs" role="tablist" aria-label="Dashboard sections">
       <button id="tab-shield" class="tab-btn active" data-tab="shield" role="tab" aria-selected="true" aria-controls="shield">🛡️ Shield</button>
       <button id="tab-agents" class="tab-btn" data-tab="agents" role="tab" aria-selected="false" aria-controls="agents">🤖 Agents</button>
       <button id="tab-sessions" class="tab-btn" data-tab="sessions" role="tab" aria-selected="false" aria-controls="sessions">💾 Sessions</button>
@@ -1900,6 +1937,12 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       </div>
     </section>
   </div>
+  <div class="subtle" style="text-align:center; margin-top:8px;">
+    <span id="version-badge" onclick="showChangelog()"
+      style="cursor:pointer" title="Click for changelog">
+      v0.2.1 ✨
+    </span>
+  </div>
   <div class="shortcuts-hint">Press <kbd>?</kbd> for keyboard shortcuts</div>
   <div id="shortcuts-modal" class="modal hidden">
     <div class="modal-content">
@@ -1920,6 +1963,13 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
           <tr><td>Esc</td><td>Close modal/panel</td></tr>
         </tbody>
       </table>
+    </div>
+  </div>
+  <div id="changelog-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3>What's new in Orchesis</h3>
+      <div id="changelog-content"></div>
+      <button onclick="closeChangelog()">Close</button>
     </div>
   </div>
   <div id="toast" class="toast"></div>
@@ -2139,6 +2189,10 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       notifications.length = 0;
       renderNotifications();
     }
+    function toggleMobileNav() {
+      const nav = document.getElementById('nav-tabs');
+      nav.classList.toggle('mobile-open');
+    }
     async function pollNotifications() {
       try {
         const endpoint = `/api/v1/notifications?since=${encodeURIComponent(notifLastTs)}&limit=20`;
@@ -2322,6 +2376,43 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       const modal = document.getElementById("shortcuts-modal");
       if(modal){ modal.classList.add("hidden"); }
     }
+    async function showChangelog() {
+      const resp = await fetch('/api/v1/changelog');
+      const data = await resp.json();
+      renderChangelog(Array.isArray(data.entries) ? data.entries : []);
+      document.getElementById('changelog-modal').classList.remove('hidden');
+    }
+    function closeChangelog() {
+      document.getElementById('changelog-modal').classList.add('hidden');
+    }
+    function renderChangelog(entries) {
+      const root = document.getElementById("changelog-content");
+      if(!root){ return; }
+      if(!Array.isArray(entries) || entries.length === 0){
+        root.innerHTML = `<div class="subtle">No changelog entries available.</div>`;
+        return;
+      }
+      root.innerHTML = entries.map((entry)=>{
+        const version = String(entry.version || "unknown");
+        const date = String(entry.date || "--");
+        const highlights = Array.isArray(entry.highlights) ? entry.highlights : [];
+        const changes = Array.isArray(entry.changes) ? entry.changes : [];
+        const hl = highlights.map((item)=> `<li>${String(item)}</li>`).join("");
+        const ch = changes.map((item)=> `<li>${String(item)}</li>`).join("");
+        return `
+          <div class="panel" style="margin-top:8px;">
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;">
+              <strong>v${version}</strong>
+              <span class="subtle">${date}</span>
+            </div>
+            <div style="margin-top:6px;"><strong>Highlights</strong></div>
+            <ul style="margin:6px 0 0 18px;">${hl}</ul>
+            <div style="margin-top:8px;"><strong>Changes</strong></div>
+            <ul style="margin:6px 0 0 18px;">${ch}</ul>
+          </div>
+        `;
+      }).join("");
+    }
     function resetKeySequence(){
       keySequence = [];
       if(keyTimer){ clearTimeout(keyTimer); keyTimer = null; }
@@ -2337,6 +2428,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       const key = String(e.key || "");
       if (key === "Escape") {
         closeShortcutsModal();
+        closeChangelog();
         const panel = document.getElementById("notif-panel");
         if(panel && !panel.classList.contains("hidden")){ panel.classList.add("hidden"); }
         resetKeySequence();
@@ -4315,6 +4407,12 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       if(shortcutsModal){
         shortcutsModal.addEventListener("click", (event)=>{
           if(event.target === shortcutsModal){ closeShortcutsModal(); }
+        });
+      }
+      const changelogModal = document.getElementById("changelog-modal");
+      if(changelogModal){
+        changelogModal.addEventListener("click", (event)=>{
+          if(event.target === changelogModal){ closeChangelog(); }
         });
       }
       document.addEventListener("click", (event)=>{

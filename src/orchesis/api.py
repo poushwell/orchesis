@@ -52,6 +52,7 @@ from orchesis.context_dna import ContextDNA
 from orchesis.context_dna_store import ContextDNAStore
 from orchesis.anomaly_alerts import AnomalyAlertManager
 from orchesis.agent_profile import AgentIntelligenceProfile
+from orchesis.agent_scorecard import AgentScorecard
 from orchesis.pipeline import check_budget
 from orchesis.evidence_record import EvidenceRecord
 from orchesis.cost_analytics import CostAnalytics
@@ -59,16 +60,22 @@ from orchesis.cost_forecast import CostForecaster
 from orchesis.session_heatmap import SessionHeatmap
 from orchesis.budget_advisor import BudgetAdvisor
 from orchesis.session_replay import SessionReplay
+from orchesis.session_groups import SessionGroupManager
 from orchesis.community_intel import CommunityIntel
 from orchesis.request_inspector import RequestInspector
+from orchesis.pipeline_debugger import PipelineDebugger
 from orchesis.token_yield import TokenYieldTracker
 from orchesis.token_yield_report import TokenYieldReportGenerator
 from orchesis.threat_feed import ThreatFeed
+from orchesis.threat_patterns import ThreatPatternLibrary
 from orchesis.signature_editor import SignatureEditor
 from orchesis.alert_rules import AlertRule, AlertRulesEngine
 from orchesis.agent_graph import AgentCollaborationGraph
 from orchesis.geo_intel import GeoIntel
 from orchesis.tenants import TenantManager
+from orchesis.semantic_cache import SemanticCache
+from orchesis.cache_warmer import CacheWarmer
+from orchesis.api_rate_limiter import ApiRateLimiter
 from orchesis import __version__
 
 
@@ -144,14 +151,28 @@ def create_api_app(
     app.state.flow_decisions = {}
     app.state.api_token_override = api_token.strip() if isinstance(api_token, str) and api_token.strip() else None
     app.state.token_yield = TokenYieldTracker()
+    app.state.session_groups = SessionGroupManager(
+        str(policy_file.parent / ".orchesis" / "session_groups.json")
+    )
     feed_cfg = (
         current_version.policy.get("threat_feed")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("threat_feed"), dict)
         else {}
     )
     app.state.threat_feed = ThreatFeed(feed_cfg)
+    app.state.threat_patterns = ThreatPatternLibrary()
     app.state.signature_editor = SignatureEditor(str(policy_file.parent / ".orchesis" / "signatures.json"))
     app.state.tenant_manager = TenantManager(str(policy_file.parent / ".orchesis" / "tenants"))
+    semantic_cfg = (
+        current_version.policy.get("semantic_cache")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("semantic_cache"), dict)
+        else {}
+    )
+    app.state.semantic_cache = SemanticCache(semantic_cfg)
+    cache_warming_cfg = (
+        semantic_cfg.get("warming") if isinstance(semantic_cfg.get("warming"), dict) else {}
+    )
+    app.state.cache_warmer = CacheWarmer(app.state.semantic_cache, cache_warming_cfg)
     raw_alert_rules = (
         current_version.policy.get("alert_rules")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("alert_rules"), list)
@@ -168,6 +189,7 @@ def create_api_app(
     app.state.alert_rules_engine = AlertRulesEngine(parsed_rules)
     app.state.benchmark_results = {}
     app.state.dna_store = ContextDNAStore(str(policy_file.parent / ".orchesis" / "dna"))
+    app.state.agent_scorecard = AgentScorecard()
     community_cfg = (
         current_version.policy.get("community")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("community"), dict)
@@ -176,6 +198,7 @@ def create_api_app(
     app.state.community_intel = CommunityIntel(community_cfg)
     app.state.notifications: list[dict[str, Any]] = []
     app.state.notifications_lock = threading.Lock()
+    app.state.api_limiter = ApiRateLimiter()
     anomaly_cfg = (
         current_version.policy.get("anomaly_alerts")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("anomaly_alerts"), dict)
@@ -301,17 +324,52 @@ def create_api_app(
                 alert_notifiers.append(notifier)
                 alert_subscriber_ids.append(event_bus.subscribe(TelegramEmitter(notifier)))
 
+    def _api_rate_limit_config(candidate_policy: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(candidate_policy, dict):
+            return {}
+        cfg: dict[str, Any] = {}
+        direct = candidate_policy.get("api_rate_limit")
+        if isinstance(direct, dict):
+            cfg.update(direct)
+        api_cfg = candidate_policy.get("api")
+        nested = api_cfg.get("rate_limit") if isinstance(api_cfg, dict) else None
+        if isinstance(nested, dict):
+            cfg.update(nested)
+        return cfg
+
+    def _sync_api_limiter(candidate_policy: dict[str, Any]) -> None:
+        cfg = _api_rate_limit_config(candidate_policy)
+        limiter = getattr(app.state, "api_limiter", None)
+        if isinstance(limiter, ApiRateLimiter):
+            limiter.configure(cfg)
+        else:
+            app.state.api_limiter = ApiRateLimiter(cfg)
+
     def _refresh_current_version() -> None:
         app.state.current_version = store.current or store.load(str(policy_file))
         app.state.plugins = load_plugins_for_policy(
             app.state.current_version.policy,
             app.state.plugin_modules,
         )
+        semantic_cfg_local = (
+            app.state.current_version.policy.get("semantic_cache")
+            if isinstance(app.state.current_version.policy, dict)
+            and isinstance(app.state.current_version.policy.get("semantic_cache"), dict)
+            else {}
+        )
+        app.state.semantic_cache = SemanticCache(semantic_cfg_local)
+        cache_warming_cfg_local = (
+            semantic_cfg_local.get("warming")
+            if isinstance(semantic_cfg_local.get("warming"), dict)
+            else {}
+        )
+        app.state.cache_warmer = CacheWarmer(app.state.semantic_cache, cache_warming_cfg_local)
         _sync_decision_emitter(app.state.current_version.policy)
         app.state.sync_server.set_current_version(app.state.current_version.version_id)
         _sync_alerts(app.state.current_version.policy)
         _sync_auth(app.state.current_version.policy)
         _sync_agent_teams_from_policy(app.state.current_version.policy)
+        _sync_api_limiter(app.state.current_version.policy)
 
     def _sync_auth(candidate_policy: dict[str, Any]) -> None:
         auth = candidate_policy.get("authentication")
@@ -355,6 +413,7 @@ def create_api_app(
     _sync_alerts(current_version.policy)
     _sync_auth(current_version.policy)
     _sync_agent_teams_from_policy(current_version.policy)
+    _sync_api_limiter(current_version.policy)
 
     def _auth_token_from_policy() -> str | None:
         token_override = getattr(app.state, "api_token_override", None)
@@ -370,6 +429,31 @@ def create_api_app(
 
     def _required_token() -> str | None:
         return os.getenv("API_TOKEN") or _auth_token_from_policy()
+
+    def _client_id_from_request(request: Request) -> str:
+        forwarded = request.headers.get("x-forwarded-for")
+        if isinstance(forwarded, str) and forwarded.strip():
+            return forwarded.split(",", 1)[0].strip() or "unknown"
+        client = request.client
+        host = client.host if client is not None else None
+        if isinstance(host, str) and host.strip():
+            return host.strip()
+        return "unknown"
+
+    def _is_protected_api_request(request: Request) -> bool:
+        path = request.url.path
+        if not path.startswith("/api/v1/"):
+            return False
+        if path in {"/api/v1/status"}:
+            return False
+        expected = _required_token()
+        if not isinstance(expected, str) or not expected.strip():
+            return False
+        authorization = request.headers.get("authorization")
+        if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
+            return False
+        provided = authorization.split(" ", 1)[1].strip()
+        return provided == expected
 
     def _require_auth(authorization: str | None) -> None:
         expected = _required_token()
@@ -561,6 +645,15 @@ def create_api_app(
             "context_window": context_window,
         }
 
+    def _cache_warm_candidates(limit: int | None = None) -> list[dict[str, Any]]:
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        warmer = app.state.cache_warmer
+        candidates = warmer.analyze_history(events)
+        if isinstance(limit, int) and limit > 0:
+            return candidates[:limit]
+        return candidates
+
     def _build_cost_analytics_payload(period_hours: int) -> dict[str, Any]:
         source = Path(app.state.decisions_log)
         events = read_events_from_jsonl(source) if source.exists() else []
@@ -668,6 +761,22 @@ def create_api_app(
             "daily_limit_usd": float(budgets_cfg.get("daily", budget_daily) or 0.0),
         }
         return BudgetAdvisor().analyze(events, current_budget)
+
+    def _build_scorecard_payload(agent_id: str, period: str) -> dict[str, Any]:
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        scorer = app.state.agent_scorecard
+        return scorer.compute(agent_id=agent_id, decisions_log=events, period=period)
+
+    def _build_scorecard_all_payload() -> list[dict[str, Any]]:
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        scorer = app.state.agent_scorecard
+        return scorer.compute_all(decisions_log=events)
+
+    def _build_pipeline_debugger(policy: dict[str, Any] | None = None) -> PipelineDebugger:
+        effective_policy = policy if isinstance(policy, dict) else current_version.policy
+        return PipelineDebugger(engine=evaluate, policy=effective_policy)
 
     def _build_request_inspection(request_id: str) -> dict[str, Any]:
         source = Path(app.state.decisions_log)
@@ -1048,9 +1157,29 @@ def create_api_app(
 
     @app.middleware("http")
     async def trace_headers_middleware(request: Request, call_next):
+        if _is_protected_api_request(request):
+            client_id = _client_id_from_request(request)
+            limit_result = app.state.api_limiter.check(client_id)
+            if not bool(limit_result.get("allowed", False)):
+                retry_after = int(limit_result.get("retry_after") or 1)
+                app.state.api_limiter.note_blocked(client_id)
+                return JSONResponse(
+                    status_code=429,
+                    headers={"Retry-After": str(max(1, retry_after))},
+                    content={"error": "rate_limit_exceeded"},
+                )
+            app.state.api_limiter.record(client_id)
+            request.state.rate_limit_client_id = client_id
         trace = TraceContext.from_headers(dict(request.headers))
         request.state.trace_context = trace
         response = await call_next(request)
+        if _is_protected_api_request(request):
+            client_id = str(getattr(request.state, "rate_limit_client_id", "") or _client_id_from_request(request))
+            limit_status = app.state.api_limiter.check(client_id)
+            response.headers["X-RateLimit-Remaining"] = str(int(limit_status.get("remaining", 0) or 0))
+            reset_at = limit_status.get("reset_at")
+            if isinstance(reset_at, str) and reset_at:
+                response.headers["X-RateLimit-Reset"] = reset_at
         response.headers["X-Orchesis-Trace-Id"] = trace.trace_id
         decision_header = getattr(request.state, "orchesis_decision", None)
         if isinstance(decision_header, str):
@@ -1241,6 +1370,74 @@ def create_api_app(
         result = replayer.replay(session_id=session_id, policy=effective_policy)
         return asdict(result)
 
+    @app.get("/api/v1/session-groups")
+    def session_groups_list(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {"groups": app.state.session_groups.list_groups()}
+
+    @app.post("/api/v1/session-groups")
+    def session_groups_create(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        name = body.get("name") if isinstance(body, dict) else None
+        description = body.get("description", "") if isinstance(body, dict) else ""
+        if not isinstance(name, str) or not name.strip():
+            raise HTTPException(status_code=400, detail={"error": "name is required"})
+        return app.state.session_groups.create_group(name=name.strip(), description=str(description or ""))
+
+    @app.get("/api/v1/session-groups/{group_id}")
+    def session_groups_get(
+        group_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        row = app.state.session_groups.get_group_stats(group_id, events)
+        if not row:
+            raise HTTPException(status_code=404, detail={"error": "group not found"})
+        return row
+
+    @app.post("/api/v1/session-groups/{group_id}/sessions")
+    def session_groups_add_session(
+        group_id: str,
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        session_id = body.get("session_id") if isinstance(body, dict) else None
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise HTTPException(status_code=400, detail={"error": "session_id is required"})
+        ok = app.state.session_groups.add_session(group_id, session_id.strip())
+        if not ok:
+            raise HTTPException(status_code=404, detail={"error": "group not found"})
+        return {"ok": True, "group_id": group_id, "session_id": session_id.strip()}
+
+    @app.delete("/api/v1/session-groups/{group_id}/sessions/{session_id}")
+    def session_groups_remove_session(
+        group_id: str,
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        ok = app.state.session_groups.remove_session(group_id, session_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail={"error": "group or session not found"})
+        return {"ok": True, "group_id": group_id, "session_id": session_id}
+
+    @app.delete("/api/v1/session-groups/{group_id}")
+    def session_groups_delete(
+        group_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        ok = app.state.session_groups.delete_group(group_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail={"error": "group not found"})
+        return {"ok": True, "group_id": group_id}
+
     @app.get("/api/v1/compliance/report/{agent_id}")
     def compliance_report_endpoint(
         agent_id: str,
@@ -1273,6 +1470,43 @@ def create_api_app(
     ) -> dict[str, Any]:
         _require_auth(authorization)
         return _build_context_budget_payload(session_id)
+
+    @app.get("/api/v1/cache/warm/candidates")
+    def cache_warm_candidates_endpoint(
+        limit: int = 20,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        safe_limit = max(1, min(int(limit), 500))
+        candidates = _cache_warm_candidates(safe_limit)
+        return {"total": len(candidates), "candidates": candidates}
+
+    @app.post("/api/v1/cache/warm")
+    def cache_warm_endpoint(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        limit = payload.get("limit", 50)
+        safe_limit = max(1, min(int(limit), 500))
+        candidates = _cache_warm_candidates(safe_limit)
+        report = app.state.cache_warmer.warm(candidates)
+        return {
+            **report,
+            "candidates_considered": len(candidates),
+            "cache_stats": app.state.semantic_cache.get_stats(),
+        }
+
+    @app.get("/api/v1/cache/warm/report")
+    def cache_warm_report_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {
+            **app.state.cache_warmer.get_warming_report(),
+            "cache_stats": app.state.semantic_cache.get_stats(),
+        }
 
     @app.post("/api/v1/policy/reload")
     def policy_reload(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -1411,6 +1645,68 @@ def create_api_app(
             health_score=health,
             decisions_log=app.state.decisions_log,
         )
+
+    @app.get("/api/v1/scorecard/leaderboard")
+    def get_scorecard_leaderboard(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        board = app.state.agent_scorecard.get_leaderboard(events)
+        return {"leaderboard": board}
+
+    @app.get("/api/v1/scorecard/all")
+    def get_scorecard_all(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        cards = _build_scorecard_all_payload()
+        return {"scorecards": cards}
+
+    @app.get("/api/v1/scorecard/{agent_id}")
+    def get_scorecard(
+        agent_id: str,
+        period: str = "7d",
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return _build_scorecard_payload(agent_id, period)
+
+    @app.post("/api/v1/debug/request")
+    def debug_request_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        request_payload = body.get("request") if isinstance(body.get("request"), dict) else body
+        debugger = _build_pipeline_debugger()
+        return debugger.debug_request(request_payload)
+
+    @app.post("/api/v1/debug/explain")
+    def debug_explain_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        debugger = _build_pipeline_debugger()
+        decision = body.get("decision") if isinstance(body.get("decision"), dict) else {}
+        if not decision:
+            request_payload = body.get("request") if isinstance(body.get("request"), dict) else {}
+            decision = debugger.debug_request(request_payload)
+        return {"explanation": debugger.explain_decision(decision)}
+
+    @app.post("/api/v1/debug/compare-policies")
+    def debug_compare_policies_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        request_payload = body.get("request") if isinstance(body.get("request"), dict) else {}
+        policy_a = body.get("policy_a") if isinstance(body.get("policy_a"), dict) else {}
+        policy_b = body.get("policy_b") if isinstance(body.get("policy_b"), dict) else {}
+        debugger = _build_pipeline_debugger()
+        return debugger.compare_policies(request_payload, policy_a, policy_b)
 
     @app.get("/api/v1/ari/{agent_id}")
     def get_ari(
@@ -1838,6 +2134,70 @@ def create_api_app(
         report = _build_token_yield_report(period)
         return {"period": period, "markdown": generator.export_markdown(report)}
 
+    @app.get("/api/v1/changelog")
+    def changelog_endpoint() -> dict[str, Any]:
+        return {
+            "current_version": "0.2.1",
+            "entries": [
+                {
+                    "version": "0.2.1",
+                    "date": "2026-03-17",
+                    "highlights": ["83% threat block rate", "40+ new modules", "3,300+ tests"],
+                    "changes": [
+                        "Live policy hot reload",
+                        "Context DNA behavioral fingerprint",
+                        "Agent Health Score dashboard widget",
+                        "Evidence Record - EU AI Act Article 12",
+                        "Auto-healing 6 levels L1-L6",
+                        "Per-team budget attribution",
+                        "Session replay against new policy",
+                        "orchesis doctor --fix --json",
+                    ],
+                }
+            ],
+        }
+
+    @app.get("/api/v1/threat-patterns")
+    def list_threat_patterns(
+        category: str | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        library = app.state.threat_patterns
+        if isinstance(category, str) and category.strip():
+            rows = library.list_by_category(category)
+        else:
+            rows = []
+            for pattern_id in sorted(library.PATTERNS.keys()):
+                item = library.get_pattern(pattern_id)
+                if isinstance(item, dict):
+                    rows.append(item)
+        return {"patterns": rows, "count": len(rows), "stats": library.get_stats()}
+
+    @app.get("/api/v1/threat-patterns/{pattern_id}")
+    def get_threat_pattern(
+        pattern_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        row = app.state.threat_patterns.get_pattern(pattern_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail={"error": "pattern not found"})
+        return row
+
+    @app.post("/api/v1/threat-patterns/match")
+    def match_threat_patterns(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        text = payload.get("text")
+        if not isinstance(text, str):
+            raise HTTPException(status_code=400, detail={"error": "text is required"})
+        matches = app.state.threat_patterns.match(text)
+        return {"matches": matches, "count": len(matches)}
+
     @app.get("/api/v1/threat-feed/status")
     def threat_feed_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
@@ -2054,6 +2414,30 @@ def create_api_app(
     def rate_limits_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
         return _build_rate_limit_status_payload()
+
+    @app.get("/api/v1/rate-limit/status")
+    def api_rate_limit_status(
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        client_id = _client_id_from_request(request)
+        status = app.state.api_limiter.check(client_id)
+        return {"client_id": client_id, **status}
+
+    @app.get("/api/v1/rate-limit/clients")
+    def api_rate_limit_clients(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.api_limiter.get_stats()
+
+    @app.post("/api/v1/rate-limit/reset/{client_id}")
+    def api_rate_limit_reset(
+        client_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        app.state.api_limiter.reset(client_id)
+        return {"reset": True, "client_id": str(client_id)}
 
     @app.get("/api/v1/geo/classify")
     def geo_classify(

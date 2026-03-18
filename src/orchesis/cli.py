@@ -70,6 +70,7 @@ from orchesis.threat_feed import ThreatFeed
 from orchesis.scanner_server import run_scanner_http_server
 from orchesis.scenarios import AdversarialScenarios
 from orchesis.experiment_runner import NLCEExperimentRunner
+from orchesis.nlce_exporter import NLCEPaperExporter
 from orchesis.integrity import IntegrityMonitor, build_integrity_alert_callback
 from orchesis.hooks import ClaudeCodeHooks, evaluate_hook_tool, log_hook_tool
 from orchesis.quickstart import QuickstartWizard
@@ -95,6 +96,7 @@ from orchesis.policy_templates import PolicyTemplateManager, POLICY_TEMPLATES
 from orchesis.policy_diff import PolicyDiff
 from orchesis.evidence_record import EvidenceRecord
 from orchesis.migrator import PolicyMigrator
+from orchesis.backup_manager import BackupManager
 from orchesis import __version__
 
 DEFAULT_KEYS_DIR = Path(".orchesis") / "keys"
@@ -1739,6 +1741,66 @@ def migrate_command(config_path: str, target_version: str | None, dry_run_mode: 
 
     path.write_text(yaml.safe_dump(migrated_policy, sort_keys=False, allow_unicode=True), encoding="utf-8")
     click.echo("✓ Migration complete")
+
+
+@main.command("backup")
+@click.option("--output", "output_path", type=click.Path(), default=None)
+@click.option("--restore", "restore_path", type=click.Path(), default=None)
+@click.option("--dry-run", "dry_run_mode", is_flag=True, default=False)
+@click.option("--list", "list_mode", is_flag=True, default=False)
+@click.option("--verify", "verify_path", type=click.Path(), default=None)
+def backup_command(
+    output_path: str | None,
+    restore_path: str | None,
+    dry_run_mode: bool,
+    list_mode: bool,
+    verify_path: str | None,
+) -> None:
+    """Create, restore, list, or verify Orchesis backups."""
+    selected = int(list_mode) + int(isinstance(restore_path, str) and bool(restore_path.strip())) + int(
+        isinstance(verify_path, str) and bool(verify_path.strip())
+    )
+    if selected > 1:
+        raise click.ClickException("Choose only one action: --list, --restore, or --verify")
+
+    manager = BackupManager(base_dir=".")
+    if list_mode:
+        rows = manager.list_backups()
+        if not rows:
+            click.echo("No backups found.")
+            return
+        click.echo("Backups:")
+        for row in rows:
+            click.echo(
+                f"- {row.get('path')} | size={row.get('size', 0)} bytes | "
+                f"files={row.get('files_count', 0)} | created={row.get('created_at', '')}"
+            )
+        return
+
+    if isinstance(verify_path, str) and verify_path.strip():
+        report = manager.verify(verify_path)
+        click.echo(f"valid: {bool(report.get('valid', False))}")
+        click.echo(f"files: {int(report.get('files', 0) or 0)}")
+        click.echo(f"size_bytes: {int(report.get('size_bytes', 0) or 0)}")
+        click.echo(f"created_at: {report.get('created_at', '')}")
+        if not bool(report.get("valid", False)) and isinstance(report.get("error"), str):
+            click.echo(f"error: {report.get('error')}")
+        return
+
+    if isinstance(restore_path, str) and restore_path.strip():
+        result = manager.restore(restore_path, dry_run=dry_run_mode)
+        click.echo(
+            f"Restore complete: restored={len(result.get('restored', []))}, "
+            f"skipped={len(result.get('skipped', []))}, errors={len(result.get('errors', []))}"
+        )
+        if result.get("errors"):
+            for item in result["errors"]:
+                click.echo(f"- {item}")
+            raise click.ClickException("Restore completed with errors")
+        return
+
+    created = manager.create(output_path=output_path)
+    click.echo(f"Backup created: {created}")
 
 
 @main.command("mcp-proxy")
@@ -3647,6 +3709,40 @@ def experiment_command(
     payload = dict(result)
     payload["saved_path"] = saved_path
     click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+@main.command("nlce-export")
+@click.option("--output", "output_dir", default="paper", show_default=True, help="Output directory")
+@click.option(
+    "--section",
+    "section",
+    type=click.Choice(["abstract", "claims-table", "methodology"], case_sensitive=False),
+    default=None,
+    help="Export only one section",
+)
+def nlce_export_command(output_dir: str, section: str | None) -> None:
+    """Export NLCE paper-ready data sections."""
+    exporter = NLCEPaperExporter()
+    target = Path(output_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    selected = str(section or "").strip().lower()
+    if selected == "abstract":
+        path = target / "abstract.md"
+        path.write_text(exporter.generate_abstract() + "\n", encoding="utf-8")
+        click.echo(str(path))
+        return
+    if selected == "claims-table":
+        path = target / "claims_table.md"
+        path.write_text(exporter.export_claims_table(), encoding="utf-8")
+        click.echo(str(path))
+        return
+    if selected == "methodology":
+        path = target / "methodology.md"
+        path.write_text(exporter.export_methodology(), encoding="utf-8")
+        click.echo(str(path))
+        return
+    files = exporter.export_all(str(target))
+    click.echo(json.dumps(files, ensure_ascii=False, indent=2))
 
 
 @main.command("benchmark")
