@@ -103,6 +103,7 @@ from orchesis.policy_diff import PolicyDiff
 from orchesis.policy_spec import PolicySpec
 from orchesis.evidence_record import EvidenceRecord
 from orchesis.arc_readiness import AgentReadinessCertifier
+from orchesis.aabb.benchmark import AABBBenchmark
 from orchesis.migrator import PolicyMigrator
 from orchesis.backup_manager import BackupManager
 from orchesis import __version__
@@ -4499,6 +4500,42 @@ def arc_list_command(policy_path: str) -> None:
                 certifier.certify(agent_id=aid, metrics=metrics, policy=policy)
     rows = certifier.list_certificates()
     click.echo(json.dumps({"certificates": rows, "total": len(rows)}, ensure_ascii=False, indent=2))
+
+
+@main.command("aabb")
+@click.option("--run-agent", "run_agent", default=None)
+@click.option("--leaderboard", "show_leaderboard", is_flag=True, default=False)
+@click.option("--compare", nargs=2, type=str, default=None)
+@click.option("--stats", "show_stats", is_flag=True, default=False)
+@click.option("--proxy-url", default="http://localhost:8080", show_default=True)
+def aabb_command(
+    run_agent: str | None,
+    show_leaderboard: bool,
+    compare: tuple[str, str] | None,
+    show_stats: bool,
+    proxy_url: str,
+) -> None:
+    """Run and inspect AABB benchmark results."""
+    bench = AABBBenchmark()
+    if isinstance(run_agent, str) and run_agent.strip():
+        result = bench.run_suite(agent_id=run_agent.strip(), proxy_url=proxy_url)
+        click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if bool(show_leaderboard):
+        click.echo(json.dumps({"leaderboard": bench.get_leaderboard()}, ensure_ascii=False, indent=2))
+        return
+    if isinstance(compare, tuple) and len(compare) == 2:
+        agent_a, agent_b = compare
+        # Ensure both agents have at least one run in this invocation.
+        bench.run_suite(agent_a, proxy_url=proxy_url)
+        bench.run_suite(agent_b, proxy_url=proxy_url)
+        click.echo(json.dumps(bench.compare_agents(agent_a, agent_b), ensure_ascii=False, indent=2))
+        return
+    if bool(show_stats):
+        click.echo(json.dumps(bench.get_benchmark_stats(), ensure_ascii=False, indent=2))
+        return
+    click.echo("Use one of: --run-agent, --leaderboard, --compare, --stats")
+    raise SystemExit(1)
 
 
 @main.command("threat-feed")

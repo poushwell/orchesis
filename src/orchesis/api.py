@@ -100,6 +100,11 @@ from orchesis.kalman_estimator import KalmanStateEstimator
 from orchesis.otel_bridge import OpenTelemetryBridge
 from orchesis.vickrey_allocator import VickreyBudgetAllocator
 from orchesis.arc_readiness import AgentReadinessCertifier
+from orchesis.are.framework import AREFramework
+from orchesis.casura.incident_db import CASURAIncidentDB
+from orchesis.casura.intelligence import IncidentIntelligence
+from orchesis.aabb.benchmark import AABBBenchmark
+from orchesis.monitoring.competitive import CompetitiveMonitor
 from orchesis import __version__
 
 
@@ -212,6 +217,11 @@ def create_api_app(
     )
     app.state.vickrey_allocator = VickreyBudgetAllocator(vickrey_cfg)
     app.state.arc_readiness = AgentReadinessCertifier()
+    app.state.are = AREFramework()
+    app.state.casura_db = CASURAIncidentDB()
+    app.state.casura_intel = IncidentIntelligence()
+    app.state.aabb_benchmark = AABBBenchmark()
+    app.state.competitive_monitor = CompetitiveMonitor()
     cost_attribution_cfg = (
         current_version.policy.get("cost_attribution")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("cost_attribution"), dict)
@@ -502,6 +512,38 @@ def create_api_app(
             if cleaned:
                 flywheel.enabled_levels = cleaned
 
+    def _sync_are_from_policy(candidate_policy: dict[str, Any]) -> None:
+        are_engine = AREFramework()
+        defaults = [
+            {"name": "availability", "sli": "availability", "target": 0.999, "window_days": 30},
+            {"name": "security_rate", "sli": "security_rate", "target": 0.95, "window_days": 7},
+        ]
+        are_cfg = candidate_policy.get("are") if isinstance(candidate_policy, dict) else None
+        slos = are_cfg.get("slos") if isinstance(are_cfg, dict) and isinstance(are_cfg.get("slos"), list) else defaults
+        loaded = 0
+        for row in slos:
+            if not isinstance(row, dict):
+                continue
+            try:
+                are_engine.define_slo(
+                    name=str(row.get("name", "") or "").strip(),
+                    sli=str(row.get("sli", "") or "").strip(),
+                    target=float(row.get("target", 0.0) or 0.0),
+                    window_days=int(row.get("window_days", 30) or 30),
+                )
+                loaded += 1
+            except (ValueError, TypeError):
+                continue
+        if loaded == 0:
+            for row in defaults:
+                are_engine.define_slo(
+                    name=row["name"],
+                    sli=row["sli"],
+                    target=row["target"],
+                    window_days=row["window_days"],
+                )
+        app.state.are = are_engine
+
     def _refresh_current_version() -> None:
         app.state.current_version = store.current or store.load(str(policy_file))
         app.state.plugins = load_plugins_for_policy(
@@ -529,6 +571,7 @@ def create_api_app(
         _sync_api_limiter(app.state.current_version.policy)
         _sync_shadow_mode(app.state.current_version.policy)
         _sync_data_flywheel(app.state.current_version.policy)
+        _sync_are_from_policy(app.state.current_version.policy)
 
     def _sync_auth(candidate_policy: dict[str, Any]) -> None:
         auth = candidate_policy.get("authentication")
@@ -575,6 +618,7 @@ def create_api_app(
     _sync_api_limiter(current_version.policy)
     _sync_shadow_mode(current_version.policy)
     _sync_data_flywheel(current_version.policy)
+    _sync_are_from_policy(current_version.policy)
 
     def _auth_token_from_policy() -> str | None:
         token_override = getattr(app.state, "api_token_override", None)
@@ -1988,6 +2032,208 @@ def create_api_app(
         _require_auth(authorization)
         rows = app.state.arc_readiness.list_certificates()
         return {"certificates": rows, "total": len(rows)}
+
+    @app.get("/api/v1/casura/incidents/stats")
+    def casura_incident_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.casura_db.get_stats()
+
+    @app.post("/api/v1/casura/incidents/search")
+    def casura_incident_search(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        query = str(payload.get("query", "") or "")
+        filters = payload.get("filters", {})
+        rows = app.state.casura_db.search(query=query, filters=filters if isinstance(filters, dict) else None)
+        return {"incidents": rows, "total": len(rows)}
+
+    @app.get("/api/v1/casura/incidents")
+    def casura_incidents(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        rows = app.state.casura_db.search(query="")
+        return {"incidents": rows, "total": len(rows)}
+
+    @app.post("/api/v1/casura/incidents")
+    def casura_create_incident(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        return app.state.casura_db.create_incident(payload)
+
+    @app.get("/api/v1/casura/incidents/{incident_id}")
+    def casura_get_incident(
+        incident_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        item = app.state.casura_db._incidents.get(incident_id)
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=404, detail={"error": "incident not found"})
+        return dict(item)
+
+    @app.get("/api/v1/casura/intelligence/patterns")
+    def casura_intel_patterns(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        incidents = app.state.casura_db.search(query="")
+        return app.state.casura_intel.analyze_patterns(incidents)
+
+    @app.get("/api/v1/casura/intelligence/mitre-coverage")
+    def casura_mitre_coverage(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        incidents = app.state.casura_db.search(query="")
+        return app.state.casura_intel.get_mitre_coverage(incidents)
+
+    @app.get("/api/v1/aabb/leaderboard")
+    def aabb_leaderboard(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        rows = app.state.aabb_benchmark.get_leaderboard()
+        return {"leaderboard": rows, "total": len(rows)}
+
+    @app.post("/api/v1/aabb/run/{agent_id}")
+    def aabb_run(
+        agent_id: str,
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        proxy_url = str(payload.get("proxy_url", "http://localhost:8080") or "http://localhost:8080")
+        return app.state.aabb_benchmark.run_suite(agent_id=agent_id, proxy_url=proxy_url)
+
+    @app.get("/api/v1/aabb/stats")
+    def aabb_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.aabb_benchmark.get_benchmark_stats()
+
+    @app.get("/api/v1/aabb/compare/{agent_a}/{agent_b}")
+    def aabb_compare(
+        agent_a: str,
+        agent_b: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.aabb_benchmark.compare_agents(agent_a, agent_b)
+
+    @app.post("/api/v1/are/slo")
+    def are_define_slo(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        name = str(body.get("name", "")).strip()
+        sli = str(body.get("sli", "")).strip()
+        target = body.get("target")
+        window_days = body.get("window_days", 30)
+        if not name or not sli or target is None:
+            raise HTTPException(status_code=400, detail={"error": "name, sli, target are required"})
+        try:
+            row = app.state.are.define_slo(
+                name=name,
+                sli=sli,
+                target=float(target),
+                window_days=int(window_days),
+            )
+        except (ValueError, TypeError) as error:
+            raise HTTPException(status_code=400, detail={"error": str(error)}) from error
+        return {"slo": row}
+
+    @app.post("/api/v1/are/sli/{slo_name}")
+    def are_record_sli(
+        slo_name: str,
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        if "value" not in body:
+            raise HTTPException(status_code=400, detail={"error": "value is required"})
+        try:
+            app.state.are.record_sli(slo_name, float(body.get("value")))
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail={"error": str(error)}) from error
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail={"error": str(error)}) from error
+        return {"ok": True, "slo_name": slo_name}
+
+    @app.get("/api/v1/are/budget/{slo_name}")
+    def are_budget(
+        slo_name: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        try:
+            return app.state.are.get_error_budget(slo_name)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail={"error": str(error)}) from error
+
+    @app.get("/api/v1/are/report")
+    def are_report(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.are.get_reliability_report()
+
+    @app.get("/api/v1/are/alerts")
+    def are_alerts(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        report = app.state.are.get_reliability_report()
+        alerts: list[dict[str, Any]] = []
+        for row in report.get("slos", []):
+            if not isinstance(row, dict):
+                continue
+            slo_name = str(row.get("slo_name", "")).strip()
+            if not slo_name:
+                continue
+            alert = app.state.are.get_burn_rate_alert(slo_name)
+            if isinstance(alert, dict):
+                alerts.append(alert)
+        return {"alerts": alerts, "count": len(alerts)}
+
+    @app.get("/api/v1/competitive/latest")
+    def competitive_latest(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        incidents = app.state.casura_db.search(query="")
+        changes = app.state.competitive_monitor.detect_ecosystem_changes(
+            incidents if isinstance(incidents, list) else []
+        )
+        leaderboard = app.state.aabb_benchmark.get_leaderboard()
+        competitor_alerts: list[dict[str, Any]] = []
+        if isinstance(leaderboard, list):
+            for row in leaderboard[:5]:
+                if not isinstance(row, dict):
+                    continue
+                agent_name = str(row.get("agent_id", "") or "")
+                score = float(row.get("score", 0.0) or 0.0)
+                if score >= 0.8:
+                    competitor_alerts.append(
+                        {
+                            "event": "competitor_stars_spike",
+                            "title": f"High-performing competitor signal: {agent_name}",
+                            "severity": "medium",
+                            "score": score,
+                        }
+                    )
+        alerts = changes + competitor_alerts
+        return {"alerts": alerts, "count": len(alerts)}
+
+    @app.get("/api/v1/ecosystem/summary")
+    def ecosystem_summary(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        casura_stats = app.state.casura_db.get_stats()
+        leaderboard = app.state.aabb_benchmark.get_leaderboard()
+        are_payload = app.state.are.get_reliability_report()
+        competitive_payload = competitive_latest(authorization)
+        return {
+            "casura": casura_stats,
+            "aabb": {
+                "leaderboard": leaderboard[:5] if isinstance(leaderboard, list) else [],
+                "total": len(leaderboard) if isinstance(leaderboard, list) else 0,
+            },
+            "are": are_payload,
+            "competitive": competitive_payload,
+        }
 
     @app.get("/api/v1/compliance/report/{agent_id}")
     def compliance_report_endpoint(

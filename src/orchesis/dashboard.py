@@ -1381,6 +1381,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       <button id="tab-cost" class="tab-btn" data-tab="cost" role="tab" aria-selected="false" aria-controls="cost">💰 Cost</button>
       <button id="tab-compliance" class="tab-btn" data-tab="compliance" role="tab" aria-selected="false" aria-controls="compliance">📘 Compliance</button>
       <button id="tab-overwatch" class="tab-btn" data-tab="overwatch" role="tab" aria-selected="false" aria-controls="overwatch">🛰️ Overwatch</button>
+      <button id="tab-ecosystem" class="tab-btn" data-tab="ecosystem" role="tab" aria-selected="false" aria-controls="ecosystem">🌐 Ecosystem</button>
       <button id="tab-approvals" class="tab-btn" data-tab="approvals" role="tab" aria-selected="false" aria-controls="approvals">✅ Approvals</button>
     </div>
 
@@ -1934,6 +1935,28 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       <div class="panel">
         <div class="section-title"><strong>HISTORY</strong></div>
         <div id="approvals-history" style="margin-top:10px;"></div>
+      </div>
+    </section>
+    <section id="ecosystem" class="screen" role="tabpanel" aria-labelledby="tab-ecosystem">
+      <div class="grid-2">
+        <div class="panel panel-primary">
+          <div class="section-title"><strong>CASURA</strong></div>
+          <div id="eco-casura" class="subtle">No data</div>
+        </div>
+        <div class="panel panel-primary">
+          <div class="section-title"><strong>AABB</strong></div>
+          <div id="eco-aabb" class="subtle">No data</div>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="panel">
+          <div class="section-title"><strong>ARE</strong></div>
+          <div id="eco-are" class="subtle">No data</div>
+        </div>
+        <div class="panel">
+          <div class="section-title"><strong>Monitoring</strong></div>
+          <div id="eco-competitive" class="subtle">No data</div>
+        </div>
       </div>
     </section>
   </div>
@@ -4354,6 +4377,61 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       renderBudgetAdvice(advice, quickWins);
     }
 
+    function renderEcosystem(payload){
+      const casura = payload && payload.casura && payload.casura.value ? payload.casura.value : {};
+      const aabb = payload && payload.aabb && payload.aabb.value ? payload.aabb.value : {};
+      const are = payload && payload.are && payload.are.value ? payload.are.value : {};
+      const competitive = payload && payload.competitive && payload.competitive.value ? payload.competitive.value : {};
+
+      const casuraEl = document.getElementById("eco-casura");
+      if(casuraEl){
+        const total = Number(casura.total_incidents || casura.total || 0);
+        const severe = Number(casura.open_critical || casura.critical_open || 0);
+        casuraEl.textContent = `Incidents: ${fmtNum(total)} · Critical open: ${fmtNum(severe)}`;
+      }
+      const aabbEl = document.getElementById("eco-aabb");
+      if(aabbEl){
+        const rows = Array.isArray(aabb.leaderboard) ? aabb.leaderboard.slice(0, 5) : [];
+        if(!rows.length){
+          aabbEl.textContent = "Leaderboard is empty.";
+        } else {
+          aabbEl.textContent = rows.map((row, idx)=> `${idx + 1}. ${row.agent_id || row.agent || "agent"} (${Number(row.score || 0).toFixed(2)})`).join(" · ");
+        }
+      }
+      const areEl = document.getElementById("eco-are");
+      if(areEl){
+        const total = Number(are.total_slos || 0);
+        const exhausted = Number(are.exhausted || 0);
+        areEl.textContent = `SLOs: ${fmtNum(total)} · Exhausted budgets: ${fmtNum(exhausted)}`;
+      }
+      const cmpEl = document.getElementById("eco-competitive");
+      if(cmpEl){
+        const rows = Array.isArray(competitive.alerts) ? competitive.alerts.slice(0, 5) : [];
+        cmpEl.textContent = rows.length ? rows.map((row)=> String(row.title || row.event || "alert")).join(" · ") : "No competitive alerts.";
+      }
+    }
+
+    async function pollEcosystem() {
+      const [casura, aabb, are, competitive] = await Promise.allSettled([
+        fetch('/api/v1/casura/incidents/stats'),
+        fetch('/api/v1/aabb/leaderboard'),
+        fetch('/api/v1/are/report'),
+        fetch('/api/v1/competitive/latest'),
+      ]);
+      async function toJson(result){
+        if(!result || result.status !== "fulfilled"){ return {}; }
+        const response = result.value;
+        if(!response || typeof response.ok !== "boolean" || !response.ok){ return {}; }
+        try { return await response.json(); } catch(_err) { return {}; }
+      }
+      renderEcosystem({
+        casura: { value: await toJson(casura) },
+        aabb: { value: await toJson(aabb) },
+        are: { value: await toJson(are) },
+        competitive: { value: await toJson(competitive) },
+      });
+    }
+
     async function pollTab(tab){
       if(tab === "shield") return pollShield();
       if(tab === "agents") return pollAgents();
@@ -4365,6 +4443,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       if(tab === "cost") return pollCost();
       if(tab === "compliance") return pollCompliance();
       if(tab === "overwatch") return pollOverwatch();
+      if(tab === "ecosystem") return pollEcosystem();
       if(tab === "approvals") return pollApprovals();
     }
 
