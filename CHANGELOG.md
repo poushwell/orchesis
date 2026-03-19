@@ -90,18 +90,32 @@
 - CLI: `orchesis fuzz`, `orchesis scenarios`, `orchesis corpus`, `orchesis audit --stats/--anomalies/--export`
 - `THREAT_MODEL.md` v2 with formal guarantees table
 
-## [0.3.0] - 2026-03-18
+## [0.3.0] — 2026-03-18
 
-### Added
-- Major A-T feature expansion with 60+ modules and 100+ API endpoints across security, compliance, cost, reliability, and operations.
-- New governance surfaces including real-time compliance checks, session groups, incident management, and searchable knowledge base APIs.
-- Cost intelligence stack updates: forecasting, token yield reporting, and team-level cost attribution with chargeback views.
-- Extended Overwatch and forensic workflows with richer incident timelines, replay, reporting, and changelog integration.
-- Additional dashboard and API capabilities for production visibility and policy control.
+### Added — 80+ новых модулей
+- NLCE Layer 2: UCI compression, PID v2, Kalman 3x3, Context Crystallinity Psi
+- NLCE Layer 2: PAR reasoning, Criticality Control (LQR), MRAC, HGT Protocol
+- Fleet Intelligence: Quorum Sensing, Byzantine Detector, Raft Context, Gossip Protocol
+- Fleet Intelligence: Thompson Sampling, Vickrey Auction, Keystone Agent
+- Ecosystem: CASURA (AISS v2.0), AABB Benchmark, ARE Framework
+- Research: Carnot Efficiency, Red Queen, Fitness Landscape, Kolmogorov Importance
+- Platform: Multi-tenant, Policy templates, Backup/restore, Migration tool
+- Security: Intent Classifier, Response Analyzer, Tool Call Analyzer, Memory Tracker
+- Compliance: Evidence Record, Compliance Checker, ARC Certification
+- Dashboard: Dark/light theme, Keyboard shortcuts, Mobile responsive, Ecosystem tab
+- API: 200+ endpoints across all subsystems
+- CLI: 30+ new commands
 
-### Quality
-- Test suite expanded to 3505 passing tests (4 skipped in full run).
-- Packaging and release metadata prepared for PyPI `0.3.0`.
+### Fixed
+- Thread safety audit: 5 race conditions fixed
+- Fuzz crashes: format strings, bidi unicode, binary YAML
+- Loop detection on real proxy traffic
+- audit_export missing from git
+
+### Tests
+- 3847 passing (was 2969 at start of day)
+- +878 new tests
+- 20/20 stress tests passing
 
 ## [0.2.0] - 2026-02-28
 

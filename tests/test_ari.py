@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+from tests.cli_test_utils import CliRunner
+
 from orchesis.ari import AgentReadinessIndex
 from orchesis.ars import ARSResult
+from orchesis.api import create_api_app
+from orchesis.cli import main
 
 
 def _ars_result(
@@ -201,4 +208,92 @@ def test_empty_metrics() -> None:
     result = ari.evaluate("a", metrics={})
     assert result.agent_id == "a"
     assert 0 <= result.index <= 100
+
+
+def _policy_yaml() -> str:
+    return """
+api:
+  token: "orch_sk_test"
+agent_readiness:
+  metrics:
+    agent-x:
+      security_score: 90
+      cost_score: 78
+      task_score: 85
+      loop_score: 88
+      latency_score: 76
+      obs_score: 75
+    low-agent:
+      security_score: 40
+      cost_score: 45
+      task_score: 42
+      loop_score: 50
+      latency_score: 48
+      obs_score: 35
+rules: []
+"""
+
+
+def test_ari_api_endpoint(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("API_TOKEN", raising=False)
+    policy = tmp_path / "policy.yaml"
+    policy.write_text(_policy_yaml(), encoding="utf-8")
+    app = create_api_app(policy_path=str(policy), decisions_log=str(tmp_path / "decisions.jsonl"))
+    client = TestClient(app)
+    res = client.get("/api/v1/ari/agent-x", headers={"Authorization": "Bearer orch_sk_test"})
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["agent_id"] == "agent-x"
+    assert "score" in payload
+    assert "status" in payload
+    assert "dimensions" in payload
+    assert "security" in payload["dimensions"]
+
+
+def test_ari_report_endpoint(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("API_TOKEN", raising=False)
+    policy = tmp_path / "policy.yaml"
+    policy.write_text(_policy_yaml(), encoding="utf-8")
+    app = create_api_app(policy_path=str(policy), decisions_log=str(tmp_path / "decisions.jsonl"))
+    client = TestClient(app)
+    res = client.get("/api/v1/ari/agent-x/report", headers={"Authorization": "Bearer orch_sk_test"})
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["agent_id"] == "agent-x"
+    assert "report_generated_at" in payload
+    assert isinstance(payload["blocking_gates"], list)
+
+
+def test_ari_check_cli_passes(tmp_path: Path) -> None:
+    cfg = tmp_path / "orchesis.yaml"
+    cfg.write_text(_policy_yaml(), encoding="utf-8")
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["ari-check", "--agent", "agent-x", "--min-score", "75", "--config", str(cfg)],
+    )
+    assert result.exit_code == 0
+    assert "✓ ARI score:" in result.output
+
+
+def test_ari_check_cli_fails_below_threshold(tmp_path: Path) -> None:
+    cfg = tmp_path / "orchesis.yaml"
+    cfg.write_text(_policy_yaml(), encoding="utf-8")
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["ari-check", "--agent", "low-agent", "--min-score", "75", "--config", str(cfg)],
+    )
+    assert result.exit_code == 1
+    assert "✗ ARI score:" in result.output
+
+
+def test_ari_check_exit_codes(tmp_path: Path) -> None:
+    cfg = tmp_path / "orchesis.yaml"
+    cfg.write_text(_policy_yaml(), encoding="utf-8")
+    runner = CliRunner()
+    ok = runner.invoke(main, ["ari-check", "--agent", "agent-x", "--min-score", "50", "--config", str(cfg)])
+    bad = runner.invoke(main, ["ari-check", "--agent", "low-agent", "--min-score", "90", "--config", str(cfg)])
+    assert ok.exit_code == 0
+    assert bad.exit_code == 1
 

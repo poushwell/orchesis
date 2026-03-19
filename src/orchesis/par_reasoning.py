@@ -17,6 +17,8 @@ class PARReasoner:
     """Proxy Abductive Reasoning for DENY diagnosis."""
 
     T5_THEOREM = "Cross-agent causal graph unrecoverable from single-agent trace"
+    MAX_OBSERVATIONS = 10_000
+    MAX_HYPOTHESES = 1_000
 
     def __init__(self, config: dict | None = None):
         cfg = config or {}
@@ -29,8 +31,8 @@ class PARReasoner:
         """Record proxy-level observation."""
         with self._lock:
             self._observations.append(dict(event or {}))
-            if len(self._observations) > 10000:
-                self._observations = self._observations[-10000:]
+            if len(self._observations) > self.MAX_OBSERVATIONS:
+                self._observations = self._observations[-self.MAX_OBSERVATIONS :]
 
     def abduce(self, deny_event: dict) -> dict:
         """Generate best explanation for DENY event (IBE)."""
@@ -41,8 +43,8 @@ class PARReasoner:
         ranked = self._rank_by_simplicity(hypotheses)
         with self._lock:
             self._hypotheses.extend(ranked)
-            if len(self._hypotheses) > 10000:
-                self._hypotheses = self._hypotheses[-10000:]
+            if len(self._hypotheses) > self.MAX_HYPOTHESES:
+                self._hypotheses = self._hypotheses[-self.MAX_HYPOTHESES :]
 
         return {
             "mode": mode,

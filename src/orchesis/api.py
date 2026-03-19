@@ -9,6 +9,7 @@ import io
 import zipfile
 import hashlib
 import threading
+from contextlib import asynccontextmanager
 from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -124,7 +125,14 @@ def create_api_app(
     cors_origins: list[str] | None = None,
 ) -> FastAPI:
     """Create governance control-plane API."""
-    app = FastAPI(title="Orchesis Control API", docs_url=None, redoc_url=None)
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        monitor = getattr(app.state, "mcp_monitor", None)
+        if monitor is not None and hasattr(monitor, "stop"):
+            monitor.stop()
+
+    app = FastAPI(title="Orchesis Control API", docs_url=None, redoc_url=None, lifespan=lifespan)
     logger = StructuredLogger("api")
     if isinstance(cors_origins, list) and cors_origins:
         allow_all = "*" in cors_origins
@@ -1509,12 +1517,6 @@ def create_api_app(
             + "</tbody></table></body></html>"
         )
         return Response(content=html, media_type="text/html; charset=utf-8")
-
-    @app.on_event("shutdown")
-    async def _shutdown_monitor() -> None:
-        monitor = getattr(app.state, "mcp_monitor", None)
-        if monitor is not None and hasattr(monitor, "stop"):
-            monitor.stop()
 
     @app.post("/api/v1/policy")
     def post_policy(

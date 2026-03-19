@@ -14,6 +14,7 @@ from typing import Any
 
 class FitnessLandscapeMapper:
     """Maps fitness landscape of policy configurations."""
+    MAX_EVALUATIONS = 10_000
 
     def __init__(self, config: dict | None = None):
         _ = config
@@ -25,6 +26,10 @@ class FitnessLandscapeMapper:
         key = self._config_to_key(config_point)
         with self._lock:
             self._evaluations[key] = float(fitness)
+            if len(self._evaluations) > self.MAX_EVALUATIONS:
+                keys = list(self._evaluations.keys())
+                for stale_key in keys[: -self.MAX_EVALUATIONS]:
+                    del self._evaluations[stale_key]
 
     def find_local_optima(self) -> list[dict[str, Any]]:
         """Find local maxima in fitness landscape."""

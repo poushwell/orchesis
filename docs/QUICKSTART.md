@@ -60,4 +60,24 @@ orchesis benchmark --run-all
 
 # Export evidence record
 orchesis evidence --session SESSION_ID
+
+# AABB benchmark
+orchesis aabb --leaderboard
+orchesis aabb --run-agent AGENT_ID
+
+# ARC certification
+orchesis arc-check --agent AGENT_ID --min-score 75
+orchesis arc-certify --agent AGENT_ID
+
+# NLCE paper
+orchesis nlce-paper --generate --output paper/
+orchesis arxiv-validate --paper paper/
+
+# Policy spec
+orchesis spec --validate orchesis.yaml
+orchesis diff policy_v1.yaml policy_v2.yaml
+orchesis migrate --config orchesis.yaml
+
+# Vibe Code Audit
+orchesis vibe-audit --file app.py
 ```

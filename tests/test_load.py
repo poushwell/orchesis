@@ -290,3 +290,13 @@ def test_memory_bounded_under_load() -> None:
         RequestPrioritizer.MAX_ENTRIES = old_queue_cap
         FleetCoordinator.MAX_ENTRIES = old_shared_cap
         IncidentManager.MAX_ENTRIES = old_incident_cap
+
+
+def test_new_modules_bounded_under_load() -> None:
+    """Y-block modules stay bounded under high load."""
+    from orchesis.par_reasoning import PARReasoner
+
+    par = PARReasoner()
+    for i in range(15_000):
+        par.observe({"event": f"test_{i}", "reasons": ["r1"]})
+    assert len(par._observations) <= 10_000

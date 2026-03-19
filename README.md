@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://pypi.org/project/orchesis/"><img src="https://img.shields.io/pypi/v/orchesis?color=7c3aed&label=PyPI" alt="PyPI"/></a>
-  <a href="https://github.com/poushwell/orchesis/actions"><img src="https://img.shields.io/badge/tests-3517%20passing-22c55e" alt="tests"/></a>
+  <a href="https://github.com/poushwell/orchesis/actions"><img src="https://img.shields.io/badge/tests-3851%20passing-22c55e" alt="tests"/></a>
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"/>
   <a href="https://github.com/poushwell/orchesis"><img src="https://img.shields.io/github/stars/poushwell/orchesis?style=flat&color=7c3aed" alt="Stars"/></a>
   <img src="https://img.shields.io/badge/dependencies-0-green" alt="Zero dependencies"/>
@@ -117,6 +117,18 @@ duplicate context across providers. This is an architectural advantage, not a fe
 - Threat Pattern Library, Signature Editor, Threat Feed
 - Policy templates, migration tool, backup/restore
 
+**Research (NLCE Layer 2+)**
+- PAR Abductive Reasoning - T5 theorem implementation
+- Criticality Control (H17-CC) - LQR Psi in [0.4,0.6]
+- MRAC adaptive gain scheduling per agent
+- Keystone Agent detection - trophic cascade analysis
+- Carnot Efficiency - theoretical ceiling calculator
+- Red Queen dynamics - adversarial co-evolution monitoring
+- Kolmogorov Importance - UCI-K duality (H36)
+- Context Crystallinity Psi - gas/liquid/crystal phases
+- HGT Protocol stub - horizontal gene transfer (H42)
+- IACS full discourse coherence - 0.40xFC + 0.35xEC + 0.25xHC
+
 ## What Orchesis does
 
 | Capability | Current coverage |
@@ -136,7 +148,8 @@ duplicate context across providers. This is an architectural advantage, not a fe
 | MAST coverage | 78.6% |
 | OWASP coverage | 80% |
 | Auto-heal actions | 6 |
-| Tests passing | 3,517 |
+| Tests passing | 3,851 |
+| Modules | 240 |
 | Dependencies | **0** (stdlib only) |
 | Proxy overhead | 0.8% measured |
 | Context collapse | 12x growth caught |

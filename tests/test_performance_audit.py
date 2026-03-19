@@ -54,6 +54,11 @@ def benchmark(func: Callable[[], Any], iterations: int = ITERATIONS) -> dict[str
     }
 
 
+def _run_benchmark(func: Callable[[], Any], n: int = ITERATIONS) -> dict[str, float]:
+    """Compatibility wrapper used by newer perf tests."""
+    return benchmark(func, iterations=n)
+
+
 def get_memory_bytes(obj: Any) -> int:
     """Recursive memory estimate for nested containers."""
 
@@ -410,6 +415,59 @@ def test_perf_cost_optimizer_optimize() -> None:
 
 def test_perf_request_sampler_should_record() -> None:
     assert _module_results()["request_sampler_should_record"]["mean_us"] < _th(500.0)
+
+
+def test_perf_par_abduce() -> None:
+    """PAR abduce < 500 us."""
+    from orchesis.par_reasoning import PARReasoner
+
+    par = PARReasoner()
+    event = {"reasons": ["prompt_injection", "credential_leak"]}
+    results = _run_benchmark(lambda: par.abduce(event), n=1000)
+    assert results["mean_us"] < _th(500.0)
+
+
+def test_perf_criticality_control() -> None:
+    """CriticalityController.compute_control < 200 us."""
+    from orchesis.criticality_control import CriticalityController
+
+    cc = CriticalityController()
+    results = _run_benchmark(lambda: cc.compute_control(0.5), n=1000)
+    assert results["mean_us"] < _th(200.0)
+
+
+def test_perf_kolmogorov_estimate() -> None:
+    """KolmogorovImportance.estimate_k < 1000 us."""
+    from orchesis.kolmogorov_importance import KolmogorovImportance
+
+    ki = KolmogorovImportance()
+    text = "This is a test message for Kolmogorov complexity estimation."
+    results = _run_benchmark(lambda: ki.estimate_k(text), n=500)
+    assert results["mean_us"] < _th(1000.0)
+
+
+def test_perf_keystone_score() -> None:
+    """KeystoneDetector.compute_keystone_score < 500 us."""
+    from orchesis.keystone_agent import KeystoneDetector
+
+    kd = KeystoneDetector()
+    for i in range(10):
+        for j in range(5):
+            kd.record_uci(f"agent_{i}", 0.5 + j * 0.1)
+    results = _run_benchmark(lambda: kd.compute_keystone_score("agent_0"), n=500)
+    assert results["mean_us"] < _th(500.0)
+
+
+def test_perf_discourse_coherence() -> None:
+    """compute_iacs_full < 500 us for 10 messages."""
+    from orchesis.discourse_coherence import compute_iacs_full
+
+    messages = [
+        {"role": "user", "content": f"Message {i} about context management."}
+        for i in range(10)
+    ]
+    results = _run_benchmark(lambda: compute_iacs_full(messages), n=500)
+    assert results["mean_us"] < _th(500.0)
 
 
 def test_perf_pipeline_under_load() -> None:

@@ -69,3 +69,22 @@ def test_readme_has_project_status() -> None:
     assert "## By the numbers" in content
     assert "Tests passing" in content
     assert "## What Orchesis does" in content
+
+
+def test_docs_quickstart_has_new_command_blocks() -> None:
+    content = (ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    for command in (
+        "orchesis aabb --leaderboard",
+        "orchesis arc-check --agent AGENT_ID --min-score 75",
+        "orchesis nlce-paper --generate --output paper/",
+        "orchesis spec --validate orchesis.yaml",
+        "orchesis vibe-audit --file app.py",
+    ):
+        assert command in content
+
+
+def test_architecture_mentions_research_modules() -> None:
+    content = (ROOT / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    assert "## Research modules (Y + pipeline sprint)" in content
+    assert "PAR Reasoning" in content
+    assert "Criticality Control" in content

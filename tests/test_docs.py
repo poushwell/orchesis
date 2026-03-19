@@ -11,6 +11,10 @@ from tests.cli_test_utils import CliRunner
 from orchesis.cli import main
 from orchesis import __version__
 
+EXPECTED_TESTS_BADGE = "tests-3851%20passing"
+EXPECTED_TESTS_TABLE = "3,851"
+EXPECTED_MODULE_COUNT = "240"
+
 
 def test_all_doc_files_exist() -> None:
     required = [
@@ -55,6 +59,7 @@ def test_readme_has_badge_tests() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
     assert "img.shields.io/badge/tests-" in text
     assert "%20passing-22c55e" in text
+    assert EXPECTED_TESTS_BADGE in text
 
 
 def test_readme_has_license_badge() -> None:
@@ -192,3 +197,21 @@ def test_all_cli_commands_have_help() -> None:
         result = runner.invoke(main, [command, "--help"])
         assert result.exit_code == 0, f"--help failed for command: {command}"
         assert "Usage:" in result.output
+
+
+def test_readme_metrics_are_updated() -> None:
+    text = Path("README.md").read_text(encoding="utf-8")
+    assert f"| Tests passing | {EXPECTED_TESTS_TABLE} |" in text
+    assert f"| Modules | {EXPECTED_MODULE_COUNT} |" in text
+
+
+def test_readme_has_research_whats_inside_section() -> None:
+    text = Path("README.md").read_text(encoding="utf-8")
+    assert "**Research (NLCE Layer 2+)**" in text
+    for snippet in (
+        "PAR Abductive Reasoning - T5 theorem implementation",
+        "Criticality Control (H17-CC) - LQR Psi in [0.4,0.6]",
+        "HGT Protocol stub - horizontal gene transfer (H42)",
+        "IACS full discourse coherence - 0.40xFC + 0.35xEC + 0.25xHC",
+    ):
+        assert snippet in text
