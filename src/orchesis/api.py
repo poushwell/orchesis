@@ -50,6 +50,7 @@ from orchesis.structured_log import StructuredLogger
 from orchesis.sync import PolicySyncServer
 from orchesis.telemetry import JsonlEmitter
 from orchesis.flow_xray import FlowAnalyzer
+from orchesis.forensic_reconstruction import ForensicReconstructor
 from orchesis.context_dna import ContextDNA
 from orchesis.context_dna_store import ContextDNAStore
 from orchesis.anomaly_alerts import AnomalyAlertManager
@@ -108,10 +109,16 @@ from orchesis.casura.intelligence import IncidentIntelligence
 from orchesis.aabb.benchmark import AABBBenchmark
 from orchesis.monitoring.competitive import CompetitiveMonitor
 from orchesis.par_reasoning import PARReasoner
+from orchesis.group_selection import GroupSelectionModel
+from orchesis.relevance_theory import RelevanceScorer
 from orchesis.red_queen import RedQueenMonitor
+from orchesis.double_loop_learning import DoubleLoopLearner
+from orchesis.complement_cascade import ComplementCascade
 from orchesis.mrac_controller import MRACController
 from orchesis.keystone_agent import KeystoneDetector
 from orchesis.criticality_control import CriticalityController
+from orchesis.immune_memory import ImmuneMemory
+from orchesis.homeostasis import HomeostasisController
 from orchesis import __version__
 
 
@@ -200,6 +207,7 @@ def create_api_app(
     app.state.compliance_checker = RealTimeComplianceChecker()
     app.state.incident_manager = IncidentManager()
     app.state.knowledge_base = OrchesisKnowledgeBase()
+    app.state.forensic_reconstructor = ForensicReconstructor(decisions_log)
     quorum_cfg = (
         current_version.policy.get("quorum_sensing")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("quorum_sensing"), dict)
@@ -255,12 +263,36 @@ def create_api_app(
         else {}
     )
     app.state.criticality_controller = CriticalityController(criticality_cfg)
+    immune_cfg = (
+        current_version.policy.get("immune_memory")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("immune_memory"), dict)
+        else {}
+    )
+    app.state.immune_memory = ImmuneMemory(immune_cfg)
+    homeostasis_cfg = (
+        current_version.policy.get("homeostasis")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("homeostasis"), dict)
+        else {}
+    )
+    app.state.homeostasis = HomeostasisController(homeostasis_cfg)
     app.state.arc_readiness = AgentReadinessCertifier()
     app.state.are = AREFramework()
     app.state.casura_db = CASURAIncidentDB()
     app.state.casura_intel = IncidentIntelligence()
     app.state.aabb_benchmark = AABBBenchmark()
     app.state.par_reasoner = PARReasoner()
+    group_selection_cfg = (
+        current_version.policy.get("group_selection")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("group_selection"), dict)
+        else {}
+    )
+    app.state.group_selection = GroupSelectionModel(group_selection_cfg)
+    relevance_cfg = (
+        current_version.policy.get("relevance_theory")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("relevance_theory"), dict)
+        else {}
+    )
+    app.state.relevance_scorer = RelevanceScorer(relevance_cfg)
     app.state.competitive_monitor = CompetitiveMonitor()
     red_queen_cfg = (
         current_version.policy.get("red_queen")
@@ -268,6 +300,20 @@ def create_api_app(
         else {}
     )
     app.state.red_queen = RedQueenMonitor(red_queen_cfg)
+    double_loop_cfg = (
+        current_version.policy.get("double_loop_learning")
+        if isinstance(current_version.policy, dict)
+        and isinstance(current_version.policy.get("double_loop_learning"), dict)
+        else {}
+    )
+    app.state.double_loop = DoubleLoopLearner(double_loop_cfg)
+    complement_cfg = (
+        current_version.policy.get("complement_cascade")
+        if isinstance(current_version.policy, dict)
+        and isinstance(current_version.policy.get("complement_cascade"), dict)
+        else {}
+    )
+    app.state.complement_cascade = ComplementCascade(complement_cfg)
     cost_attribution_cfg = (
         current_version.policy.get("cost_attribution")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("cost_attribution"), dict)
@@ -1835,6 +1881,119 @@ def create_api_app(
         _require_auth(authorization)
         return app.state.par_reasoner.get_stats()
 
+    @app.post("/api/v1/immune/expose")
+    def immune_expose(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        threat_pattern = str(payload.get("threat_pattern", "") or "")
+        severity = payload.get("severity", 0.5)
+        if not threat_pattern:
+            raise HTTPException(status_code=400, detail={"error": "threat_pattern is required"})
+        if not isinstance(severity, int | float):
+            raise HTTPException(status_code=400, detail={"error": "severity must be numeric"})
+        return app.state.immune_memory.expose(threat_pattern=threat_pattern, severity=float(severity))
+
+    @app.post("/api/v1/immune/recall")
+    def immune_recall(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        threat_pattern = str(payload.get("threat_pattern", "") or "")
+        if not threat_pattern:
+            raise HTTPException(status_code=400, detail={"error": "threat_pattern is required"})
+        row = app.state.immune_memory.recall(threat_pattern)
+        if row is None:
+            return {"found": False, "memory": None}
+        return {"found": True, "memory": row}
+
+    @app.get("/api/v1/immune/stats")
+    def immune_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.immune_memory.get_memory_stats()
+
+    @app.post("/api/v1/homeostasis/measure")
+    def homeostasis_measure(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        cqs = payload.get("cqs")
+        if not isinstance(cqs, int | float):
+            raise HTTPException(status_code=400, detail={"error": "cqs must be numeric"})
+        return app.state.homeostasis.measure(float(cqs))
+
+    @app.get("/api/v1/homeostasis/stats")
+    def homeostasis_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.homeostasis.get_equilibrium_stats()
+
+    @app.post("/api/v1/group-selection/register")
+    def group_selection_register(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        agent_id = str(payload.get("agent_id", "") or "").strip()
+        group_id = str(payload.get("group_id", "") or "").strip()
+        if not agent_id or not group_id:
+            raise HTTPException(status_code=400, detail={"error": "agent_id and group_id are required"})
+        app.state.group_selection.register_agent(agent_id=agent_id, group_id=group_id)
+        return {"ok": True, "agent_id": agent_id, "group_id": group_id}
+
+    @app.post("/api/v1/group-selection/interaction")
+    def group_selection_interaction(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        agent_id = str(payload.get("agent_id", "") or "").strip()
+        if not agent_id:
+            raise HTTPException(status_code=400, detail={"error": "agent_id is required"})
+        cooperative = bool(payload.get("cooperative", True))
+        try:
+            outcome = float(payload.get("outcome", 0.0))
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail={"error": "outcome must be numeric"}) from error
+        result = app.state.group_selection.record_interaction(
+            agent_id=agent_id,
+            cooperative=cooperative,
+            outcome=outcome,
+        )
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result)
+        return result
+
+    @app.get("/api/v1/group-selection/group/{group_id}")
+    def group_selection_group(
+        group_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.group_selection.get_group_fitness(group_id)
+
+    @app.get("/api/v1/group-selection/fittest")
+    def group_selection_fittest(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        row = app.state.group_selection.get_fittest_group()
+        if row is None:
+            return {"group": None}
+        return {"group": row}
+
+    @app.get("/api/v1/group-selection/stats")
+    def group_selection_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.group_selection.get_stats()
+
     @app.get("/api/v1/quorum/status")
     def quorum_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
@@ -2074,6 +2233,39 @@ def create_api_app(
     ) -> dict[str, Any]:
         _require_auth(authorization)
         return {"rho": app.state.kolmogorov_importance.compute_rho()}
+
+    @app.post("/api/v1/relevance/score")
+    def relevance_score(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        message = payload.get("message")
+        context = payload.get("context", [])
+        if not isinstance(message, dict):
+            raise HTTPException(status_code=400, detail={"error": "message is required"})
+        if not isinstance(context, list):
+            raise HTTPException(status_code=400, detail={"error": "context must be a list"})
+        return app.state.relevance_scorer.score(message, context)
+
+    @app.post("/api/v1/relevance/rank")
+    def relevance_rank(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        messages = payload.get("messages", [])
+        if not isinstance(messages, list):
+            raise HTTPException(status_code=400, detail={"error": "messages must be a list"})
+        rows = app.state.relevance_scorer.rank_messages(messages)
+        return {"messages": rows, "total": len(rows)}
+
+    @app.get("/api/v1/relevance/stats")
+    def relevance_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.relevance_scorer.get_stats()
 
     @app.post("/api/v1/vickrey/bid")
     def vickrey_bid(
@@ -2466,6 +2658,130 @@ def create_api_app(
         _require_auth(authorization)
         patterns = app.state.red_queen.get_emerging_patterns()
         return {"patterns": patterns, "count": len(patterns)}
+
+    @app.post("/api/v1/double-loop/error")
+    def double_loop_error_endpoint(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        error_type = str(payload.get("error_type", "unknown") or "unknown")
+        magnitude = payload.get("magnitude", 0.0)
+        if not isinstance(magnitude, int | float):
+            raise HTTPException(status_code=400, detail={"error": "magnitude must be numeric"})
+        context = payload.get("context", {})
+        app.state.double_loop.record_error(
+            error_type=error_type,
+            magnitude=float(magnitude),
+            context=context if isinstance(context, dict) else {},
+        )
+        return {"status": "recorded", "error_type": error_type}
+
+    @app.post("/api/v1/double-loop/adapt")
+    def double_loop_adapt_endpoint(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        error_rate = payload.get("error_rate", 0.0)
+        if not isinstance(error_rate, int | float):
+            raise HTTPException(status_code=400, detail={"error": "error_rate must be numeric"})
+        loop = app.state.double_loop.determine_loop(float(error_rate))
+        if loop == "single":
+            rule = str(payload.get("rule", "compression_aggressiveness") or "compression_aggressiveness")
+            delta = payload.get("delta", 0.0)
+            if not isinstance(delta, int | float):
+                raise HTTPException(status_code=400, detail={"error": "delta must be numeric"})
+            result = app.state.double_loop.single_loop_adapt(rule=rule, delta=float(delta))
+            if "error" in result:
+                raise HTTPException(status_code=400, detail=result)
+            return {"loop": loop, "adaptation": result}
+        if loop == "double":
+            strategy = str(payload.get("new_strategy", "reframe_context_strategy") or "reframe_context_strategy")
+            rationale = str(payload.get("rationale", "error rate above double-loop threshold") or "")
+            return {
+                "loop": loop,
+                "adaptation": app.state.double_loop.double_loop_adapt(strategy, rationale),
+            }
+        return {"loop": "none", "adaptation": None}
+
+    @app.get("/api/v1/double-loop/stats")
+    def double_loop_stats_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.double_loop.get_learning_stats()
+
+    @app.get("/api/v1/double-loop/rules")
+    def double_loop_rules_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        stats = app.state.double_loop.get_learning_stats()
+        return {"governing_rules": stats.get("governing_rules", {})}
+
+    @app.post("/api/v1/complement/activate")
+    def complement_activate_endpoint(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        threat_signal = payload.get("threat_signal", 0.0)
+        if not isinstance(threat_signal, int | float):
+            raise HTTPException(status_code=400, detail={"error": "threat_signal must be numeric"})
+        threat_type = str(payload.get("threat_type", "unknown") or "unknown")
+        return app.state.complement_cascade.activate(float(threat_signal), threat_type)
+
+    @app.get("/api/v1/complement/stats")
+    def complement_stats_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.complement_cascade.get_cascade_stats()
+
+    @app.post("/api/v1/group-selection/register")
+    def group_selection_register_endpoint(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        agent_id = str(payload.get("agent_id", "")).strip()
+        group_id = str(payload.get("group_id", "")).strip()
+        if not agent_id or not group_id:
+            raise HTTPException(status_code=400, detail={"error": "agent_id and group_id are required"})
+        app.state.group_selection.register_agent(agent_id, group_id)
+        return {"ok": True, "agent_id": agent_id, "group_id": group_id}
+
+    @app.post("/api/v1/group-selection/interaction")
+    def group_selection_interaction_endpoint(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        agent_id = str(payload.get("agent_id", "")).strip()
+        cooperative = bool(payload.get("cooperative", False))
+        outcome = payload.get("outcome")
+        if not agent_id:
+            raise HTTPException(status_code=400, detail={"error": "agent_id is required"})
+        if not isinstance(outcome, int | float):
+            raise HTTPException(status_code=400, detail={"error": "outcome must be numeric"})
+        result = app.state.group_selection.record_interaction(agent_id, cooperative=cooperative, outcome=float(outcome))
+        if "error" in result:
+            raise HTTPException(status_code=400, detail=result)
+        return result
+
+    @app.get("/api/v1/group-selection/fittest")
+    def group_selection_fittest_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        row = app.state.group_selection.get_fittest_group()
+        return {"group": row}
 
     @app.get("/api/v1/ecosystem/summary")
     def ecosystem_summary(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -4696,6 +5012,84 @@ def create_api_app(
             raise HTTPException(status_code=404, detail={"error": "node not found"})
         app.state.sync_server.request_force_sync(node_id)
         return {"message": f"sync requested for {node_id}"}
+
+    @app.post("/api/v1/forensic/reconstruct")
+    def forensic_reconstruct(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        request_id = str(payload.get("request_id", "") or "").strip()
+        if not request_id:
+            raise HTTPException(status_code=400, detail={"error": "request_id is required"})
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        decisions: list[dict[str, Any]] = []
+        for event in events:
+            if hasattr(event, "__dict__"):
+                row = dict(getattr(event, "__dict__", {}))
+            elif isinstance(event, dict):
+                row = dict(event)
+            else:
+                continue
+            row.setdefault("request_id", row.get("event_id"))
+            decisions.append(row)
+        return app.state.forensic_reconstructor.reconstruct(request_id, decisions)
+
+    @app.post("/api/v1/forensic/causal-chain")
+    def forensic_causal_chain(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        request_id = str(payload.get("request_id", "") or "").strip()
+        if not request_id:
+            raise HTTPException(status_code=400, detail={"error": "request_id is required"})
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        decisions: list[dict[str, Any]] = []
+        for event in events:
+            if hasattr(event, "__dict__"):
+                row = dict(getattr(event, "__dict__", {}))
+            elif isinstance(event, dict):
+                row = dict(event)
+            else:
+                continue
+            row.setdefault("request_id", row.get("event_id"))
+            decisions.append(row)
+        causal_chain = app.state.forensic_reconstructor.find_causal_chain(request_id, decisions)
+        return {"request_id": request_id, "causal_chain": causal_chain, "chain_length": len(causal_chain)}
+
+    @app.post("/api/v1/forensic/report")
+    def forensic_report(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        request_id = str(payload.get("request_id", "") or "").strip()
+        if not request_id:
+            raise HTTPException(status_code=400, detail={"error": "request_id is required"})
+        source = Path(app.state.decisions_log)
+        events = read_events_from_jsonl(source) if source.exists() else []
+        decisions: list[dict[str, Any]] = []
+        for event in events:
+            if hasattr(event, "__dict__"):
+                row = dict(getattr(event, "__dict__", {}))
+            elif isinstance(event, dict):
+                row = dict(event)
+            else:
+                continue
+            row.setdefault("request_id", row.get("event_id"))
+            decisions.append(row)
+        return app.state.forensic_reconstructor.generate_forensic_report(request_id, decisions)
+
+    @app.get("/api/v1/forensic/stats")
+    def forensic_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.forensic_reconstructor.get_stats()
 
     @app.get("/api/v1/incidents")
     def incidents_list(
