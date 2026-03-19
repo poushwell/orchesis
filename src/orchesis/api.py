@@ -97,6 +97,7 @@ from orchesis.knowledge_base import OrchesisKnowledgeBase
 from orchesis.quorum_sensing import QuorumSensor
 from orchesis.pid_controller_v2 import PIDControllerV2
 from orchesis.kalman_estimator import KalmanStateEstimator
+from orchesis.kolmogorov_importance import KolmogorovImportance
 from orchesis.otel_bridge import OpenTelemetryBridge
 from orchesis.vickrey_allocator import VickreyBudgetAllocator
 from orchesis.arc_readiness import AgentReadinessCertifier
@@ -105,6 +106,11 @@ from orchesis.casura.incident_db import CASURAIncidentDB
 from orchesis.casura.intelligence import IncidentIntelligence
 from orchesis.aabb.benchmark import AABBBenchmark
 from orchesis.monitoring.competitive import CompetitiveMonitor
+from orchesis.par_reasoning import PARReasoner
+from orchesis.red_queen import RedQueenMonitor
+from orchesis.mrac_controller import MRACController
+from orchesis.keystone_agent import KeystoneDetector
+from orchesis.criticality_control import CriticalityController
 from orchesis import __version__
 
 
@@ -204,6 +210,13 @@ def create_api_app(
         else {}
     )
     app.state.kalman_estimator = KalmanStateEstimator(kalman_cfg)
+    kolmogorov_cfg = (
+        current_version.policy.get("kolmogorov_importance")
+        if isinstance(current_version.policy, dict)
+        and isinstance(current_version.policy.get("kolmogorov_importance"), dict)
+        else {}
+    )
+    app.state.kolmogorov_importance = KolmogorovImportance(kolmogorov_cfg)
     otel_bridge_cfg = (
         current_version.policy.get("otel_bridge")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("otel_bridge"), dict)
@@ -216,12 +229,37 @@ def create_api_app(
         else {}
     )
     app.state.vickrey_allocator = VickreyBudgetAllocator(vickrey_cfg)
+    mrac_cfg = (
+        current_version.policy.get("mrac_controller")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("mrac_controller"), dict)
+        else {}
+    )
+    app.state.mrac_controller = MRACController(mrac_cfg)
+    keystone_cfg = (
+        current_version.policy.get("keystone_detector")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("keystone_detector"), dict)
+        else {}
+    )
+    app.state.keystone_detector = KeystoneDetector(keystone_cfg)
+    criticality_cfg = (
+        current_version.policy.get("criticality_control")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("criticality_control"), dict)
+        else {}
+    )
+    app.state.criticality_controller = CriticalityController(criticality_cfg)
     app.state.arc_readiness = AgentReadinessCertifier()
     app.state.are = AREFramework()
     app.state.casura_db = CASURAIncidentDB()
     app.state.casura_intel = IncidentIntelligence()
     app.state.aabb_benchmark = AABBBenchmark()
+    app.state.par_reasoner = PARReasoner()
     app.state.competitive_monitor = CompetitiveMonitor()
+    red_queen_cfg = (
+        current_version.policy.get("red_queen")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("red_queen"), dict)
+        else {}
+    )
+    app.state.red_queen = RedQueenMonitor(red_queen_cfg)
     cost_attribution_cfg = (
         current_version.policy.get("cost_attribution")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("cost_attribution"), dict)
@@ -1766,6 +1804,35 @@ def create_api_app(
         rows = app.state.knowledge_base.suggest_for_error(message)
         return {"error_message": message, "suggestions": rows, "total": len(rows)}
 
+    @app.post("/api/v1/par/observe")
+    def par_observe(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        app.state.par_reasoner.observe(payload)
+        return {"ok": True, "observations": int(app.state.par_reasoner.get_stats().get("observations", 0))}
+
+    @app.post("/api/v1/par/abduce")
+    def par_abduce(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        return app.state.par_reasoner.abduce(payload)
+
+    @app.get("/api/v1/par/causal-graph")
+    def par_causal_graph(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.par_reasoner.get_causal_graph()
+
+    @app.get("/api/v1/par/stats")
+    def par_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.par_reasoner.get_stats()
+
     @app.get("/api/v1/quorum/status")
     def quorum_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
@@ -1962,6 +2029,50 @@ def create_api_app(
         _require_auth(authorization)
         return app.state.otel_bridge.get_stats()
 
+    @app.post("/api/v1/kolmogorov/estimate")
+    def kolmogorov_estimate(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        message = payload.get("message")
+        if isinstance(message, dict):
+            return app.state.kolmogorov_importance.compute_importance(message)
+        text = payload.get("text")
+        if isinstance(text, str):
+            return app.state.kolmogorov_importance.compute_importance({"role": "user", "content": text})
+        raise HTTPException(status_code=400, detail={"error": "message or text is required"})
+
+    @app.post("/api/v1/kolmogorov/record-correlation")
+    def kolmogorov_record_correlation(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        k_score = payload.get("k_score")
+        uci_score = payload.get("uci_score")
+        decision = payload.get("decision", "ALLOW")
+        if not isinstance(k_score, int | float) or not isinstance(uci_score, int | float):
+            raise HTTPException(status_code=400, detail={"error": "k_score and uci_score must be numbers"})
+        app.state.kolmogorov_importance.record_correlation(float(k_score), float(uci_score), str(decision))
+        return app.state.kolmogorov_importance.get_stats()
+
+    @app.get("/api/v1/kolmogorov/stats")
+    def kolmogorov_stats(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.kolmogorov_importance.get_stats()
+
+    @app.get("/api/v1/kolmogorov/rho")
+    def kolmogorov_rho(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {"rho": app.state.kolmogorov_importance.compute_rho()}
+
     @app.post("/api/v1/vickrey/bid")
     def vickrey_bid(
         body: dict[str, Any] | None = None,
@@ -1997,6 +2108,109 @@ def create_api_app(
     ) -> dict[str, Any]:
         _require_auth(authorization)
         return {"agent_id": agent_id, "allocation": app.state.vickrey_allocator.get_allocation(agent_id)}
+
+    @app.post("/api/v1/mrac/update")
+    def mrac_update(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        agent_id = str(body.get("agent_id", "")).strip()
+        if not agent_id:
+            raise HTTPException(status_code=400, detail={"error": "agent_id is required"})
+        try:
+            actual_cqs = float(body.get("actual_cqs", 0.0))
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail={"error": "actual_cqs must be numeric"}) from error
+        return app.state.mrac_controller.update(agent_id=agent_id, actual_cqs=actual_cqs)
+
+    @app.get("/api/v1/mrac/agents")
+    def mrac_agents(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        rows = app.state.mrac_controller.get_all_agents()
+        return {"agents": rows, "total": len(rows)}
+
+    @app.get("/api/v1/mrac/stats")
+    def mrac_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.mrac_controller.get_stats()
+
+    @app.get("/api/v1/mrac/{agent_id}/gains")
+    def mrac_gains(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {"agent_id": agent_id, **app.state.mrac_controller.get_gains(agent_id)}
+
+    @app.post("/api/v1/keystone/record-uci")
+    def keystone_record_uci(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        agent_id = str(body.get("agent_id", "")).strip()
+        if not agent_id:
+            raise HTTPException(status_code=400, detail={"error": "agent_id is required"})
+        try:
+            uci_score = float(body.get("uci_score", 0.0))
+        except (TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail={"error": "uci_score must be numeric"}) from error
+        app.state.keystone_detector.record_uci(agent_id=agent_id, uci_score=uci_score)
+        return {"ok": True, "agent_id": agent_id}
+
+    @app.get("/api/v1/keystone/all")
+    def keystone_all(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        rows = app.state.keystone_detector.get_all_keystones()
+        return {"keystones": rows, "total": len(rows)}
+
+    @app.get("/api/v1/keystone/{agent_id}/score")
+    def keystone_score(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.keystone_detector.compute_keystone_score(agent_id)
+
+    @app.get("/api/v1/keystone/{agent_id}/cascade")
+    def keystone_cascade(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.keystone_detector.get_trophic_cascade(agent_id)
+
+    @app.post("/api/v1/criticality/control")
+    def criticality_control(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        psi = payload.get("psi")
+        if not isinstance(psi, int | float):
+            raise HTTPException(status_code=400, detail={"error": "psi must be numeric"})
+        return app.state.criticality_controller.compute_control(float(psi))
+
+    @app.post("/api/v1/criticality/mrac-update")
+    def criticality_mrac_update(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        psi_actual = payload.get("psi_actual")
+        psi_predicted = payload.get("psi_predicted")
+        if not isinstance(psi_actual, int | float) or not isinstance(psi_predicted, int | float):
+            raise HTTPException(status_code=400, detail={"error": "psi_actual and psi_predicted must be numeric"})
+        updated = app.state.criticality_controller.mrac_update(float(psi_actual), float(psi_predicted))
+        return {"adaptive_gain": round(float(updated), 4)}
+
+    @app.get("/api/v1/criticality/stats")
+    def criticality_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.criticality_controller.get_stats()
 
     @app.post("/api/v1/arc/certify/{agent_id}")
     def arc_certify(
@@ -2217,6 +2431,39 @@ def create_api_app(
                     )
         alerts = changes + competitor_alerts
         return {"alerts": alerts, "count": len(alerts)}
+
+    @app.post("/api/v1/red-queen/attack")
+    def red_queen_attack_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        app.state.red_queen.record_attack(body if isinstance(body, dict) else {})
+        return {"status": "recorded", "kind": "attack", "stats": app.state.red_queen.get_stats()}
+
+    @app.post("/api/v1/red-queen/detection")
+    def red_queen_detection_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        app.state.red_queen.record_detection(body if isinstance(body, dict) else {})
+        return {"status": "recorded", "kind": "detection", "stats": app.state.red_queen.get_stats()}
+
+    @app.get("/api/v1/red-queen/ari")
+    def red_queen_ari_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.red_queen.compute_arms_race_index()
+
+    @app.get("/api/v1/red-queen/emerging-patterns")
+    def red_queen_emerging_patterns_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        patterns = app.state.red_queen.get_emerging_patterns()
+        return {"patterns": patterns, "count": len(patterns)}
 
     @app.get("/api/v1/ecosystem/summary")
     def ecosystem_summary(authorization: str | None = Header(default=None)) -> dict[str, Any]:
