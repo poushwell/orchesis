@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://pypi.org/project/orchesis/"><img src="https://img.shields.io/pypi/v/orchesis?color=7c3aed&label=PyPI" alt="PyPI"/></a>
-  <a href="https://github.com/poushwell/orchesis/actions"><img src="https://img.shields.io/badge/tests-3851%20passing-22c55e" alt="tests"/></a>
+  <a href="https://github.com/poushwell/orchesis/actions"><img src="https://img.shields.io/badge/tests-4038%20passing-22c55e" alt="tests"/></a>
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"/>
   <a href="https://github.com/poushwell/orchesis"><img src="https://img.shields.io/github/stars/poushwell/orchesis?style=flat&color=7c3aed" alt="Stars"/></a>
   <img src="https://img.shields.io/badge/dependencies-0-green" alt="Zero dependencies"/>
@@ -129,6 +129,12 @@ duplicate context across providers. This is an architectural advantage, not a fe
 - HGT Protocol stub - horizontal gene transfer (H42)
 - IACS full discourse coherence - 0.40xFC + 0.35xEC + 0.25xHC
 
+**Viral Tools**
+- Agent Autopsy - "What killed your AI agent?" one-command diagnosis
+- Vibe Code Audit - AI-generated code security scanner
+- ARC Certification - production readiness badge
+- Weekly Intelligence Report - automated competitive briefing
+
 ## What Orchesis does
 
 | Capability | Current coverage |
@@ -148,11 +154,12 @@ duplicate context across providers. This is an architectural advantage, not a fe
 | MAST coverage | 78.6% |
 | OWASP coverage | 80% |
 | Auto-heal actions | 6 |
-| Tests passing | 3,851 |
-| Modules | 240 |
+| Tests passing | 4,038 |
+| Modules | 100+ |
 | Dependencies | **0** (stdlib only) |
 | Proxy overhead | 0.8% measured |
 | Context collapse | 12x growth caught |
+| API endpoints | 250+ |
 
 ## Free MCP Security Scanner
 

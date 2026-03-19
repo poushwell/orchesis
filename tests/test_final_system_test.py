@@ -138,8 +138,8 @@ def test_all_api_endpoints_registered(tmp_path: Path) -> None:
     assert len(routes) > 100, f"Expected >100 routes, got {len(routes)}"
 
 
-def test_version_0_3_0() -> None:
-    """Package version is 0.3.0."""
+def test_version_0_4_0() -> None:
+    """Package version is 0.4.0."""
     from orchesis import __version__
 
-    assert __version__ == "0.3.0"
+    assert __version__ == "0.4.0"

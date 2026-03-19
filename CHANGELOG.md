@@ -1,3 +1,19 @@
+## [0.4.0] — 2026-03-19
+
+### Added
+- NLCE Layer 2+3: PAR reasoning, Criticality Control LQR, MRAC, HGT Protocol
+- Research Tier 1-3: Carnot, Red Queen, Kolmogorov, Fitness Landscape
+- Ecosystem: CASURA AISS v2.0, AABB Benchmark, ARE Framework
+- Agent Autopsy MVP - post-mortem session analysis
+- Orchesis SDK - Python client (stdlib only)
+- System Health Report, Config Validator, Weekly Intelligence Report
+- Dashboard: Autopsy modal, Research tab, Ecosystem tab
+- 100+ new modules total, 250+ API endpoints
+
+### Tests
+- 4038 passing (was 3512 at v0.3.0)
+- +526 new tests
+
 ## [0.6.0] - 2026-03-01
 
 ### Added

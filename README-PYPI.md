@@ -1,7 +1,7 @@
 ![Orchesis](https://raw.githubusercontent.com/poushwell/orchesis/main/docs/banner-light.png)
 
 [![PyPI](https://img.shields.io/pypi/v/orchesis?color=7c3aed&label=PyPI)](https://pypi.org/project/orchesis/)
-[![Tests](https://img.shields.io/badge/tests-3851%20passing-22c55e)](https://github.com/poushwell/orchesis)
+[![Tests](https://img.shields.io/badge/tests-4038%20passing-22c55e)](https://github.com/poushwell/orchesis)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 [![Stars](https://img.shields.io/github/stars/poushwell/orchesis?style=flat&color=7c3aed)](https://github.com/poushwell/orchesis)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-green)
@@ -54,6 +54,12 @@ duplicate context across providers.
 
 **Observability:** Real-time dashboard. Flow X-Ray. Agent Reliability Score.
 
+**Viral Tools**
+- Agent Autopsy - "What killed your AI agent?" one-command diagnosis
+- Vibe Code Audit - AI-generated code security scanner
+- ARC Certification - production readiness badge
+- Weekly Intelligence Report - automated competitive briefing
+
 ## By the numbers
 
 | Metric | Value |
@@ -64,10 +70,10 @@ duplicate context across providers.
 | Context collapse | 12x growth caught |
 | MAST coverage | 78.6% |
 | OWASP coverage | 80% |
-| Tests passing | 3851 |
+| Tests passing | 4,038 |
 | Dependencies | 0 (stdlib only) |
-| Modules | 240 |
-| API endpoints | 100+ |
+| Modules | 100+ |
+| API endpoints | 250+ |
 
 ## Free MCP Security Scanner
 
