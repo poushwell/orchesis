@@ -108,6 +108,7 @@ from orchesis.casura.incident_db import CASURAIncidentDB
 from orchesis.casura.intelligence import IncidentIntelligence
 from orchesis.aabb.benchmark import AABBBenchmark
 from orchesis.monitoring.competitive import CompetitiveMonitor
+from orchesis.monitoring.parsers import SocialMonitoringParsers
 from orchesis.par_reasoning import PARReasoner
 from orchesis.group_selection import GroupSelectionModel
 from orchesis.relevance_theory import RelevanceScorer
@@ -116,12 +117,14 @@ from orchesis.double_loop_learning import DoubleLoopLearner
 from orchesis.complement_cascade import ComplementCascade
 from orchesis.agent_autopsy import AgentAutopsy
 from orchesis.session_forensics import SessionForensics
+from orchesis.weekly_report import WeeklyReportGenerator
 from orchesis.mrac_controller import MRACController
 from orchesis.keystone_agent import KeystoneDetector
 from orchesis.criticality_control import CriticalityController
 from orchesis.immune_memory import ImmuneMemory
 from orchesis.homeostasis import HomeostasisController
 from orchesis.adaptive_threshold import AdaptiveThresholdManager
+from orchesis.system_health_report import SystemHealthReport
 from orchesis import __version__
 
 
@@ -303,6 +306,10 @@ def create_api_app(
     )
     app.state.relevance_scorer = RelevanceScorer(relevance_cfg)
     app.state.competitive_monitor = CompetitiveMonitor()
+    app.state.social_parsers = SocialMonitoringParsers()
+    app.state.monitoring_items: list[dict[str, Any]] = []
+    app.state.monitoring_opportunities: list[dict[str, Any]] = []
+    app.state.weekly_report_generator = WeeklyReportGenerator()
     red_queen_cfg = (
         current_version.policy.get("red_queen")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("red_queen"), dict)
@@ -390,6 +397,7 @@ def create_api_app(
         else {}
     )
     app.state.community_intel = CommunityIntel(community_cfg)
+    app.state.system_health_report = SystemHealthReport()
     app.state.notifications: list[dict[str, Any]] = []
     app.state.notifications_lock = threading.Lock()
     app.state.agent_lifecycle = AgentLifecycleManager()
@@ -2738,6 +2746,108 @@ def create_api_app(
         alerts = changes + competitor_alerts
         return {"alerts": alerts, "count": len(alerts)}
 
+    @app.get("/api/v1/monitoring/parse-hn")
+    async def monitoring_parse_hn(
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = await request.json() if request is not None else {}
+        if not isinstance(payload, dict):
+            payload = {}
+        item = payload.get("item", {})
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail={"error": "item must be an object"})
+        parsed = app.state.social_parsers.parse_hn_item(item)
+        app.state.monitoring_items.append(parsed)
+        if len(app.state.monitoring_items) > 1000:
+            app.state.monitoring_items = app.state.monitoring_items[-1000:]
+        app.state.monitoring_opportunities = app.state.social_parsers.extract_opportunities(
+            app.state.monitoring_items[-200:]
+        )
+        return {"parsed": parsed}
+
+    @app.get("/api/v1/monitoring/opportunities")
+    def monitoring_opportunities(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        rows = app.state.monitoring_opportunities[-20:]
+        return {"opportunities": rows, "count": len(rows)}
+
+    @app.get("/api/v1/monitoring/weekly-report")
+    def monitoring_weekly_report(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        feed_items = app.state.monitoring_items[-200:]
+        report = app.state.competitive_monitor.generate_weekly_report(
+            {
+                "competitors": {},
+                "feed": feed_items,
+            }
+        )
+        return report
+
+    @app.get("/api/v1/weekly-report")
+    def weekly_report_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        blocked_requests = 0
+        total_cost_usd = 0.0
+        tracker = getattr(app.state, "tracker", None)
+        if tracker is not None:
+            blocked_requests = int(getattr(tracker, "blocked_requests", 0) or 0)
+            total_cost_usd = float(getattr(tracker, "total_cost_usd", 0.0) or 0.0)
+        compliance = app.state.compliance_checker.check_policy(app.state.current_version.policy)
+        competitive = app.state.competitive_monitor.generate_weekly_report(
+            {"competitors": {}, "feed": app.state.monitoring_items[-200:]}
+        )
+        arc_stats_fn = getattr(app.state.arc_readiness, "get_stats", None)
+        arc_stats = arc_stats_fn() if callable(arc_stats_fn) else {}
+        data = {
+            "security": {
+                "blocked": blocked_requests,
+                "new_sigs": 0,
+                "ari": float(app.state.red_queen.compute_arms_race_index().get("ari", 0.0) or 0.0),
+            },
+            "cost": {
+                "cost": total_cost_usd,
+                "savings": 0.0,
+                "yield": float(getattr(app.state.token_yield, "yield_percent", 0.0) or 0.0),
+            },
+            "compliance": {
+                "eu_score": float(compliance.get("score", 0.0) or 0.0),
+                "arc_count": int(arc_stats.get("certified_agents", 0) or 0),
+                "incidents": blocked_requests,
+            },
+            "competitive": {
+                "threats": len(competitive.get("threats", [])) if isinstance(competitive.get("threats"), list) else 0,
+                "opportunities": (
+                    len(competitive.get("opportunities", []))
+                    if isinstance(competitive.get("opportunities"), list)
+                    else 0
+                ),
+            },
+            "research": {
+                "experiments": 0,
+                "confirmed": 0,
+            },
+        }
+        return app.state.weekly_report_generator.generate(data)
+
+    @app.post("/api/v1/monitoring/score-relevance")
+    def monitoring_score_relevance(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        text = str(payload.get("text", "") or "")
+        score = app.state.social_parsers.score_relevance(text)
+        return {"text": text, "relevance_score": score}
+
     @app.post("/api/v1/red-queen/attack")
     def red_queen_attack_endpoint(
         body: dict[str, Any],
@@ -3808,6 +3918,13 @@ def create_api_app(
             "subscriber_count": event_bus.subscriber_count,
             "corpus_size": corpus_stats["total"],
         }
+
+    @app.get("/api/v1/system/health-report")
+    def system_health_report_endpoint(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.system_health_report.generate(app.state)
 
     @app.get("/api/v1/cost-analytics")
     def cost_analytics(

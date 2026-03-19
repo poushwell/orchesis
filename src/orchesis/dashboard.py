@@ -1360,6 +1360,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         <button id="theme-toggle" onclick="toggleTheme()" aria-pressed="true" aria-label="Toggle light or dark theme">☀️</button>
         <button id="hc-toggle" onclick="toggleHighContrast()" aria-pressed="false" aria-label="Toggle high contrast mode">◑</button>
         <button id="notif-bell" onclick="toggleNotifications()" aria-expanded="false" aria-controls="notif-panel" aria-label="Toggle notifications panel">🔔 <span id="notif-count" class="badge">0</span></button>
+        <button id="autopsy-btn" onclick="openAutopsy()">🔬 Autopsy</button>
       </div>
     </div>
     <div id="notif-panel" class="notif-panel hidden" role="region" aria-label="Notifications panel">
@@ -1379,6 +1380,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       <button id="tab-threats" class="tab-btn" data-tab="threats" role="tab" aria-selected="false" aria-controls="threats">🛡️ Threats</button>
       <button id="tab-cache" class="tab-btn" data-tab="cache" role="tab" aria-selected="false" aria-controls="cache">⚡ Cache</button>
       <button id="tab-cost" class="tab-btn" data-tab="cost" role="tab" aria-selected="false" aria-controls="cost">💰 Cost</button>
+      <button id="tab-research" class="tab-btn" data-tab="research" role="tab" aria-selected="false" aria-controls="research">🔬 Research</button>
       <button id="tab-compliance" class="tab-btn" data-tab="compliance" role="tab" aria-selected="false" aria-controls="compliance">📘 Compliance</button>
       <button id="tab-overwatch" class="tab-btn" data-tab="overwatch" role="tab" aria-selected="false" aria-controls="overwatch">🛰️ Overwatch</button>
       <button id="tab-ecosystem" class="tab-btn" data-tab="ecosystem" role="tab" aria-selected="false" aria-controls="ecosystem">🌐 Ecosystem</button>
@@ -1937,6 +1939,11 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
         <div id="approvals-history" style="margin-top:10px;"></div>
       </div>
     </section>
+    <section id="research" class="screen tab-section hidden" role="tabpanel">
+      <div id="nlce-confirmed-results"></div>
+      <div id="nlce-theorems"></div>
+      <div id="nlce-pipeline-state"></div>
+    </section>
     <section id="ecosystem" class="screen" role="tabpanel" aria-labelledby="tab-ecosystem">
       <div class="grid-2">
         <div class="panel panel-primary">
@@ -1995,6 +2002,15 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       <button onclick="closeChangelog()">Close</button>
     </div>
   </div>
+  <div id="autopsy-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3>🔬 Agent Autopsy</h3>
+      <input id="autopsy-session-id" type="text" placeholder="Session ID..." />
+      <button onclick="runAutopsy()">Run Autopsy</button>
+      <div id="autopsy-result"></div>
+      <button onclick="closeAutopsy()">Close</button>
+    </div>
+  </div>
   <div id="toast" class="toast"></div>
 
   <script>
@@ -2030,6 +2046,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     let notifLastTs = 0;
     let rateLimitSnapshot = null;
     let lastRateLimitFetchMs = 0;
+    const API_TOKEN = String((window && window.API_TOKEN) || localStorage.getItem("API_TOKEN") || "").trim();
     let searchTimer = null;
     const SHORTCUTS = {
       "g s": "shield",
@@ -2398,6 +2415,38 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     function closeShortcutsModal(){
       const modal = document.getElementById("shortcuts-modal");
       if(modal){ modal.classList.add("hidden"); }
+    }
+    function openAutopsy() {
+      const modal = document.getElementById("autopsy-modal");
+      if(modal){ modal.classList.remove("hidden"); }
+    }
+    function closeAutopsy() {
+      const modal = document.getElementById("autopsy-modal");
+      if(modal){ modal.classList.add("hidden"); }
+    }
+    async function runAutopsy() {
+      const sessionId = document.getElementById("autopsy-session-id").value.trim();
+      if (!sessionId) { showToast("Enter session ID"); return; }
+      const resp = await fetch(`/api/v1/autopsy/${sessionId}`, {
+        method: "POST",
+        headers: API_TOKEN ? { "Authorization": `Bearer ${API_TOKEN}` } : {},
+      });
+      const data = await resp.json();
+      renderAutopsyResult(data);
+    }
+    function renderAutopsyResult(data) {
+      if (data && data.error) {
+        document.getElementById("autopsy-result").innerHTML = `<p class="danger">${data.error}</p>`;
+        return;
+      }
+      document.getElementById("autopsy-result").innerHTML = `
+        <div class="autopsy-card">
+          <h4>Cause: ${data && data.cause_of_death ? data.cause_of_death : "unknown"}</h4>
+          <p>Severity: ${data && data.severity ? data.severity : "-"}</p>
+          <p>Preventable: ${data && data.preventable ? "Yes" : "No"}</p>
+          <ul>${(data && Array.isArray(data.recommendations) ? data.recommendations : []).map(r => `<li>${r}</li>`).join("")}</ul>
+        </div>
+      `;
     }
     async function showChangelog() {
       const resp = await fetch('/api/v1/changelog');
@@ -4432,6 +4481,61 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       });
     }
 
+    function renderResearch({metrics, theorems}) {
+      const metricsData = metrics && metrics.value ? metrics.value : {};
+      const theoremData = theorems && theorems.value ? theorems.value : {};
+      const resultsRoot = document.getElementById("nlce-confirmed-results");
+      if(resultsRoot){
+        resultsRoot.innerHTML = `
+          <div class="panel panel-primary">
+            <div class="section-title"><strong>Confirmed NLCE results</strong></div>
+            <div>Zipf α: <strong>${Number(metricsData.zipf_alpha || 0).toFixed(3)}</strong></div>
+            <div>N*: <strong>${Number(metricsData.n_star || 0).toFixed(0)}</strong></div>
+            <div>Overhead: <strong>${Number(metricsData.overhead_ms || 0).toFixed(1)} ms</strong></div>
+          </div>
+        `;
+      }
+      const theoremRoot = document.getElementById("nlce-theorems");
+      if(theoremRoot){
+        const rows = Array.isArray(theoremData.theorems) ? theoremData.theorems : ["T1", "T2", "T3", "T4", "T5"];
+        theoremRoot.innerHTML = `
+          <div class="panel">
+            <div class="section-title"><strong>Impossibility theorems T1-T5</strong></div>
+            <ul>${rows.map((row)=> `<li>${String(row)}</li>`).join("")}</ul>
+          </div>
+        `;
+      }
+      const pipelineRoot = document.getElementById("nlce-pipeline-state");
+      if(pipelineRoot){
+        pipelineRoot.innerHTML = `
+          <div class="panel">
+            <div class="section-title"><strong>Current pipeline state</strong></div>
+            <div>Ψ: <strong>${Number(metricsData.psi || 0.5).toFixed(3)}</strong></div>
+            <div>phase: <strong>${String(metricsData.phase || "LIQUID")}</strong></div>
+            <div>slope_alert: <strong>${Boolean(metricsData.slope_alert) ? "true" : "false"}</strong></div>
+            <div style="margin-top:8px;">Token Yield chart (placeholder): <strong>${Number(metricsData.token_yield || 0).toFixed(2)}</strong></div>
+          </div>
+        `;
+      }
+    }
+
+    async function pollResearch() {
+      const [metrics, theorems] = await Promise.allSettled([
+        fetch('/api/v1/nlce/metrics'),
+        fetch('/api/v1/nlce/impossibility-theorems'),
+      ]);
+      async function toJson(result){
+        if(!result || result.status !== "fulfilled"){ return {}; }
+        const response = result.value;
+        if(!response || typeof response.ok !== "boolean" || !response.ok){ return {}; }
+        try { return await response.json(); } catch(_err) { return {}; }
+      }
+      renderResearch({
+        metrics: { value: await toJson(metrics) },
+        theorems: { value: await toJson(theorems) },
+      });
+    }
+
     async function pollTab(tab){
       if(tab === "shield") return pollShield();
       if(tab === "agents") return pollAgents();
@@ -4441,6 +4545,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       if(tab === "threats") return pollThreats();
       if(tab === "cache") return pollCache();
       if(tab === "cost") return pollCost();
+      if(tab === "research") return pollResearch();
       if(tab === "compliance") return pollCompliance();
       if(tab === "overwatch") return pollOverwatch();
       if(tab === "ecosystem") return pollEcosystem();
@@ -4462,6 +4567,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       document.querySelectorAll(".screen").forEach((el)=>{
         const isActive = el.id === tab;
         el.classList.toggle("active", isActive);
+        el.classList.toggle("hidden", !isActive);
         el.setAttribute("aria-hidden", isActive ? "false" : "true");
       });
       if (!loadedTabs.has(tab)) {

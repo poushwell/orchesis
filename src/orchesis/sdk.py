@@ -74,7 +74,7 @@ class OrchesisClient:
     def __init__(
         self,
         base_url: str = "http://localhost:8090",
-        timeout: float = 30.0,
+        timeout: float = 5.0,
         api_key: str = "",
         headers: dict[str, str] | None = None,
         api_url: str | None = None,
@@ -225,6 +225,33 @@ class OrchesisClient:
     def is_connected(self) -> bool:
         result = self.get_health()
         return result.get("status") == "ok"
+
+    def get_casura_incidents(self, limit: int = 20) -> dict[str, Any]:
+        return self._request("GET", f"/api/v1/casura/incidents?limit={int(limit)}")
+
+    def search_incidents(self, query: str) -> dict[str, Any]:
+        return self._request("POST", "/api/v1/casura/incidents/search", {"query": query})
+
+    def get_aabb_leaderboard(self) -> dict[str, Any]:
+        return self._request("GET", "/api/v1/aabb/leaderboard")
+
+    def get_are_report(self) -> dict[str, Any]:
+        return self._request("GET", "/api/v1/are/report")
+
+    def get_arc_certificates(self) -> dict[str, Any]:
+        return self._request("GET", "/api/v1/arc/certificates")
+
+    def analyze_session(self, session_id: str) -> dict[str, Any]:
+        return self._request("POST", f"/api/v1/forensics/session/{session_id}/analyze", {})
+
+    def get_fleet_status(self) -> dict[str, Any]:
+        return self._request("GET", "/api/v1/fleet/status")
+
+    def get_ecosystem_summary(self) -> dict[str, Any]:
+        return self._request("GET", "/api/v1/ecosystem/summary")
+
+    def get_compliance_certificate(self) -> dict[str, Any]:
+        return self._request("GET", "/api/v1/compliance/certificate")
 
     def get_dashboard_overview(self) -> dict[str, Any]:
         """Get dashboard overview metrics."""
@@ -386,4 +413,4 @@ class OrchesisClient:
         pass
 
     def __repr__(self) -> str:
-        return f"OrchesisClient(base_url={self._base_url!r})"
+        return f"OrchesisClient(url={self.api_url}, connected={self.is_connected()})"
