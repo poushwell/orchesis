@@ -71,6 +71,8 @@ from orchesis.pipeline_debugger import PipelineDebugger
 from orchesis.tool_call_analyzer import ToolCallAnalyzer
 from orchesis.memory_tracker import MemoryTracker
 from orchesis.fleet_coordinator import FleetCoordinator
+from orchesis.agent_compare import AgentComparer
+from orchesis.context_timeline import ContextTimeline
 from orchesis.vibe_audit import VibeCodeAuditor
 from orchesis.token_yield import TokenYieldTracker
 from orchesis.token_yield_report import TokenYieldReportGenerator
@@ -112,6 +114,7 @@ from orchesis.monitoring.parsers import SocialMonitoringParsers
 from orchesis.par_reasoning import PARReasoner
 from orchesis.group_selection import GroupSelectionModel
 from orchesis.relevance_theory import RelevanceScorer
+from orchesis.cost_of_freedom import CostOfFreedomCalculator
 from orchesis.red_queen import RedQueenMonitor
 from orchesis.double_loop_learning import DoubleLoopLearner
 from orchesis.complement_cascade import ComplementCascade
@@ -125,6 +128,9 @@ from orchesis.immune_memory import ImmuneMemory
 from orchesis.homeostasis import HomeostasisController
 from orchesis.adaptive_threshold import AdaptiveThresholdManager
 from orchesis.system_health_report import SystemHealthReport
+from orchesis.policy_impact_analyzer import PolicyImpactAnalyzer
+from orchesis.request_explainer import RequestExplainer
+from orchesis.insights import OrchesisInsights
 from orchesis import __version__
 
 
@@ -213,6 +219,8 @@ def create_api_app(
     app.state.compliance_checker = RealTimeComplianceChecker()
     app.state.incident_manager = IncidentManager()
     app.state.knowledge_base = OrchesisKnowledgeBase()
+    app.state.agent_comparer = AgentComparer()
+    app.state.context_timeline = ContextTimeline()
     app.state.forensic_reconstructor = ForensicReconstructor(decisions_log)
     quorum_cfg = (
         current_version.policy.get("quorum_sensing")
@@ -287,6 +295,8 @@ def create_api_app(
         else {}
     )
     app.state.adaptive_threshold = AdaptiveThresholdManager(threshold_cfg)
+    app.state.policy_impact_analyzer = PolicyImpactAnalyzer()
+    app.state.request_explainer = RequestExplainer()
     app.state.arc_readiness = AgentReadinessCertifier()
     app.state.are = AREFramework()
     app.state.casura_db = CASURAIncidentDB()
@@ -305,6 +315,7 @@ def create_api_app(
         else {}
     )
     app.state.relevance_scorer = RelevanceScorer(relevance_cfg)
+    app.state.cost_of_freedom = CostOfFreedomCalculator()
     app.state.competitive_monitor = CompetitiveMonitor()
     app.state.social_parsers = SocialMonitoringParsers()
     app.state.monitoring_items: list[dict[str, Any]] = []
@@ -398,6 +409,7 @@ def create_api_app(
     )
     app.state.community_intel = CommunityIntel(community_cfg)
     app.state.system_health_report = SystemHealthReport()
+    app.state.orchesis_insights = OrchesisInsights()
     app.state.notifications: list[dict[str, Any]] = []
     app.state.notifications_lock = threading.Lock()
     app.state.agent_lifecycle = AgentLifecycleManager()
@@ -1672,6 +1684,48 @@ def create_api_app(
         warnings = validate_policy_warnings(loaded)
         return {"valid": len(errors) == 0, "errors": errors, "warnings": warnings}
 
+    @app.post("/api/v1/policy/simulate-impact")
+    def policy_simulate_impact(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        current_policy = payload.get("current_policy", {})
+        new_policy = payload.get("new_policy", {})
+        sample_requests = payload.get("sample_requests", [])
+        if not isinstance(current_policy, dict) or not isinstance(new_policy, dict):
+            raise HTTPException(status_code=400, detail={"error": "current_policy and new_policy must be objects"})
+        if not isinstance(sample_requests, list):
+            raise HTTPException(status_code=400, detail={"error": "sample_requests must be a list"})
+        return app.state.policy_impact_analyzer.simulate(current_policy, new_policy, sample_requests)
+
+    @app.get("/api/v1/policy/impact-stats")
+    def policy_impact_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.policy_impact_analyzer.get_stats()
+
+    @app.post("/api/v1/explain/decision")
+    def explain_decision(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        return app.state.request_explainer.explain(payload)
+
+    @app.post("/api/v1/explain/session")
+    def explain_session(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        decisions = payload.get("decisions", [])
+        if not isinstance(decisions, list):
+            raise HTTPException(status_code=400, detail={"error": "decisions must be a list"})
+        return app.state.request_explainer.explain_session(decisions)
+
     @app.get("/api/v1/evidence/{session_id}")
     def evidence_record_endpoint(
         session_id: str,
@@ -2647,6 +2701,76 @@ def create_api_app(
         _require_auth(authorization)
         return app.state.aabb_benchmark.compare_agents(agent_a, agent_b)
 
+    @app.post("/api/v1/compare/metric")
+    def compare_record_metric(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        agent_id = str(payload.get("agent_id", "") or "").strip()
+        metric = str(payload.get("metric", "") or "").strip()
+        value = payload.get("value")
+        if not agent_id or not metric or not isinstance(value, int | float):
+            raise HTTPException(status_code=400, detail={"error": "agent_id, metric, value are required"})
+        app.state.agent_comparer.record_metric(agent_id=agent_id, metric=metric, value=float(value))
+        return {"ok": True, "stats": app.state.agent_comparer.get_stats()}
+
+    @app.get("/api/v1/compare/ranking")
+    def compare_ranking(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        ranking = app.state.agent_comparer.rank_all()
+        return {"ranking": ranking, "total": len(ranking)}
+
+    @app.get("/api/v1/compare/{agent_a}/{agent_b}")
+    def compare_agents(
+        agent_a: str,
+        agent_b: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.agent_comparer.compare(agent_a=agent_a, agent_b=agent_b)
+
+    @app.post("/api/v1/timeline/{session_id}/record")
+    def timeline_record(
+        session_id: str,
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        app.state.context_timeline.record(session_id=session_id, snapshot=payload)
+        timeline = app.state.context_timeline.get_timeline(session_id)
+        return {"ok": True, "session_id": session_id, "points": len(timeline)}
+
+    @app.get("/api/v1/timeline/{session_id}")
+    def timeline_get(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        points = app.state.context_timeline.get_timeline(session_id)
+        return {"session_id": session_id, "timeline": points, "points": len(points)}
+
+    @app.get("/api/v1/timeline/{session_id}/phases")
+    def timeline_phases(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        transitions = app.state.context_timeline.get_phase_transitions(session_id)
+        return {"session_id": session_id, "transitions": transitions, "count": len(transitions)}
+
+    @app.get("/api/v1/timeline/{session_id}/summary")
+    def timeline_summary(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.context_timeline.summarize(session_id)
+
     @app.post("/api/v1/are/slo")
     def are_define_slo(
         body: dict[str, Any],
@@ -2847,6 +2971,26 @@ def create_api_app(
         text = str(payload.get("text", "") or "")
         score = app.state.social_parsers.score_relevance(text)
         return {"text": text, "relevance_score": score}
+
+    @app.post("/api/v1/cost-of-freedom/calculate")
+    def cost_of_freedom_calculate(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        result = app.state.cost_of_freedom.calculate(payload)
+        return {
+            **result,
+            "summary": app.state.cost_of_freedom.get_summary_text(result),
+        }
+
+    @app.get("/api/v1/cost-of-freedom/benchmarks")
+    def cost_of_freedom_benchmarks(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {"benchmarks": dict(app.state.cost_of_freedom.benchmarks)}
 
     @app.post("/api/v1/red-queen/attack")
     def red_queen_attack_endpoint(
@@ -3925,6 +4069,21 @@ def create_api_app(
     ) -> dict[str, Any]:
         _require_auth(authorization)
         return app.state.system_health_report.generate(app.state)
+
+    @app.get("/api/v1/insights")
+    def insights(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.orchesis_insights.generate(app.state)
+
+    @app.get("/api/v1/insights/one-liner")
+    def insights_one_liner(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {"one_liner": app.state.orchesis_insights.get_one_liner()}
+
+    @app.get("/api/v1/insights/pitch")
+    def insights_pitch(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return {"pitch": app.state.orchesis_insights.get_elevator_pitch()}
 
     @app.get("/api/v1/cost-analytics")
     def cost_analytics(

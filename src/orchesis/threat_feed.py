@@ -21,8 +21,10 @@ class ThreatFeed:
         self.feed_url = str(cfg.get("feed_url", "https://orchesis.io/api/threat-feed"))
         self.update_interval = int(cfg.get("update_interval_hours", 24))
         self.auto_update = bool(cfg.get("auto_update", False))
+        self.feed_limit = int(cfg.get("feed_limit", 1000))
         self._signatures: list[dict[str, Any]] = []
         self._last_updated: float = 0.0
+        self._community_feed: list[dict[str, Any]] = []
 
     @staticmethod
     def _signature_key(item: dict[str, Any]) -> str:
@@ -127,3 +129,55 @@ class ThreatFeed:
         if added > 0:
             self._last_updated = time.time()
         return added
+
+    def get_community_feed(self) -> list[dict]:
+        """Get aggregated community threat feed."""
+        return [dict(item) for item in self._community_feed]
+
+    def submit_threat(self, signature: str, severity: str, context: dict) -> dict:
+        """Submit new threat to community feed."""
+        sig = str(signature or "").strip()
+        sev = str(severity or "").strip().lower() or "medium"
+        if sev not in {"critical", "high", "medium", "low"}:
+            sev = "medium"
+        ctx = context if isinstance(context, dict) else {}
+        now = datetime.now(timezone.utc).isoformat()
+
+        for row in self._community_feed:
+            if str(row.get("signature", "")) == sig:
+                row["reports"] = int(row.get("reports", 0) or 0) + 1
+                row["severity"] = sev
+                row["verified"] = bool(row.get("verified", False) or ctx.get("verified", False))
+                row["updated_at"] = now
+                return dict(row)
+
+        feed_id = f"feed-{int(time.time() * 1000)}-{len(self._community_feed) + 1}"
+        item = {
+            "feed_id": feed_id,
+            "signature": sig,
+            "severity": sev,
+            "source": "community",
+            "verified": bool(ctx.get("verified", False)),
+            "reports": 1,
+            "context": dict(ctx),
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._community_feed.append(item)
+        if len(self._community_feed) > max(1, self.feed_limit):
+            self._community_feed = self._community_feed[-self.feed_limit :]
+        return dict(item)
+
+    def get_trending_threats(self, limit: int = 10) -> list[dict]:
+        """Get trending threats by report count."""
+        n = max(1, int(limit or 10))
+        rows = sorted(self._community_feed, key=lambda r: int(r.get("reports", 0) or 0), reverse=True)
+        return [dict(item) for item in rows[:n]]
+
+    def export_feed(self, format: str = "json") -> str:
+        """Export feed as JSON or YAML."""
+        payload = {"feed": self.get_community_feed()}
+        fmt = str(format or "json").strip().lower()
+        if fmt == "yaml":
+            return yaml.safe_dump(payload, sort_keys=False)
+        return json.dumps(payload, ensure_ascii=False)
