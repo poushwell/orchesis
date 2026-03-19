@@ -73,17 +73,25 @@ class OrchesisClient:
 
     def __init__(
         self,
-        base_url: str = "http://localhost:8080",
+        base_url: str = "http://localhost:8090",
         timeout: float = 30.0,
         api_key: str = "",
         headers: dict[str, str] | None = None,
+        api_url: str | None = None,
+        token: str | None = None,
     ) -> None:
-        self._base_url = base_url.rstrip("/")
+        resolved_url = api_url if isinstance(api_url, str) and api_url.strip() else base_url
+        resolved_token = token if isinstance(token, str) and token.strip() else api_key
+        self._base_url = resolved_url.rstrip("/")
         self._timeout = timeout
-        self._api_key = api_key
+        self._api_key = resolved_token
         self._headers = dict(headers or {})
-        if api_key:
-            self._headers["Authorization"] = f"Bearer {api_key}"
+        if resolved_token:
+            self._headers["Authorization"] = f"Bearer {resolved_token}"
+        # Public aliases for lightweight SDK API.
+        self.api_url = self._base_url
+        self.token = resolved_token
+        self.timeout = timeout
 
     # --- HTTP helpers ---
 
@@ -157,21 +165,66 @@ class OrchesisClient:
     def _delete(self, path: str) -> dict[str, Any]:
         return self._request("DELETE", path)
 
+    def _request_safe(self, method: str, path: str, body: dict | None = None) -> dict[str, Any]:
+        """Best-effort request helper that never raises."""
+        try:
+            return self._request(method, path, body=body)
+        except OrchesisError as error:
+            return {"error": str(error)}
+        except Exception as error:  # pragma: no cover - defensive fallback
+            return {"error": str(error)}
+
     # =========================================
     # Stats & Health
     # =========================================
 
     def get_stats(self) -> dict[str, Any]:
         """Get full proxy statistics."""
-        return self._get("/stats")
+        # Prefer v1 endpoint for API compatibility, fallback to legacy.
+        try:
+            return self._get("/api/v1/stats")
+        except OrchesisError:
+            return self._get("/stats")
 
     def is_healthy(self) -> bool:
         """Check if proxy is responding."""
         try:
-            self._get("/stats")
+            _ = self.get_stats()
             return True
         except OrchesisError:
             return False
+
+    # =========================================
+    # Thin REST wrappers (BB7)
+    # =========================================
+
+    def get_health(self) -> dict[str, Any]:
+        return self._request_safe("GET", "/health")
+
+    def evaluate(self, request: dict[str, Any]) -> dict[str, Any]:
+        return self._request_safe("POST", "/api/v1/evaluate", request)
+
+    def get_overwatch(self) -> dict[str, Any]:
+        return self._request_safe("GET", "/api/v1/overwatch")
+
+    def get_nlce_metrics(self) -> dict[str, Any]:
+        return self._request_safe("GET", "/api/v1/nlce/metrics")
+
+    def create_incident(self, data: dict[str, Any]) -> dict[str, Any]:
+        return self._request_safe("POST", "/api/v1/casura/incidents", data)
+
+    def run_autopsy(self, session_id: str) -> dict[str, Any]:
+        return self._request_safe("POST", f"/api/v1/autopsy/{session_id}")
+
+    def get_arc_certificate(self, agent_id: str) -> dict[str, Any]:
+        return self._request_safe("GET", f"/api/v1/arc/{agent_id}/certificate")
+
+    def classify_intent(self, text: str) -> dict[str, Any]:
+        return self._request_safe("POST", "/api/v1/intent/classify", {"text": text})
+
+    def is_connected(self) -> bool:
+        result = self.get_health()
+        return result.get("status") == "ok"
 
     def get_dashboard_overview(self) -> dict[str, Any]:
         """Get dashboard overview metrics."""

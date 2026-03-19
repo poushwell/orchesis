@@ -102,6 +102,7 @@ from orchesis.policy_templates import PolicyTemplateManager, POLICY_TEMPLATES
 from orchesis.policy_diff import PolicyDiff
 from orchesis.policy_spec import PolicySpec
 from orchesis.evidence_record import EvidenceRecord
+from orchesis.agent_autopsy import AgentAutopsy
 from orchesis.arc_readiness import AgentReadinessCertifier
 from orchesis.aabb.benchmark import AABBBenchmark
 from orchesis.migrator import PolicyMigrator
@@ -3346,6 +3347,106 @@ def evidence_command(session_id: str, output_format: str, output_path: str | Non
     )
     saved = EvidenceRecord().export_json(record, target_path)
     click.echo(f"Saved: {saved}")
+
+
+@main.command("autopsy")
+@click.option("--session", "session_id", default=None)
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+@click.option("--output", "output_path", type=click.Path(), default=None)
+@click.option("--list", "list_recent", is_flag=True, default=False)
+@click.option("--decisions-log", "decisions_log_path", type=click.Path(), default=str(DEFAULT_DECISIONS_PATH))
+def autopsy_command(
+    session_id: str | None,
+    output_format: str,
+    output_path: str | None,
+    list_recent: bool,
+    decisions_log_path: str,
+) -> None:
+    """Run post-mortem analysis for one failed session."""
+    source = Path(decisions_log_path)
+    rows: list[dict[str, Any]] = []
+    if source.exists():
+        for line in source.read_text(encoding="utf-8").splitlines():
+            raw = line.strip()
+            if not raw:
+                continue
+            try:
+                entry = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            state = entry.get("state_snapshot", {})
+            if not isinstance(state, dict):
+                state = {}
+            reasons = entry.get("reasons", [])
+            if not isinstance(reasons, list):
+                reasons = []
+            tokens = entry.get("tokens")
+            if not isinstance(tokens, int | float):
+                tokens = state.get("prompt_tokens", state.get("prompt_length", 0))
+            rows.append(
+                {
+                    "session_id": str(entry.get("session_id") or state.get("session_id") or "__global__"),
+                    "timestamp": str(entry.get("timestamp", "")),
+                    "decision": str(entry.get("decision", "")),
+                    "reasons": [str(item) for item in reasons],
+                    "tokens": int(tokens) if isinstance(tokens, int | float) else 0,
+                    "state_snapshot": state,
+                }
+            )
+
+    if list_recent:
+        counts: dict[str, int] = {}
+        for row in rows:
+            sid = str(row.get("session_id", "__global__"))
+            counts[sid] = counts.get(sid, 0) + 1
+        listing = [{"session_id": sid, "events": cnt} for sid, cnt in sorted(counts.items())]
+        if output_format == "json":
+            content = json.dumps({"sessions": listing, "count": len(listing)}, ensure_ascii=False, indent=2)
+        else:
+            lines = ["Recent sessions:"]
+            for row in listing[:50]:
+                lines.append(f"- {row['session_id']}: {row['events']} events")
+            content = "\n".join(lines)
+        if isinstance(output_path, str) and output_path.strip():
+            target = Path(output_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content + ("\n" if not content.endswith("\n") else ""), encoding="utf-8")
+            click.echo(f"Saved: {target}")
+        else:
+            click.echo(content)
+        return
+
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise click.ClickException("--session is required unless --list is used")
+
+    report = AgentAutopsy().perform(session_id=session_id.strip(), decisions_log=rows)
+    if "error" in report:
+        raise click.ClickException(str(report["error"]))
+
+    if output_format == "json":
+        content = json.dumps(report, ensure_ascii=False, indent=2)
+    else:
+        content = "\n".join(
+            [
+                f"Autopsy: {report['autopsy_id']}",
+                f"Session: {report['session_id']}",
+                f"Cause of death: {report['cause_of_death']}",
+                f"Severity: {report['severity']}",
+                f"Preventable: {report['preventable']}",
+                "Recommendations:",
+                *[f"- {item}" for item in report.get("recommendations", [])],
+            ]
+        )
+
+    if isinstance(output_path, str) and output_path.strip():
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content + ("\n" if not content.endswith("\n") else ""), encoding="utf-8")
+        click.echo(f"Saved: {target}")
+        return
+    click.echo(content)
 
 
 def _normalize_audit_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
