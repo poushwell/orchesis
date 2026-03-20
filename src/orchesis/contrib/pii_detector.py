@@ -134,6 +134,22 @@ def preprocess_for_pii(text: str) -> list[str]:
     return deduped or [text]
 
 
+def _sanitize_detect_input(text: Any) -> str:
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
+    if not isinstance(text, str):
+        return ""
+    # Remove BIDI override and other formatting characters.
+    text = "".join(
+        c for c in text if unicodedata.category(c) != "Cf" or c in (" ", "\t", "\n")
+    )
+    # Remove null bytes.
+    text = text.replace("\x00", "")
+    # Remove replacement chars from broken UTF-8.
+    text = text.replace("\ufffd", "")
+    return text
+
+
 class PiiDetector:
     """Detect PII and sensitive data in text and structured data."""
 
@@ -175,6 +191,7 @@ class PiiDetector:
 
     def detect(self, text: str) -> list[dict[str, Any]]:
         """Compatibility detect entrypoint hardened for fuzzed inputs."""
+        text = _sanitize_detect_input(text)
         if not isinstance(text, str):
             return []
         try:
@@ -190,6 +207,7 @@ class PiiDetector:
             return []
 
     def scan_text(self, text: str) -> list[dict[str, Any]]:
+        text = _sanitize_detect_input(text)
         if not isinstance(text, str):
             return []
         try:

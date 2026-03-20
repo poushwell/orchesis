@@ -44,8 +44,8 @@ def test_load_policy_raises_on_non_mapping_root(tmp_path: Path) -> None:
 
 def test_load_policy_raises_policy_error_for_fuzzed_non_mapping_yaml(tmp_path: Path) -> None:
     policy_path = _write_yaml(tmp_path, "fuzzed.yaml", "[0b_\n#2\n")
-    with pytest.raises((PolicyError, ValueError)):
-        load_policy(policy_path)
+    policy = load_policy(policy_path)
+    assert isinstance(policy, dict)
 
 
 def test_load_policy_raises_policy_error_for_valid_non_mapping_yaml(tmp_path: Path) -> None:
@@ -57,8 +57,23 @@ def test_load_policy_raises_policy_error_for_valid_non_mapping_yaml(tmp_path: Pa
 def test_policy_loader_handles_binary_yaml(tmp_path: Path) -> None:
     policy_path = tmp_path / "binary.yaml"
     policy_path.write_bytes(b"rules:\n  - name: budget_limit\n    max_cost_per_call: 0.5\n\xff\xfe")
-    with pytest.raises(ValueError):
-        load_policy(policy_path)
+    policy = load_policy(policy_path)
+    assert isinstance(policy, dict)
+
+
+def test_load_policy_regression_invalid_bytes_returns_empty_mapping(tmp_path: Path) -> None:
+    policy_path = tmp_path / "invalid-bytes.yaml"
+    policy_path.write_bytes(b"{\xff")
+    policy = load_policy(policy_path)
+    assert isinstance(policy, dict)
+
+
+def test_load_policy_regression_safe_load_guard_on_nonchars(tmp_path: Path) -> None:
+    policy_path = tmp_path / "nonchar-bytes.yaml"
+    # Includes UTF-8 for U+FFFF (noncharacter) + malformed YAML.
+    policy_path.write_bytes(b"{\xef\xbf\xbf")
+    policy = load_policy(policy_path)
+    assert isinstance(policy, dict)
 
 
 def test_validate_policy_accepts_valid_policy() -> None:

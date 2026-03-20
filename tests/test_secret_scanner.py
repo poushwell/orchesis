@@ -126,3 +126,19 @@ def test_secret_scanner_handles_format_strings() -> None:
     scanner = SecretScanner()
     findings = scanner.scan_text("prefix %n %s %u token=sk-abcdefghijklmnopqrstuvwxyz123456")
     assert isinstance(findings, list)
+
+
+def test_secret_scanner_regression_sanitizes_bytes_and_controls() -> None:
+    scanner = SecretScanner()
+    payload = b"abc\x00\x00%u%s%n token=sk-abcdefghijklmnopqrstuvwxyz123456\xff\xfe"
+    findings = scanner.scan_text(payload)  # type: ignore[arg-type]
+    assert isinstance(findings, list)
+    assert any(item["pattern"] == "openai_key" for item in findings)
+
+
+def test_secret_scanner_regression_nonchars_and_format_tokens() -> None:
+    scanner = SecretScanner()
+    payload = "prefix\x00%u%n%s\uffff token=sk-abcdefghijklmnopqrstuvwxyz123456"
+    findings = scanner.scan_text(payload)
+    assert isinstance(findings, list)
+    assert any(item["pattern"] == "openai_key" for item in findings)

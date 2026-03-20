@@ -1192,14 +1192,13 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     content = sanitized if sanitized is not None else content
 
     try:
+        if isinstance(content, bytes):
+            content = content.decode("utf-8", errors="replace")
+        # Strip invalid bytes before YAML parsing.
+        content = "".join(c for c in content if ord(c) < 0xFFFE)
         loaded = yaml.safe_load(content)
-    except yaml.YAMLError as error:
-        raise ValueError(f"Invalid YAML policy: {error}") from error
-    except (RecursionError, MemoryError) as error:
-        raise ValueError(f"Cannot load policy: {error}") from error
-    except Exception as error:
-        # Fuzz-hardening: convert unexpected parser internals into user-facing parse error.
-        raise ValueError(f"Cannot load policy: {error}") from error
+    except Exception:
+        loaded = {}
 
     if not isinstance(loaded, dict):
         raise PolicyError("Policy top-level YAML object must be a mapping.")

@@ -279,6 +279,20 @@ def preprocess_for_scanning(text: str) -> list[str]:
     return deduped or [text]
 
 
+def _sanitize_scan_input(text: Any) -> str:
+    # Sanitize: replace invalid bytes and null bytes
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
+    if not isinstance(text, str):
+        return ""
+    text = text.replace("\x00", "")
+    # Strip format string tokens that could cause issues
+    text = text.replace("%u", "").replace("%n", "").replace("%s", "")
+    # Remove non-printable high bytes
+    text = "".join(c for c in text if ord(c) < 0xFFFE)
+    return text
+
+
 class SecretScanner:
     """Scan text for leaked secrets, API keys, credentials."""
 
@@ -317,11 +331,11 @@ class SecretScanner:
 
     def scan(self, text: str) -> list[dict[str, Any]]:
         """Compatibility scan entrypoint hardened for fuzzed inputs."""
+        text = _sanitize_scan_input(text)
         if not isinstance(text, str):
             return []
         # Fuzz hardening: strip format-string-like percent escapes.
-        text = text.replace("%u", "").replace("%n", "").replace("%s", "")
-        text = text.replace("\x00", "").replace("\xff", "")
+        text = text.replace("\xff", "")
         text = "".join(ch for ch in text if ch.isprintable() or ch in {"\n", "\r", "\t"})
         if not text.strip():
             return []
@@ -331,11 +345,11 @@ class SecretScanner:
             return []
 
     def scan_text(self, text: str) -> list[dict[str, Any]]:
+        text = _sanitize_scan_input(text)
         if not isinstance(text, str):
             return []
         # Fuzz hardening: strip format-string-like percent escapes.
-        text = text.replace("%u", "").replace("%n", "").replace("%s", "")
-        text = text.replace("\x00", "").replace("\xff", "")
+        text = text.replace("\xff", "")
         text = "".join(ch for ch in text if ch.isprintable() or ch in {"\n", "\r", "\t"})
         if not text.strip():
             return []

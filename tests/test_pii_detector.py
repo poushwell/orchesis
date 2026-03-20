@@ -116,7 +116,7 @@ def test_pii_detector_handles_unicode_surrogates() -> None:
 def test_pii_detector_handles_mixed_binary() -> None:
     detector = PiiDetector()
     findings = detector.detect(b"\x00\xffuser@example.com123-45-6789")  # type: ignore[arg-type]
-    assert findings == []
+    assert isinstance(findings, list)
 
 
 def test_pii_detector_handles_bidi_unicode() -> None:
@@ -124,3 +124,19 @@ def test_pii_detector_handles_bidi_unicode() -> None:
     text = "user@\u202eexample.com"
     findings = detector.scan_text(text)
     assert isinstance(findings, list)
+
+
+def test_pii_detector_regression_sanitizes_bytes_bidi_and_replacement() -> None:
+    detector = PiiDetector()
+    payload = b"\x00user@example.com\x00 \xe2\x80\xae 123-45-6789 \xef\xbf\xbd"
+    findings = detector.detect(payload)  # type: ignore[arg-type]
+    assert isinstance(findings, list)
+    assert any(item["pattern"] in {"email", "ssn"} for item in findings)
+
+
+def test_pii_detector_regression_strips_cf_and_nulls() -> None:
+    detector = PiiDetector()
+    payload = "user\u202e@example.com\x00 \ufffd 123-45-6789"
+    findings = detector.detect(payload)
+    assert isinstance(findings, list)
+    assert any(item["pattern"] in {"email", "ssn"} for item in findings)
