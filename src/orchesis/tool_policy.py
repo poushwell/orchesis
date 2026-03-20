@@ -7,7 +7,7 @@ import fnmatch
 import json
 import threading
 import time
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import urlparse
 import uuid
 

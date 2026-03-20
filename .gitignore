@@ -25,6 +25,10 @@ orchesis-report.txt
 
 # Build artifacts
 lib/orchesis/
+.casura/
+tmp_hist.jsonl
+analyze_traces.py
+exp5_backpressure.py
 
 # Dashboard build (если хочешь исключить)
 # dashboard/dist/   ← закомментировано: README объясняет

@@ -6,7 +6,6 @@ import re
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import Any
 
 
 class BaseEvaluator(ABC):

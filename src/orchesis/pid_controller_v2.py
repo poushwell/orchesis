@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from math import log, sqrt
 import threading
-from typing import Any
 
 
 class PIDControllerV2:

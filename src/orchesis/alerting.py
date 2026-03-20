@@ -10,13 +10,6 @@ import threading
 import time
 from typing import Any
 import urllib.request
-import warnings
-
-warnings.warn(
-    "orchesis.alerting is deprecated. Use orchesis.integrations.alert_manager instead.",
-    DeprecationWarning,
-    stacklevel=2,
-)
 
 
 class AlertSeverity(Enum):
@@ -59,7 +52,7 @@ class AlertConfig:
     daily_digest_hour: int = 9
 
     @classmethod
-    def from_policy_dict(cls, alerts_cfg: Any) -> AlertConfig:
+    def from_policy_dict(cls, alerts_cfg: Any) -> "AlertConfig":
         cfg = alerts_cfg if isinstance(alerts_cfg, dict) else {}
         telegram = cfg.get("telegram") if isinstance(cfg.get("telegram"), dict) else {}
         webhook = cfg.get("webhook") if isinstance(cfg.get("webhook"), dict) else {}

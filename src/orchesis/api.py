@@ -3143,47 +3143,6 @@ def create_api_app(
         _require_auth(authorization)
         return app.state.complement_cascade.get_cascade_stats()
 
-    @app.post("/api/v1/group-selection/register")
-    def group_selection_register_endpoint(
-        body: dict[str, Any] | None = None,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        payload = body if isinstance(body, dict) else {}
-        agent_id = str(payload.get("agent_id", "")).strip()
-        group_id = str(payload.get("group_id", "")).strip()
-        if not agent_id or not group_id:
-            raise HTTPException(status_code=400, detail={"error": "agent_id and group_id are required"})
-        app.state.group_selection.register_agent(agent_id, group_id)
-        return {"ok": True, "agent_id": agent_id, "group_id": group_id}
-
-    @app.post("/api/v1/group-selection/interaction")
-    def group_selection_interaction_endpoint(
-        body: dict[str, Any] | None = None,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        payload = body if isinstance(body, dict) else {}
-        agent_id = str(payload.get("agent_id", "")).strip()
-        cooperative = bool(payload.get("cooperative", False))
-        outcome = payload.get("outcome")
-        if not agent_id:
-            raise HTTPException(status_code=400, detail={"error": "agent_id is required"})
-        if not isinstance(outcome, int | float):
-            raise HTTPException(status_code=400, detail={"error": "outcome must be numeric"})
-        result = app.state.group_selection.record_interaction(agent_id, cooperative=cooperative, outcome=float(outcome))
-        if "error" in result:
-            raise HTTPException(status_code=400, detail=result)
-        return result
-
-    @app.get("/api/v1/group-selection/fittest")
-    def group_selection_fittest_endpoint(
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        row = app.state.group_selection.get_fittest_group()
-        return {"group": row}
-
     @app.get("/api/v1/ecosystem/summary")
     def ecosystem_summary(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)

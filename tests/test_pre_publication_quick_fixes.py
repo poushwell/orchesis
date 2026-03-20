@@ -23,9 +23,9 @@ def test_sync_no_top_level_httpx() -> None:
     assert "httpx" not in top_level_imports
 
 
-def test_alerting_deprecation_warning() -> None:
+def test_alerting_no_deprecation_warning() -> None:
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         module = importlib.import_module("orchesis.alerting")
         importlib.reload(module)
-    assert any(isinstance(item.message, DeprecationWarning) for item in caught)
+    assert not any(isinstance(item.message, DeprecationWarning) for item in caught)

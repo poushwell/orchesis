@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, deque
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 import json
 import math
 import threading

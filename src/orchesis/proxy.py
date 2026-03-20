@@ -16,8 +16,7 @@ import uuid
 from typing import Any
 import http.client
 from urllib.parse import parse_qs, urlsplit
-from urllib.request import Request as UrlRequest, urlopen
-from urllib.error import HTTPError, URLError
+from urllib.error import URLError
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 try:
@@ -35,7 +34,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency path
     Response = Any  # type: ignore[assignment]
 
 from orchesis.auth import AgentAuthenticator, CredentialStore
-from orchesis.alerting import AlertConfig, AlertEvent, AlertManager, AlertSeverity
+from orchesis.integrations.alert_manager import AlertConfig, AlertEvent, AlertManager, AlertSeverity
 from orchesis.behavioral import BehavioralDetector, extract_agent_id
 from orchesis.cost_tracker import CostTracker
 from orchesis.circuit_breaker import CircuitBreaker
@@ -52,7 +51,7 @@ from orchesis.integrations.forensics_emitter import ForensicsEmitter
 from orchesis.loop_detector import ContentLoopDetector, LoopDetector
 from orchesis.metrics import MetricsCollector
 from orchesis.model_router import ModelRouter
-from orchesis.cascade import CascadeDecision, CascadeLevel, CascadeRouter
+from orchesis.cascade import CascadeLevel, CascadeRouter
 from orchesis.otel import OTelEmitter, ProxySpanEmitter, TraceContext
 from orchesis.otel_export import OTLPExportConfig, OTLPSpanExporter
 from orchesis.policy_store import PolicyStore
@@ -61,7 +60,7 @@ from orchesis.structured_log import StructuredLogger
 from orchesis.telemetry import JsonlEmitter
 from orchesis.request_sampler import RequestSampler
 from orchesis.webhooks import WebhookConfig, WebhookEmitter
-from orchesis.request_parser import ParsedResponse, parse_request, parse_response
+from orchesis.request_parser import parse_request, parse_response
 from orchesis.recorder import SessionRecord, SessionRecorder
 from orchesis.response_handler import ResponseProcessor, SECRET_PATTERNS
 from orchesis.session_risk import RiskSignal, SessionRiskAccumulator
