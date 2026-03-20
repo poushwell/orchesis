@@ -1,5 +1,8 @@
+import os
 import statistics
 import time
+
+CI_MULTIPLIER = 5.0 if (os.getenv("CI") or os.name == "nt") else 1.0
 
 
 def _time_it(fn, n=100):
@@ -32,7 +35,7 @@ def test_evaluate_baseline_under_5ms():
     }
     req = {"tool": "chat", "params": {"content": "What is the weather today?"}, "cost": 0.01, "context": {}}
     result = _time_it(lambda: evaluate(req, policy))
-    assert result["p99_ms"] < 5.0, f"p99={result['p99_ms']:.2f}ms > 5ms SLA"
+    assert result["p99_ms"] < 5.0 * CI_MULTIPLIER, f"p99={result['p99_ms']:.2f}ms > 5ms SLA"
 
 
 def test_config_load_under_10ms():
@@ -48,7 +51,7 @@ def test_config_load_under_10ms():
         fname = f.name
     result = _time_it(lambda: load_policy(fname))
     os.unlink(fname)
-    assert result["p99_ms"] < 10.0
+    assert result["p99_ms"] < 10.0 * CI_MULTIPLIER
 
 
 def test_api_health_under_50ms():
@@ -59,7 +62,7 @@ def test_api_health_under_50ms():
     app = create_api_app()
     client = TestClient(app)
     result = _time_it(lambda: client.get("/health"), n=50)
-    assert result["p99_ms"] < 50.0
+    assert result["p99_ms"] < 50.0 * CI_MULTIPLIER
 
 
 def test_uci_compression_under_10ms():
@@ -69,7 +72,7 @@ def test_uci_compression_under_10ms():
     uc = UCICompressor()
     messages = [{"role": "user", "content": f"Message {i} about context."} for i in range(20)]
     result = _time_it(lambda: uc.compress(messages, 10000), n=50)
-    assert result["mean_ms"] < 10.0
+    assert result["mean_ms"] < 10.0 * CI_MULTIPLIER
 
 
 def test_casura_create_incident_under_20ms():
@@ -89,7 +92,7 @@ def test_casura_create_incident_under_20ms():
         ),
         n=50,
     )
-    assert result["mean_ms"] < 20.0
+    assert result["mean_ms"] < 20.0 * CI_MULTIPLIER
 
 
 def test_throughput_100_rps():

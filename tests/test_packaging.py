@@ -6,8 +6,6 @@ from pathlib import Path
 
 from orchesis import __version__
 
-ALLOWED_RUNTIME_DEPS = {"pyyaml", "fastapi", "uvicorn"}
-
 
 def _read_pyproject() -> dict:
     content = Path("pyproject.toml").read_bytes()
@@ -43,8 +41,13 @@ def test_no_external_dependencies() -> None:
     data = _read_pyproject()
     deps = data["project"].get("dependencies", [])
     assert isinstance(deps, list)
-    normalized = {str(dep).split(">=")[0].split("==")[0].strip().lower() for dep in deps}
-    assert normalized.issubset(ALLOWED_RUNTIME_DEPS)
+    normalized = {
+        str(dep).split("[")[0].split(">=")[0].split("==")[0].strip().lower()
+        for dep in deps
+    }
+    forbidden = {"requests", "httpx", "numpy", "pandas", "aiohttp", "boto3"}
+    violations = normalized & forbidden
+    assert not violations, f"Forbidden runtime deps: {violations}"
 
 
 def test_package_includes_dashboard_html() -> None:

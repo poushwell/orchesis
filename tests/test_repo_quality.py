@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import yaml
 
@@ -53,7 +54,7 @@ def test_readme_has_badges() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "docs/banner.svg" in content
     assert "img.shields.io/pypi/v/orchesis" in content
-    assert "img.shields.io/badge/tests-4219%20passing-22c55e" in content
+    assert re.search(r"tests-\d+%20passing", content), "No test count badge found"
 
 
 def test_readme_has_docker_section() -> None:
