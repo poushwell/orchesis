@@ -99,7 +99,6 @@ def test_no_hardcoded_secrets_in_src() -> None:
     allowed_placeholders = {"AKIAABCDEFGHIJKLMNOP"}
     for py_file in src_dir.rglob("*.py"):
         content = py_file.read_text(encoding="utf-8", errors="ignore")
-        lowered = content.lower()
         # Secret scanning modules intentionally contain detection signatures.
         if any(token in py_file.name.lower() for token in ("scanner", "detector")):
             continue
