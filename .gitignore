@@ -15,3 +15,17 @@ src/*.egg-info/
 policy.yaml
 .orchesis/*.jsonl
 .venv/
+
+# Orchesis runtime artifacts — не коммитить
+decisions.jsonl
+console_output.txt
+orchesis-report.txt
+*.jsonl
+*.sarif
+
+# Build artifacts
+lib/orchesis/
+
+# Dashboard build (если хочешь исключить)
+# dashboard/dist/   ← закомментировано: README объясняет
+#                      что dist намеренно закоммичен
