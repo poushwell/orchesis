@@ -115,6 +115,7 @@ from orchesis.par_reasoning import PARReasoner
 from orchesis.group_selection import GroupSelectionModel
 from orchesis.relevance_theory import RelevanceScorer
 from orchesis.cost_of_freedom import CostOfFreedomCalculator
+from orchesis.agent_report_card import AgentReportCard
 from orchesis.red_queen import RedQueenMonitor
 from orchesis.double_loop_learning import DoubleLoopLearner
 from orchesis.complement_cascade import ComplementCascade
@@ -316,6 +317,7 @@ def create_api_app(
     )
     app.state.relevance_scorer = RelevanceScorer(relevance_cfg)
     app.state.cost_of_freedom = CostOfFreedomCalculator()
+    app.state.agent_report_card = AgentReportCard()
     app.state.competitive_monitor = CompetitiveMonitor()
     app.state.social_parsers = SocialMonitoringParsers()
     app.state.monitoring_items: list[dict[str, Any]] = []
@@ -2732,6 +2734,39 @@ def create_api_app(
     ) -> dict[str, Any]:
         _require_auth(authorization)
         return app.state.agent_comparer.compare(agent_a=agent_a, agent_b=agent_b)
+
+    @app.post("/api/v1/report-card/{agent_id}")
+    def report_card_generate(
+        agent_id: str,
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        return app.state.agent_report_card.generate(agent_id=agent_id, metrics=payload)
+
+    @app.get("/api/v1/report-card/{agent_id}")
+    def report_card_get(
+        agent_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        card = app.state.agent_report_card._cards.get(agent_id)
+        if not isinstance(card, dict):
+            raise HTTPException(status_code=404, detail={"error": "report card not found"})
+        return card
+
+    @app.get("/api/v1/report-card/compare/{agent_a}/{agent_b}")
+    def report_card_compare(
+        agent_a: str,
+        agent_b: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        result = app.state.agent_report_card.compare_grades(agent_a=agent_a, agent_b=agent_b)
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result)
+        return result
 
     @app.post("/api/v1/timeline/{session_id}/record")
     def timeline_record(

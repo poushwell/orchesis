@@ -1379,7 +1379,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       <button id="tab-experiments" class="tab-btn" data-tab="experiments" role="tab" aria-selected="false" aria-controls="experiments">🧪 Experiments</button>
       <button id="tab-threats" class="tab-btn" data-tab="threats" role="tab" aria-selected="false" aria-controls="threats">🛡️ Threats</button>
       <button id="tab-cache" class="tab-btn" data-tab="cache" role="tab" aria-selected="false" aria-controls="cache">⚡ Cache</button>
-      <button id="tab-cost" class="tab-btn" data-tab="cost" role="tab" aria-selected="false" aria-controls="cost">💰 Cost</button>
+      <button id="tab-cost" class="tab-btn" data-tab="cost" role="tab" aria-selected="false" aria-controls="cost" onclick="switchTab('cost')">💰 Cost</button>
       <button id="tab-research" class="tab-btn" data-tab="research" role="tab" aria-selected="false" aria-controls="research">🔬 Research</button>
       <button id="tab-compliance" class="tab-btn" data-tab="compliance" role="tab" aria-selected="false" aria-controls="compliance">📘 Compliance</button>
       <button id="tab-overwatch" class="tab-btn" data-tab="overwatch" role="tab" aria-selected="false" aria-controls="overwatch">🛰️ Overwatch</button>
@@ -1674,6 +1674,9 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     </section>
 
     <section id="cost" class="screen" role="tabpanel" aria-labelledby="tab-cost">
+      <div id="cost-summary"></div>
+      <div id="cost-of-freedom-widget"></div>
+      <div id="token-yield-chart"></div>
       <div class="grid-4">
         <div class="panel"><div class="subtle">Total Cost (period)</div><div id="cost-total" class="metric-value">$0.00</div></div>
         <div class="panel"><div class="subtle">24h Forecast</div><div id="cost-forecast" class="metric-value">$0.00</div></div>
@@ -3759,18 +3762,48 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       }
     }
 
-    function renderCost(analytics){
+    function renderCost(payload){
+      const unwrapSettled = (entry) => {
+        if(entry && entry.status === "fulfilled"){
+          if(entry.value && typeof entry.value === "object"){
+            return entry.value;
+          }
+          return {};
+        }
+        return entry && typeof entry === "object" ? entry : {};
+      };
+      const hasSettled = payload && typeof payload === "object" && ("analytics" in payload || "freedom" in payload);
+      const analytics = hasSettled ? unwrapSettled(payload.analytics) : payload;
+      const freedom = hasSettled ? unwrapSettled(payload.freedom) : {};
       const data = (analytics && typeof analytics === "object") ? analytics : {};
       const total = Number(data.total_cost || 0);
       const forecast = Number(data.forecast_24h || 0);
       const byModel = (data.cost_by_model && typeof data.cost_by_model === "object") ? data.cost_by_model : {};
       const byAgent = (data.cost_by_agent && typeof data.cost_by_agent === "object") ? data.cost_by_agent : {};
       const byHour = Array.isArray(data.cost_by_hour) ? data.cost_by_hour : [];
+      const savingsObj = (data.savings && typeof data.savings === "object") ? data.savings : {};
       const savings = (data.savings && typeof data.savings === "object") ? data.savings : {};
       const topSessions = Array.isArray(data.top_expensive_sessions) ? data.top_expensive_sessions : [];
 
       document.getElementById("cost-total").textContent = fmtMoney(total);
       document.getElementById("cost-forecast").textContent = fmtMoney(forecast);
+
+      const summaryEl = document.getElementById("cost-summary");
+      if(summaryEl){
+        summaryEl.innerHTML = `<div class="panel panel-primary"><strong>Cost summary</strong> · Total: ${fmtMoney(total)} · Forecast: ${fmtMoney(forecast)}</div>`;
+      }
+      const cofEl = document.getElementById("cost-of-freedom-widget");
+      if(cofEl){
+        const b = freedom && typeof freedom === "object" && freedom.benchmarks ? freedom.benchmarks : {};
+        const redundancy = Number(b.redundancy_rate || 0) * 100;
+        const retry = Number(b.retry_reduction || 0);
+        cofEl.innerHTML = `<div class="panel"><strong>Cost of Freedom</strong><div>Redundancy: ${redundancy.toFixed(2)}% · Retry reduction: ${retry.toFixed(2)}x</div></div>`;
+      }
+      const tyEl = document.getElementById("token-yield-chart");
+      if(tyEl){
+        const savingsTotal = Number(savingsObj.total || 0);
+        tyEl.innerHTML = `<div class="panel"><strong>Token Yield chart</strong><div>Saved: ${fmtMoney(savingsTotal)}</div></div>`;
+      }
 
       const modelEntries = Object.entries(byModel);
       const agentEntries = Object.entries(byAgent);
@@ -4417,12 +4450,24 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     }
 
     async function pollCost(){
-      const [analytics, advice, quickWins] = await Promise.all([
-        fetchData("/api/v1/cost-analytics?period=24"),
+      const [analytics, freedom] = await Promise.allSettled([
+        fetch('/api/v1/cost/analytics'),
+        fetch('/api/v1/cost-of-freedom/benchmarks'),
+      ]);
+      async function toJson(result){
+        if(!result || result.status !== "fulfilled"){ return {}; }
+        const response = result.value;
+        if(!response || typeof response.ok !== "boolean" || !response.ok){ return {}; }
+        try { return await response.json(); } catch(_err) { return {}; }
+      }
+      renderCost({
+        analytics: { status: "fulfilled", value: await toJson(analytics) },
+        freedom: { status: "fulfilled", value: await toJson(freedom) },
+      });
+      const [advice, quickWins] = await Promise.all([
         fetchData("/api/v1/budget/advice"),
         fetchData("/api/v1/budget/quick-wins"),
       ]);
-      renderCost(analytics);
       renderBudgetAdvice(advice, quickWins);
     }
 
