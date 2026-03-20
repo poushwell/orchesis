@@ -75,16 +75,16 @@ Phases execute in order. Early phases can short-circuit (e.g., circuit breaker o
 
 ## Research modules (Y + pipeline sprint)
 
-- **PAR Reasoning** (`par_reasoning`) — proxy abductive diagnosis for DENY events (T5 theorem boundary)
-- **Criticality Control** (`criticality_control`) — LQR controller for Psi target band [0.4, 0.6]
+- **PAR Reasoning** (`par_reasoning`) — T5 theorem implementation for proxy abductive diagnosis
+- **Criticality Control** (`criticality_control`) — LQR Ψ∈[0.4,0.6]
 - **MRAC Controller** (`mrac_controller`) — adaptive gain scheduling per agent
 - **Keystone Agent** (`keystone_agent`) — trophic cascade and systemic influence analysis
 - **Carnot Efficiency** (`carnot_efficiency`) — theoretical task-efficiency ceiling
 - **Red Queen Dynamics** (`red_queen`) — adversarial co-evolution tracking
 - **Kolmogorov Importance** (`kolmogorov_importance`) — UCI-K duality heuristics
-- **Context Crystallinity** (`core/nlce_pipeline`) — gas/liquid/crystal phase transitions via Psi
+- **Context Crystallinity** (`core/nlce_pipeline`) — gas/liquid/crystal phase transitions via Ψ
 - **HGT Protocol** (`hgt_protocol`) — horizontal transfer stub for future fleet activation
-- **IACS Coherence** (`discourse_coherence`) — 0.40xFC + 0.35xEC + 0.25xHC score decomposition
+- **IACS Coherence** (`discourse_coherence`) — 0.40×FC + 0.35×EC + 0.25×HC score decomposition
 
 ## State management
 

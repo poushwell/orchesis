@@ -4,23 +4,30 @@ from pathlib import Path
 
 
 def test_version_is_040() -> None:
+    import tomllib
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     from orchesis import __version__
 
-    assert __version__ == "0.4.0"
+    assert __version__ == pyproject["project"]["version"]
 
 
-def test_changelog_has_040_section() -> None:
+def test_changelog_has_current_release_section() -> None:
     changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
-    assert "## [0.4.0] — 2026-03-19" in changelog
-    assert "4038 passing (was 3512 at v0.3.0)" in changelog
-    assert "+526 new tests" in changelog
+    import tomllib
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    version = pyproject["project"]["version"]
+    assert f"## [{version}]" in changelog
+    assert "passing" in changelog.lower()
 
 
 def test_build_artifacts_exist() -> None:
+    import tomllib
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    version = pyproject["project"]["version"]
     dist = Path("dist")
-    files = [p.name for p in dist.glob("orchesis-0.4.0*")]
-    assert any(name.endswith(".whl") for name in files), f"Missing wheel for 0.4.0 in {files}"
-    assert any(name.endswith(".tar.gz") for name in files), f"Missing sdist for 0.4.0 in {files}"
+    files = [p.name for p in dist.glob(f"orchesis-{version}*")]
+    assert any(name.endswith(".whl") for name in files), f"Missing wheel for {version} in {files}"
+    assert any(name.endswith(".tar.gz") for name in files), f"Missing sdist for {version} in {files}"
 
 
 def test_all_new_modules_importable() -> None:

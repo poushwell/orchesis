@@ -4,15 +4,15 @@
 
 <p align="center">
   <a href="https://pypi.org/project/orchesis/"><img src="https://img.shields.io/pypi/v/orchesis?color=7c3aed&label=PyPI" alt="PyPI"/></a>
-  <a href="https://github.com/poushwell/orchesis/actions"><img src="https://img.shields.io/badge/tests-4038%20passing-22c55e" alt="tests"/></a>
+  <a href="https://github.com/poushwell/orchesis/actions"><img src="https://img.shields.io/badge/tests-4220%20passing-22c55e" alt="tests"/></a>
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"/>
   <a href="https://github.com/poushwell/orchesis"><img src="https://img.shields.io/github/stars/poushwell/orchesis?style=flat&color=7c3aed" alt="Stars"/></a>
-  <img src="https://img.shields.io/badge/dependencies-0-green" alt="Zero dependencies"/>
+  <img src="https://img.shields.io/badge/dependencies-minimal-green" alt="Minimal dependencies"/>
 </p>
 
 Orchesis is a transparent HTTP proxy for AI agents. Every request passes through
 a 17-phase detection pipeline before reaching the LLM provider.
-Zero dependencies. MIT license.
+Minimal dependencies: pyyaml for configuration, optional fastapi+uvicorn for the dashboard server (pip install orchesis[server]). MIT license.
 
 SDK sees one agent. Static analysis sees code. Observability sees metrics.
 **Proxy sees everything, in real time, without code changes.**
@@ -27,7 +27,7 @@ SDK sees one agent. Static analysis sees code. Observability sees metrics.
 
 ## Installation
 ```bash
-# Core (zero dependencies)
+# Core
 pip install orchesis
 
 # With integrations (Slack, Telegram, webhooks)
@@ -45,6 +45,11 @@ Orchesis runs two services:
 Quick start:
 ```bash
 orchesis proxy --config orchesis.yaml   # terminal 1
+
+# Install server dependencies first
+pip install orchesis[server]
+
+# Then start the API server
 orchesis serve --policy orchesis.yaml   # terminal 2 (optional)
 ```
 
@@ -118,16 +123,16 @@ duplicate context across providers. This is an architectural advantage, not a fe
 - Policy templates, migration tool, backup/restore
 
 **Research (NLCE Layer 2+)**
-- PAR Abductive Reasoning - T5 theorem implementation
-- Criticality Control (H17-CC) - LQR Psi in [0.4,0.6]
+- PAR Abductive Reasoning — T5 theorem implementation
+- Criticality Control (H17-CC) — LQR Ψ∈[0.4,0.6]
 - MRAC adaptive gain scheduling per agent
-- Keystone Agent detection - trophic cascade analysis
-- Carnot Efficiency - theoretical ceiling calculator
-- Red Queen dynamics - adversarial co-evolution monitoring
-- Kolmogorov Importance - UCI-K duality (H36)
-- Context Crystallinity Psi - gas/liquid/crystal phases
-- HGT Protocol stub - horizontal gene transfer (H42)
-- IACS full discourse coherence - 0.40xFC + 0.35xEC + 0.25xHC
+- Keystone Agent detection — trophic cascade analysis
+- Carnot Efficiency — theoretical ceiling calculator
+- Red Queen dynamics — adversarial co-evolution monitoring
+- Kolmogorov Importance — UCI-K duality (H36)
+- Context Crystallinity Ψ — gas/liquid/crystal phases
+- HGT Protocol stub — horizontal gene transfer (H42)
+- IACS full discourse coherence — 0.40×FC + 0.35×EC + 0.25×HC
 
 **Viral Tools**
 - Agent Autopsy - "What killed your AI agent?" one-command diagnosis
@@ -154,9 +159,9 @@ duplicate context across providers. This is an architectural advantage, not a fe
 | MAST coverage | 78.6% |
 | OWASP coverage | 80% |
 | Auto-heal actions | 6 |
-| Tests passing | 4,038 |
-| Modules | 100+ |
-| Dependencies | **0** (stdlib only) |
+| Tests passing | 4,220 |
+| Modules | 270 |
+| Dependencies | Minimal: pyyaml (+ optional fastapi/uvicorn server) |
 | Proxy overhead | 0.8% measured |
 | Context collapse | 12x growth caught |
 | API endpoints | 250+ |
@@ -191,5 +196,5 @@ Results in 30 seconds.
   <a href="https://orchesis.io/blog">Blog</a>
 </p>
 
-<p align="center">MIT License · Built with ♥ and zero dependencies</p>
+<p align="center">MIT License · Built with ♥ and minimal dependencies</p>
 

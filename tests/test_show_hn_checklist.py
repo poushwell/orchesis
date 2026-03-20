@@ -13,9 +13,11 @@ from orchesis.cli import main
 
 def test_pip_install_works() -> None:
     """Package is installable."""
+    import tomllib
     assert Path("pyproject.toml").exists()
     result = __import__("orchesis")
-    assert result.__version__ == "0.4.0"
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    assert result.__version__ == pyproject["project"]["version"]
 
 
 def test_quickstart_under_3_commands() -> None:

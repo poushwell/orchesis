@@ -109,7 +109,7 @@
 ## [0.3.0] — 2026-03-18
 
 ### Added — 80+ новых модулей
-- NLCE Layer 2: UCI compression, PID v2, Kalman 3x3, Context Crystallinity Psi
+- NLCE Layer 2: UCI compression, PID v2, Kalman 3×3, Context Crystallinity Ψ
 - NLCE Layer 2: PAR reasoning, Criticality Control (LQR), MRAC, HGT Protocol
 - Fleet Intelligence: Quorum Sensing, Byzantine Detector, Raft Context, Gossip Protocol
 - Fleet Intelligence: Thompson Sampling, Vickrey Auction, Keystone Agent

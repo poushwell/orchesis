@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 
@@ -138,8 +139,11 @@ def test_all_api_endpoints_registered(tmp_path: Path) -> None:
     assert len(routes) > 100, f"Expected >100 routes, got {len(routes)}"
 
 
-def test_version_0_4_0() -> None:
-    """Package version is 0.4.0."""
+def test_version_matches_pyproject() -> None:
+    """Package version matches pyproject.toml."""
     from orchesis import __version__
 
-    assert __version__ == "0.4.0"
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    expected = str(pyproject.get("project", {}).get("version", "")).strip()
+    assert expected
+    assert __version__ == expected

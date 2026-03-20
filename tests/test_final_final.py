@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -106,7 +107,10 @@ def test_ship_it() -> None:
     from orchesis.cost_of_freedom import CostOfFreedomCalculator
 
     _ = AgentAutopsy
-    assert __version__ == "0.4.0"
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    expected = str(pyproject.get("project", {}).get("version", "")).strip()
+    assert expected
+    assert __version__ == expected
     pitch = OrchesisInsights().get_elevator_pitch()
     assert "proxy" in pitch.lower()
     calc = CostOfFreedomCalculator()

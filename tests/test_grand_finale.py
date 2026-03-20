@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import tomllib
+from pathlib import Path
+
+
+def _expected_version() -> str:
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    return str(pyproject.get("project", {}).get("version", "")).strip()
 
 def test_total_tests_above_4100() -> None:
     """We have more than 4100 tests."""
@@ -20,10 +27,10 @@ def test_total_tests_above_4100() -> None:
     assert count >= 4100, f"Only {count} tests"
 
 
-def test_version_is_040() -> None:
+def test_version_matches_pyproject() -> None:
     from orchesis import __version__
 
-    assert __version__ == "0.4.0"
+    assert __version__ == _expected_version()
 
 
 def test_zero_runtime_deps() -> None:
@@ -100,7 +107,7 @@ def test_show_hn_ready() -> None:
     assert Path("docs/QUICKSTART.md").exists()
     from orchesis import __version__
 
-    assert __version__ == "0.4.0"
+    assert __version__ == _expected_version()
     from orchesis.agent_autopsy import AgentAutopsy
     from orchesis.insights import OrchesisInsights
 

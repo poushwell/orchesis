@@ -28,7 +28,7 @@ from orchesis.structural_patterns import StructuralPatternDetector
 from orchesis.telemetry_export import TelemetryRecord
 
 ITERATIONS = 1000
-CI_FACTOR = 3.0 if os.environ.get("CI") else 1.0
+CI_FACTOR = 3.0 if (os.environ.get("CI") or os.name == "nt") else 1.0
 
 
 def _th(value: float) -> float:

@@ -114,10 +114,10 @@ def test_module_registry_complete() -> None:
 
 def test_version_and_package_consistent() -> None:
     from pathlib import Path
+    import tomllib
 
     from orchesis import __version__
 
-    assert __version__ == "0.4.0"
-    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.4.0"' in pyproject
+    parsed = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    assert __version__ == parsed["project"]["version"]
 

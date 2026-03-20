@@ -81,3 +81,6 @@ orchesis migrate --config orchesis.yaml
 # Vibe Code Audit
 orchesis vibe-audit --file app.py
 ```
+
+These commands cover AABB benchmarking, ARC certification, NLCE paper tooling,
+policy spec validation/migration, and Vibe Code Audit workflows added in the latest sprint.

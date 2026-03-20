@@ -41,10 +41,16 @@ classifiers = [
 
 dependencies = [
     "pyyaml>=6.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
 ]
 
 [project.optional-dependencies]
 integrations = ["httpx>=0.24.0"]
+server = [
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.20.0",
+]
 dev = [
     "pytest>=7.0",
     "ruff>=0.1.0",
