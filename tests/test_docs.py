@@ -58,6 +58,7 @@ def test_readme_has_badge_tests() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
     assert "img.shields.io/badge/tests-" in text
     assert "%20passing-22c55e" in text
+    assert "tests-4219%20passing-22c55e" in text
     assert re.search(r"tests-\d+%20passing-22c55e", text) is not None
 
 

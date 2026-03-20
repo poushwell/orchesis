@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://pypi.org/project/orchesis/"><img src="https://img.shields.io/pypi/v/orchesis?color=7c3aed&label=PyPI" alt="PyPI"/></a>
-  <a href="https://github.com/poushwell/orchesis/actions"><img src="https://img.shields.io/badge/tests-4220%20passing-22c55e" alt="tests"/></a>
+  <a href="https://github.com/poushwell/orchesis/actions"><img src="https://img.shields.io/badge/tests-4219%20passing-22c55e" alt="tests"/></a>
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"/>
   <a href="https://github.com/poushwell/orchesis"><img src="https://img.shields.io/github/stars/poushwell/orchesis?style=flat&color=7c3aed" alt="Stars"/></a>
   <img src="https://img.shields.io/badge/dependencies-minimal-green" alt="Minimal dependencies"/>
@@ -159,7 +159,7 @@ duplicate context across providers. This is an architectural advantage, not a fe
 | MAST coverage | 78.6% |
 | OWASP coverage | 80% |
 | Auto-heal actions | 6 |
-| Tests passing | 4,220 |
+| Tests passing | 4,219 |
 | Modules | 270 |
 | Dependencies | Minimal: pyyaml (+ optional fastapi/uvicorn server) |
 | Proxy overhead | 0.8% measured |

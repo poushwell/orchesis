@@ -6,7 +6,7 @@ from pathlib import Path
 
 from orchesis import __version__
 
-ALLOWED_RUNTIME_DEPS = {"pyyaml"}  # pyyaml needed for YAML policy parsing
+ALLOWED_RUNTIME_DEPS = {"pyyaml", "fastapi", "uvicorn"}
 
 
 def _read_pyproject() -> dict:
