@@ -1292,7 +1292,7 @@ def _operation_pattern(operation_upper: str) -> re.Pattern[str]:
 
 @lru_cache(maxsize=256)
 def _compiled_regex(pattern: str) -> re.Pattern[str]:
-    return re.compile(pattern)
+    return re.compile(pattern, re.IGNORECASE)
 
 
 def _apply_budget_limit(
