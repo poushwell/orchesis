@@ -1,0 +1,12 @@
+{
+  "name": "orchesis-context",
+  "version": "0.1.0",
+  "description": "Orchesis Context Engine Plugin — real-time context quality for AI agents",
+  "main": "index.js",
+  "keywords": ["ai", "agents", "context", "orchesis", "llm"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/poushwell/orchesis"
+  }
+}

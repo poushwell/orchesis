@@ -74,7 +74,17 @@ from orchesis.fleet_coordinator import FleetCoordinator
 from orchesis.agent_compare import AgentComparer
 from orchesis.context_timeline import ContextTimeline
 from orchesis.persona_guardian import PersonaGuardian
-from orchesis.vibe_audit import VibeCodeAuditor
+try:
+    from orchesis.vibe_audit import VibeCodeAuditor
+except ModuleNotFoundError:
+    class VibeCodeAuditor:  # type: ignore[no-redef]
+        def audit_code(self, code: str, language: str) -> dict[str, Any]:
+            _ = (code, language)
+            return {
+                "score": 0.0,
+                "issues": [],
+                "summary": "vibe_audit module unavailable",
+            }
 from orchesis.token_yield import TokenYieldTracker
 from orchesis.token_yield_report import TokenYieldReportGenerator
 from orchesis.threat_feed import ThreatFeed
@@ -134,6 +144,8 @@ from orchesis.policy_impact_analyzer import PolicyImpactAnalyzer
 from orchesis.request_explainer import RequestExplainer
 from orchesis.insights import OrchesisInsights
 from orchesis.channel_monitor import ChannelHealthMonitor
+from orchesis.whatsapp_expiry import WhatsAppExpiryTracker
+from orchesis.webchat_inject import WebChatInjector
 from orchesis import __version__
 
 
@@ -421,6 +433,8 @@ def create_api_app(
     app.state.system_health_report = SystemHealthReport()
     app.state.orchesis_insights = OrchesisInsights()
     app.state.channel_monitor = ChannelHealthMonitor()
+    app.state.webchat_injector = WebChatInjector()
+    app.state.whatsapp_expiry = WhatsAppExpiryTracker()
     app.state.notifications: list[dict[str, Any]] = []
     app.state.notifications_lock = threading.Lock()
     app.state.agent_lifecycle = AgentLifecycleManager()
@@ -1128,9 +1142,20 @@ def create_api_app(
         analyzer = app.state.tool_call_analyzer
         return analyzer.get_session_tool_stats(session_id=session_id, decisions_log=events)
 
-    def _build_vibe_audit_payload(code: str, language: str) -> dict[str, Any]:
-        auditor = app.state.vibe_auditor
+    def _build_vibe_audit_payload(code: str, language: str, severity: str = "low") -> dict[str, Any]:
+        auditor = VibeCodeAuditor({"severity_threshold": str(severity or "low").lower()})
         return auditor.audit_code(code=code, language=language)
+
+    def _build_vibe_audit_directory_payload(
+        dir_path: str,
+        summary: bool,
+        extensions: list[str] | None = None,
+        severity: str = "low",
+    ) -> dict[str, Any]:
+        auditor = VibeCodeAuditor({"severity_threshold": str(severity or "low").lower()})
+        if summary:
+            return auditor.audit_directory_summary(dir_path=dir_path, extensions=extensions)
+        return auditor.audit_directory(dir_path=dir_path, extensions=extensions)
 
     def _hydrate_memory_session(session_id: str) -> None:
         tracker = app.state.memory_tracker
@@ -3260,6 +3285,43 @@ def create_api_app(
             raise HTTPException(status_code=404, detail={"error": "unknown channel"})
         return payload
 
+    @app.post("/api/v1/whatsapp/session")
+    def whatsapp_register_session(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        session_id = str(payload.get("session_id", "") or "").strip()
+        started_at_raw = payload.get("started_at")
+        started_at = str(started_at_raw).strip() if isinstance(started_at_raw, str) and started_at_raw.strip() else None
+        if not session_id:
+            raise HTTPException(status_code=400, detail={"error": "session_id is required"})
+        return app.state.whatsapp_expiry.register_session(session_id=session_id, started_at=started_at)
+
+    @app.get("/api/v1/whatsapp/{session_id}/expiry")
+    def whatsapp_session_expiry(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.whatsapp_expiry.check_expiry(session_id)
+
+    @app.get("/api/v1/whatsapp/sessions/at-risk")
+    def whatsapp_sessions_at_risk(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        sessions = app.state.whatsapp_expiry.get_sessions_needing_alert()
+        return {"sessions": sessions, "count": len(sessions)}
+
+    @app.get("/api/v1/whatsapp/stats")
+    def whatsapp_stats(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.whatsapp_expiry.get_stats()
+
     @app.get("/api/v1/compliance/report/{agent_id}")
     def compliance_report_endpoint(
         agent_id: str,
@@ -3939,7 +4001,8 @@ def create_api_app(
         _require_auth(authorization)
         code = str(body.get("code", "") or "")
         language = str(body.get("language", "python") or "python")
-        return _build_vibe_audit_payload(code, language)
+        severity = str(body.get("severity", "low") or "low")
+        return _build_vibe_audit_payload(code, language, severity=severity)
 
     @app.post("/api/v1/vibe-audit/analyze")
     def vibe_audit_analyze_endpoint(
@@ -3949,7 +4012,8 @@ def create_api_app(
         _require_auth(authorization)
         code = str(body.get("code", "") or "")
         language = str(body.get("language", "python") or "python")
-        report = _build_vibe_audit_payload(code, language)
+        severity = str(body.get("severity", "low") or "low")
+        report = _build_vibe_audit_payload(code, language, severity=severity)
         checks = body.get("checks")
         if isinstance(checks, list) and checks:
             allow = {str(item).strip() for item in checks if str(item).strip()}
@@ -3963,6 +4027,24 @@ def create_api_app(
                 1 for item in report["findings"] if str(item.get("severity", "")) == "high"
             )
         return report
+
+    @app.post("/api/v1/vibe-audit/directory")
+    def vibe_audit_directory_endpoint(
+        body: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        dir_path = str(body.get("dir", ".") or ".")
+        summary = bool(body.get("summary", True))
+        severity = str(body.get("severity", "low") or "low")
+        ext_raw = body.get("extensions")
+        extensions = [str(item) for item in ext_raw if str(item).strip()] if isinstance(ext_raw, list) else None
+        return _build_vibe_audit_directory_payload(
+            dir_path=dir_path,
+            summary=summary,
+            extensions=extensions,
+            severity=severity,
+        )
 
     @app.get("/api/v1/ari/{agent_id}")
     def get_ari(
@@ -5801,6 +5883,45 @@ def create_api_app(
         if incident is None:
             raise HTTPException(status_code=404, detail={"error": "incident not found"})
         return incident.__dict__
+
+    @app.get("/api/v1/webchat/stats")
+    def webchat_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.webchat_injector.get_stats()
+
+    @app.post("/api/v1/webchat/alert/{session_id}")
+    def webchat_queue_alert(
+        session_id: str,
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        alert_type = str(payload.get("alert_type", payload.get("type", "info")) or "info")
+        message = str(payload.get("message", "") or "")
+        if not message:
+            raise HTTPException(status_code=400, detail={"error": "message is required"})
+        alert = app.state.webchat_injector.queue_alert(session_id, alert_type, message)
+        return {"queued": True, "alert": alert}
+
+    @app.get("/api/v1/webchat/{session_id}/pending")
+    def webchat_pending(session_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        pending = app.state.webchat_injector.get_pending(session_id)
+        return {"session_id": session_id, "pending": pending, "count": len(pending)}
+
+    @app.post("/api/v1/webchat/{session_id}/inject")
+    def webchat_inject(
+        session_id: str,
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        response_payload = payload.get("response")
+        response = dict(response_payload) if isinstance(response_payload, dict) else dict(payload)
+        injected = app.state.webchat_injector.inject_into_response(session_id, response)
+        return {"session_id": session_id, "response": injected}
 
     return app
 

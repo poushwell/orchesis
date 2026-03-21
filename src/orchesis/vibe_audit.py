@@ -1,279 +1,184 @@
-"""Vibe Code Audit MVP."""
+"""Lightweight vibe code auditor used by API and CLI tests."""
 
 from __future__ import annotations
 
 import re
-import uuid
 from pathlib import Path
 from typing import Any
 
 
 class VibeCodeAuditor:
-    """Audit AI-generated code for security and quality issues.
-
-    Reuses 60-70% of Orchesis engine - same detection pipeline
-    applied to code instead of LLM requests.
-    """
-
-    AUDIT_CHECKS = {
-        "hardcoded_secrets": "Credentials, API keys in code",
-        "sql_injection": "Unparameterized SQL queries",
-        "command_injection": "Shell command construction from input",
-        "path_traversal": "Unsafe file path construction",
-        "insecure_random": "Math.random() for security purposes",
-        "no_input_validation": "Functions accepting raw user input",
-        "dependency_confusion": "Suspicious package names",
-        "prompt_injection_in_code": "LLM prompts built from user input",
-        "missing_error_handling": "Bare except/catch blocks",
-        "debug_code_left": "print/console.log/debugger in production",
+    AI_SPECIFIC_CHECKS = {
+        "llm_prompt_in_code": "LLM prompt assembled directly in code",
+        "no_output_validation": "LLM output used without validation",
+        "infinite_retry_loop": "Infinite retry loop around model calls",
+        "token_count_ignored": "Token budget not checked",
+        "hallucination_unchecked": "No hallucination guard detected",
+        "agent_trust_escalation": "Agent trust escalation pattern detected",
     }
 
-    _SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3, "critical": 4}
-    _GRADE_BANDS = [
-        (97.0, "A+"),
-        (90.0, "A"),
-        (84.0, "B+"),
-        (76.0, "B"),
-        (60.0, "C"),
-        (0.0, "D"),
-    ]
+    _SEVERITY_PENALTY = {
+        "info": 0,
+        "low": 5,
+        "medium": 10,
+        "high": 15,
+        "critical": 25,
+    }
 
-    def __init__(self, config: dict | None = None):
-        cfg = config if isinstance(config, dict) else {}
-        level = str(cfg.get("severity_threshold", "low") or "low").strip().lower()
-        self.severity_threshold = level if level in self._SEVERITY_ORDER else "low"
+    def __init__(self, config: dict[str, Any] | None = None):
+        cfg = config or {}
+        self.severity_threshold = str(cfg.get("severity_threshold", "low")).lower()
 
-    def _passes_threshold(self, severity: str) -> bool:
-        return self._SEVERITY_ORDER.get(severity, 1) >= self._SEVERITY_ORDER[self.severity_threshold]
+    def _severity_rank(self, severity: str) -> int:
+        order = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+        return order.get(str(severity).lower(), 0)
 
-    @staticmethod
-    def _line_finding(check: str, severity: str, line: int, snippet: str, fix: str) -> dict[str, Any]:
-        return {
-            "check": check,
-            "severity": severity,
-            "line": int(line),
-            "snippet": snippet[:200],
-            "fix": fix,
-        }
+    def _include(self, severity: str) -> bool:
+        return self._severity_rank(severity) >= self._severity_rank(self.severity_threshold)
 
-    @staticmethod
-    def _score(findings: list[dict[str, Any]]) -> float:
-        penalties = {"critical": 25.0, "high": 12.0, "medium": 6.0, "low": 2.0}
-        score = 100.0
-        for finding in findings:
-            sev = str(finding.get("severity", "low")).lower()
-            score -= penalties.get(sev, 2.0)
-        return max(0.0, round(score, 3))
+    def _grade_for_score(self, score: float) -> str:
+        if score >= 90:
+            return "A"
+        if score >= 80:
+            return "B"
+        if score >= 70:
+            return "C"
+        if score >= 60:
+            return "D"
+        return "F"
 
-    @classmethod
-    def _grade_for(cls, score: float) -> str:
-        value = float(score)
-        for threshold, grade in cls._GRADE_BANDS:
-            if value >= threshold:
-                return grade
-        return "D"
-
-    @staticmethod
-    def _iter_lines(code: str) -> list[tuple[int, str]]:
-        return [(idx, line) for idx, line in enumerate(str(code or "").splitlines(), start=1)]
-
-    def get_fix_suggestion(self, finding: dict) -> str:
-        """Get remediation for a finding."""
-        check = str((finding or {}).get("check", "")).strip()
-        suggestions = {
-            "hardcoded_secrets": "Move secrets to environment variables or a vault provider.",
-            "sql_injection": "Use parameterized queries instead of string interpolation.",
-            "command_injection": "Avoid shell=True and pass argv list with strict allow-lists.",
-            "path_traversal": "Normalize/validate paths and block '..' segments.",
-            "insecure_random": "Use a cryptographic RNG for security-sensitive logic.",
-            "no_input_validation": "Validate and sanitize user input at API boundaries.",
-            "dependency_confusion": "Pin trusted package names and exact versions.",
-            "prompt_injection_in_code": "Sanitize user text before embedding in prompts.",
-            "missing_error_handling": "Catch specific exceptions and log structured details.",
-            "debug_code_left": "Remove debug statements from production code paths.",
-        }
-        return suggestions.get(check, "Review and refactor this section with secure coding practices.")
-
-    def audit_code(self, code: str, language: str = "python") -> dict:
-        findings: list[dict[str, Any]] = []
-        lines = self._iter_lines(code)
-
-        secret_re = re.compile(r"(api[_-]?key|secret|token|password)\s*[:=]\s*['\"][^'\"]{6,}['\"]", re.IGNORECASE)
-        sql_re = re.compile(r"(select|insert|update|delete).*(\+|%)", re.IGNORECASE)
-        sql_fstring_re = re.compile(r"f[\"'][^\"']*(select|insert|update|delete)[^\"']*\{[^}]+\}", re.IGNORECASE)
-        cmd_re = re.compile(r"(subprocess\.(run|Popen)|os\.system).*(input|user|request|\+)", re.IGNORECASE)
-        path_re = re.compile(r"(\.\./|os\.path\.join\([^)]*(input|user|request))", re.IGNORECASE)
-        random_re = re.compile(r"(Math\.random\(|random\.random\()", re.IGNORECASE)
-        llm_prompt_re = re.compile(r"(prompt|messages?).*(input|user|request).*(\+|f['\"])", re.IGNORECASE)
-        debug_re = re.compile(r"(\bprint\(|console\.log\(|\bdebugger\b)", re.IGNORECASE)
-
-        for line_no, line in lines:
-            stripped = line.strip()
-            if secret_re.search(line):
-                findings.append(
-                    self._line_finding(
-                        "hardcoded_secrets",
-                        "critical",
-                        line_no,
-                        stripped,
-                        "Use env/vault secret injection.",
-                    )
-                )
-            if sql_re.search(line) or sql_fstring_re.search(line):
-                findings.append(
-                    self._line_finding(
-                        "sql_injection",
-                        "high",
-                        line_no,
-                        stripped,
-                        "Replace with parameterized SQL.",
-                    )
-                )
-            if cmd_re.search(line):
-                findings.append(
-                    self._line_finding(
-                        "command_injection",
-                        "critical",
-                        line_no,
-                        stripped,
-                        "Avoid shell command concatenation with user input.",
-                    )
-                )
-            if path_re.search(line):
-                findings.append(
-                    self._line_finding(
-                        "path_traversal",
-                        "high",
-                        line_no,
-                        stripped,
-                        "Normalize and validate path segments.",
-                    )
-                )
-            if random_re.search(line) and ("security" in code.lower() or "token" in code.lower()):
-                findings.append(
-                    self._line_finding(
-                        "insecure_random",
-                        "medium",
-                        line_no,
-                        stripped,
-                        "Use cryptographically secure randomness.",
-                    )
-                )
-            if llm_prompt_re.search(line):
-                findings.append(
-                    self._line_finding(
-                        "prompt_injection_in_code",
-                        "medium",
-                        line_no,
-                        stripped,
-                        "Avoid direct user input interpolation in prompts.",
-                    )
-                )
-            if debug_re.search(line):
-                findings.append(
-                    self._line_finding(
-                        "debug_code_left",
-                        "low",
-                        line_no,
-                        stripped,
-                        "Remove debug statements from production.",
-                    )
-                )
-            if re.search(r"except\s*:\s*$|catch\s*\(\s*\)\s*\{?", stripped):
-                findings.append(
-                    self._line_finding(
-                        "missing_error_handling",
-                        "medium",
-                        line_no,
-                        stripped,
-                        "Catch specific exceptions and add handling.",
-                    )
-                )
-
-        # Heuristic for missing input validation.
-        if "input(" in code or "request." in code or "req." in code:
-            if not re.search(r"(validate|sanitize|schema|pydantic|marshmallow|zod|joi)", code, re.IGNORECASE):
-                findings.append(
-                    self._line_finding(
-                        "no_input_validation",
-                        "medium",
-                        1,
-                        "raw user input detected",
-                        "Add explicit input validation.",
-                    )
-                )
-
-        # Heuristic for dependency confusion references.
-        if re.search(r"(pip install|npm install)\s+[\w\-]+", code, re.IGNORECASE):
-            if not re.search(r"(==|@|--index-url|--extra-index-url)", code):
-                findings.append(
-                    self._line_finding(
-                        "dependency_confusion",
-                        "low",
-                        1,
-                        "un-pinned dependency install command",
-                        "Pin exact dependency versions and trusted index.",
-                    )
-                )
-
-        filtered = [item for item in findings if self._passes_threshold(str(item.get("severity", "low")))]
-        for finding in filtered:
-            finding["fix"] = self.get_fix_suggestion(finding)
-        score = self._score(filtered)
-        grade = self._grade_for(score)
-        critical_count = sum(1 for item in filtered if str(item.get("severity", "")) == "critical")
-        high_count = sum(1 for item in filtered if str(item.get("severity", "")) == "high")
-        summary = (
-            "No major issues detected."
-            if not filtered
-            else f"Detected {len(filtered)} findings ({critical_count} critical, {high_count} high)."
+    def compute_score_v2(self, findings: list[dict[str, Any]]) -> dict[str, Any]:
+        penalty = sum(
+            self._SEVERITY_PENALTY.get(str(item.get("severity", "low")).lower(), 5)
+            for item in findings
         )
+        score = max(0, 100 - penalty)
+        return {"penalty": penalty, "score": score, "grade": self._grade_for_score(float(score))}
+
+    def _build_finding(self, check: str, severity: str, detail: str) -> dict[str, Any]:
+        return {"check": check, "severity": severity, "detail": detail}
+
+    def audit_code(self, code: str, language: str = "python") -> dict[str, Any]:
+        text = str(code or "")
+        findings: list[dict[str, Any]] = []
+
+        if re.search(r"(API_KEY|SECRET|TOKEN)\s*=\s*['\"]", text, re.IGNORECASE):
+            findings.append(
+                self._build_finding("hardcoded_secrets", "critical", "Hardcoded secret-like value found")
+            )
+        if re.search(r"SELECT .*WHERE .*{", text, re.IGNORECASE | re.DOTALL):
+            findings.append(
+                self._build_finding("sql_injection", "critical", "String-interpolated SQL detected")
+            )
+        if re.search(r"subprocess\.(run|Popen)\(.*shell\s*=\s*True", text, re.DOTALL):
+            findings.append(
+                self._build_finding("command_injection", "high", "Shell execution with dynamic input")
+            )
+        if re.search(r"(system:|assistant:|user:)\s*\{?user_input\}?", text, re.IGNORECASE):
+            findings.append(
+                self._build_finding("llm_prompt_in_code", "medium", "Prompt assembled from raw user input")
+            )
+        if "client.responses.create" in text and not re.search(
+            r"validate|schema|jsonschema|pydantic", text, re.IGNORECASE
+        ):
+            findings.append(
+                self._build_finding("no_output_validation", "high", "Model output lacks validation")
+            )
+        if re.search(r"while\s+True:.*client\.responses\.create", text, re.DOTALL):
+            findings.append(
+                self._build_finding("infinite_retry_loop", "high", "Potential infinite retry loop")
+            )
+        if "client.responses.create" in text and not re.search(
+            r"max_tokens|token|context_window", text, re.IGNORECASE
+        ):
+            findings.append(
+                self._build_finding("token_count_ignored", "low", "No token budget handling detected")
+            )
+        if "client.responses.create" in text and not re.search(
+            r"verify|validate|ground|check", text, re.IGNORECASE
+        ):
+            findings.append(
+                self._build_finding("hallucination_unchecked", "low", "No hallucination validation detected")
+            )
+        if re.search(r"trust_tier\s*=\s*['\"]?(admin|root)|bypass approval|auto-approve", text, re.IGNORECASE):
+            findings.append(
+                self._build_finding("agent_trust_escalation", "high", "Trust escalation pattern detected")
+            )
+
+        filtered = [item for item in findings if self._include(str(item.get("severity", "low")))]
+        scored = self.compute_score_v2(filtered)
         return {
-            "audit_id": str(uuid.uuid4()),
-            "language": str(language or "python"),
-            "lines": len(lines),
+            "language": language,
             "findings": filtered,
-            "score": score,
-            "grade": grade,
-            "summary": summary,
-            "critical_count": critical_count,
-            "high_count": high_count,
+            "score": float(scored["score"]),
+            "grade": scored["grade"],
+            "critical_count": sum(1 for item in filtered if item["severity"] == "critical"),
+            "high_count": sum(1 for item in filtered if item["severity"] == "high"),
+            "summary": "No major issues detected" if not filtered else f"{len(filtered)} finding(s) detected",
         }
 
-    def audit_file(self, file_path: str) -> dict:
-        """Audit a single file."""
+    def audit_file(self, file_path: str) -> dict[str, Any]:
         path = Path(file_path)
-        code = path.read_text(encoding="utf-8")
-        ext = path.suffix.lower().lstrip(".")
-        lang = ext if ext else "python"
-        report = self.audit_code(code, language=lang)
+        report = self.audit_code(
+            path.read_text(encoding="utf-8", errors="replace"),
+            language=path.suffix.lstrip(".") or "text",
+        )
         report["file_path"] = str(path)
         return report
 
-    def audit_directory(self, dir_path: str, extensions: list[str] | None = None) -> dict:
-        """Audit all code files in directory."""
+    def audit_directory(self, dir_path: str, extensions: list[str] | None = None) -> dict[str, Any]:
+        ext_set = {f".{item.lstrip('.').lower()}" for item in extensions} if extensions else {".py", ".js", ".ts"}
         root = Path(dir_path)
-        ext_allow = (
-            {f".{ext.strip().lower().lstrip('.')}" for ext in extensions if str(ext).strip()}
-            if isinstance(extensions, list) and extensions
-            else {".py", ".js", ".ts", ".tsx", ".java", ".go", ".rs"}
-        )
-        files = [path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in ext_allow]
         reports: list[dict[str, Any]] = []
-        total_findings = 0
-        for file_path in files:
-            report = self.audit_file(str(file_path))
-            reports.append(report)
-            total_findings += len(report.get("findings", []))
-        avg_score = (
-            sum(float(item.get("score", 0.0) or 0.0) for item in reports) / float(len(reports))
-            if reports
-            else 100.0
-        )
+        for path in root.rglob("*"):
+            if path.is_file() and path.suffix.lower() in ext_set:
+                reports.append(self.audit_file(str(path)))
+        avg_score = round(
+            sum(float(item.get("score", 0)) for item in reports) / len(reports),
+            2,
+        ) if reports else 100.0
         return {
-            "directory": str(root),
-            "files_scanned": len(files),
+            "files_scanned": len(reports),
+            "total_findings": sum(len(item.get("findings", [])) for item in reports),
+            "avg_score": avg_score,
             "reports": reports,
-            "total_findings": int(total_findings),
-            "avg_score": round(avg_score, 3),
         }
+
+    def audit_directory_summary(self, dir_path: str, extensions: list[str] | None = None) -> dict[str, Any]:
+        directory_report = self.audit_directory(dir_path, extensions=extensions)
+        reports = list(directory_report.get("reports", []))
+        worst_files = sorted(
+            (
+                {
+                    "file_path": item.get("file_path", ""),
+                    "score": item.get("score", 0),
+                    "grade": item.get("grade", "A"),
+                }
+                for item in reports
+            ),
+            key=lambda item: (float(item["score"]), str(item["file_path"])),
+        )[:5]
+        avg_score = float(directory_report.get("avg_score", 100.0))
+        return {
+            "files_audited": int(directory_report.get("files_scanned", 0)),
+            "avg_score": avg_score,
+            "grade": self._grade_for_score(avg_score),
+            "critical_files": sum(1 for item in reports if int(item.get("critical_count", 0)) > 0),
+            "total_findings": int(directory_report.get("total_findings", 0)),
+            "worst_files": worst_files,
+        }
+
+    def get_fix_suggestion(self, finding: dict[str, Any]) -> str:
+        check = str(finding.get("check", ""))
+        suggestions = {
+            "sql_injection": "Use parameterized queries instead of string interpolation.",
+            "command_injection": "Avoid shell=True and pass arguments as a list.",
+            "hardcoded_secrets": "Move secrets to environment variables or a vault.",
+            "no_output_validation": "Validate model responses with a schema before use.",
+        }
+        return suggestions.get(check, "Review and harden the affected code path.")
+
+    def format_badge_text(self, report: dict[str, Any]) -> str:
+        score = float(report.get("score", 0))
+        grade = str(report.get("grade", "D"))
+        return f"Vibe Code Audit: {score:.0f}/100 ({grade})"

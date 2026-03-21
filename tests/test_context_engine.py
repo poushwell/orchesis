@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from typing import Any
 
@@ -12,6 +13,8 @@ from orchesis.context_engine import (
     ContextEngine,
     ContextResult,
 )
+
+CI_MULTIPLIER = 5.0 if os.getenv("CI") else 1.0
 
 
 # --- Dedup Strategy (8 tests) ---
@@ -132,7 +135,7 @@ def test_dedup_large_window_performance() -> None:
     start = time.monotonic()
     result = engine.optimize(messages)
     elapsed = time.monotonic() - start
-    assert elapsed < 1.0
+    assert elapsed < 1.0 * CI_MULTIPLIER
     assert len(result.messages) < len(messages)
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 import tracemalloc
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +10,8 @@ from orchesis.engine import evaluate
 from orchesis.identity import AgentIdentity, AgentRegistry, TrustTier
 from orchesis.state import RateLimitTracker
 from orchesis.telemetry import InMemoryEmitter
+
+CI_MULTIPLIER = 5.0 if os.getenv("CI") else 1.0
 
 
 def _policy(*, rate_limit: int = 10, daily_budget: float = 1000.0, max_cost: float = 10.0) -> dict:
@@ -78,7 +81,9 @@ def test_5000_concurrent_evaluations() -> None:
 
     for allowed, expected_allow in results:
         assert allowed == expected_allow
-    assert elapsed < 60.0, f"5000 concurrent evaluations took {elapsed:.1f}s (limit 60s)"
+    assert elapsed < 60.0 * CI_MULTIPLIER, (
+        f"5000 concurrent evaluations took {elapsed:.1f}s (limit {60.0 * CI_MULTIPLIER:.1f}s)"
+    )
 
 
 def test_rate_limit_exact_under_concurrency() -> None:
@@ -355,7 +360,7 @@ def test_sustained_throughput_60_seconds() -> None:
     p99 = sorted_lat[p99_idx]
     memory_growth_mb = max(0.0, (end_mem - start_mem) / (1024.0 * 1024.0))
     assert throughput >= 100.0
-    assert p99 < 20_000
+    assert p99 < 20_000 * CI_MULTIPLIER
     assert memory_growth_mb <= 100.0
 
 

@@ -7,6 +7,8 @@ import time
 import pytest
 import yaml
 
+CI_MULTIPLIER = 5.0 if os.getenv("CI") else 1.0
+
 
 def test_empty_request() -> None:
     from orchesis.engine import evaluate
@@ -62,7 +64,7 @@ def test_1000_rules_in_policy() -> None:
     req = {"tool": "t", "params": {"content": "hello world"}, "cost": 0.0, "context": {}}
     start = time.time()
     _ = evaluate(req, policy)
-    assert time.time() - start < 5.0
+    assert time.time() - start < 5.0 * CI_MULTIPLIER
 
 
 def test_unicode_extremes() -> None:

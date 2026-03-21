@@ -4025,6 +4025,16 @@ def arxiv_package_command(paper_dir: str, output_dir: str) -> None:
 @click.option("--file", "file_path", type=click.Path(exists=True), default=None, help="Single file to audit")
 @click.option("--dir", "dir_path", type=click.Path(exists=True, file_okay=False), default=None, help="Directory to audit")
 @click.option("--ext", "extensions_csv", default=None, help="Comma-separated file extensions (e.g. py,js,ts)")
+@click.option(
+    "--severity",
+    "severity_threshold",
+    type=click.Choice(["info", "low", "medium", "high", "critical"], case_sensitive=False),
+    default="low",
+    show_default=True,
+    help="Minimum severity to include",
+)
+@click.option("--summary", "summary_only", is_flag=True, default=False, help="Summary mode for directory audits")
+@click.option("--badge", "badge_output", is_flag=True, default=False, help="Print compact badge text")
 @click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text", show_default=True)
 @click.option("--output", "output_path", type=click.Path(), default=None, help="Write report to file")
 def vibe_audit_command(
@@ -4032,11 +4042,14 @@ def vibe_audit_command(
     file_path: str | None,
     dir_path: str | None,
     extensions_csv: str | None,
+    severity_threshold: str,
+    summary_only: bool,
+    badge_output: bool,
     output_format: str,
     output_path: str | None,
 ) -> None:
     """Audit generated code for security and quality issues."""
-    auditor = VibeCodeAuditor()
+    auditor = VibeCodeAuditor({"severity_threshold": str(severity_threshold).lower()})
 
     sources = [inline_code is not None, file_path is not None, dir_path is not None]
     if sum(1 for item in sources if item) != 1:
@@ -4051,18 +4064,31 @@ def vibe_audit_command(
         extensions = None
         if isinstance(extensions_csv, str) and extensions_csv.strip():
             extensions = [item.strip() for item in extensions_csv.split(",") if item.strip()]
-        report = auditor.audit_directory(str(dir_path), extensions=extensions)
+        if summary_only:
+            report = auditor.audit_directory_summary(str(dir_path), extensions=extensions)
+        else:
+            report = auditor.audit_directory(str(dir_path), extensions=extensions)
 
     text_output = ""
     if output_format == "json":
         text_output = json.dumps(report, ensure_ascii=False, indent=2)
     else:
-        if "findings" in report:
+        if badge_output and "findings" in report:
+            text_output = auditor.format_badge_text(report)
+        elif "findings" in report:
             text_output = (
                 f"Vibe audit: score {report.get('score', 0):.1f}/100 ({report.get('grade', 'D')})\n"
                 f"Findings: {len(report.get('findings', []))} "
                 f"(critical={report.get('critical_count', 0)}, high={report.get('high_count', 0)})\n"
                 f"Summary: {report.get('summary', '')}"
+            )
+        elif "files_audited" in report:
+            text_output = (
+                "Vibe audit directory summary\n"
+                f"Files audited: {report.get('files_audited', 0)}\n"
+                f"Average score: {report.get('avg_score', 0)} ({report.get('grade', 'A')})\n"
+                f"Critical files: {report.get('critical_files', 0)}\n"
+                f"Total findings: {report.get('total_findings', 0)}"
             )
         else:
             text_output = (

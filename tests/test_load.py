@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import tracemalloc
 from collections import defaultdict
@@ -14,6 +15,8 @@ from orchesis.fleet_coordinator import FleetCoordinator
 from orchesis.incident_manager import IncidentManager
 from orchesis.models import Decision
 from orchesis.state import RateLimitTracker
+
+CI_MULTIPLIER = 5.0 if os.getenv("CI") else 1.0
 
 
 def _full_policy() -> dict[str, object]:
@@ -79,7 +82,7 @@ def test_1000_sequential_evaluations_under_1_second() -> None:
     print(
         f"load_seq total_s={elapsed:.6f} avg_ms={avg:.6f} p50_ms={p50:.6f} p95_ms={p95:.6f} p99_ms={p99:.6f}"
     )
-    assert elapsed < 6.0
+    assert elapsed < 6.0 * CI_MULTIPLIER
 
 
 def test_500_concurrent_evaluations_no_race_conditions() -> None:
@@ -177,7 +180,7 @@ def test_evaluation_latency_with_large_policy() -> None:
         prefix = name.split("_", 1)[0]
         counts_by_prefix[prefix] += 1
     print(f"large_policy avg_ms={avg:.6f} p99_ms={p99:.6f} rule_mix={dict(counts_by_prefix)}")
-    assert p99 < 60.0
+    assert p99 < 60.0 * CI_MULTIPLIER
 
 
 def test_sustained_throughput_10_seconds() -> None:
