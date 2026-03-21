@@ -3,20 +3,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import logging
 import threading
 from typing import Any
 
 from orchesis.models.ecosystem import ReliabilityReport, SLOTarget
-
-try:
-    from orchesis.utils.log import get_logger  # type: ignore
-except Exception:  # pragma: no cover
-    def get_logger(name: str):
-        return logging.getLogger(name)
+from orchesis.utils.log import get_logger
 
 
 logger = get_logger(__name__)
+COMPONENT = "are"
 
 
 class AREFramework:
@@ -71,7 +66,15 @@ class AREFramework:
         with self._lock:
             self._slos[slo_name] = row
             self._sli_history.setdefault(slo_name, [])
-        logger.debug("Defined SLO name=%s sli=%s target=%s", slo_name, sli_name, float(target))
+        logger.info(
+            "Defined ARE SLO",
+            extra={
+                "component": COMPONENT,
+                "slo_name": slo_name,
+                "sli": sli_name,
+                "target": float(target),
+            },
+        )
         return dict(row)
 
     def record_sli(self, name: str, value: float) -> None:
@@ -135,12 +138,21 @@ class AREFramework:
             names = sorted(self._slos.keys())
         entries = [self.get_error_budget(name) for name in names]
         exhausted_count = sum(1 for row in entries if bool(row.get("exhausted", False)))
-        return {
+        report = {
             "slos": entries,
             "total_slos": len(entries),
             "exhausted": exhausted_count,
             "healthy": len(entries) - exhausted_count,
         }
+        logger.info(
+            "Generated ARE reliability report",
+            extra={
+                "component": COMPONENT,
+                "total_slos": report["total_slos"],
+                "exhausted": report["exhausted"],
+            },
+        )
+        return report
 
     def get_reliability_report_canonical(self, agent_id: str = "") -> ReliabilityReport:
         report = self.get_reliability_report()

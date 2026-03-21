@@ -4,21 +4,16 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
-import logging
 import threading
 import uuid
 from typing import Any
 
 from orchesis.models.ecosystem import BenchmarkEntry
-
-try:
-    from orchesis.utils.log import get_logger  # type: ignore
-except Exception:  # pragma: no cover
-    def get_logger(name: str):
-        return logging.getLogger(name)
+from orchesis.utils.log import get_logger
 
 
 logger = get_logger(__name__)
+COMPONENT = "aabb"
 
 
 class AABBBenchmark:
@@ -103,6 +98,10 @@ class AABBBenchmark:
         _ = proxy_url
         aid = str(agent_id or "").strip() or "unknown"
         run_id = f"aabb-{uuid.uuid4().hex[:12]}"
+        logger.info(
+            "Starting AABB benchmark suite",
+            extra={"component": COMPONENT, "agent_id": aid, "run_id": run_id},
+        )
         category_scores: dict[str, float] = {}
         passed = 0
         failed = 0
@@ -131,7 +130,15 @@ class AABBBenchmark:
             ranks = {row["agent_id"]: row["rank"] for row in leaderboard}
             result["rank"] = ranks.get(aid)
             self._results[run_id]["rank"] = result["rank"]
-        logger.debug("AABB run complete agent=%s run_id=%s score=%s", aid, run_id, result["overall_score"])
+        logger.info(
+            "Completed AABB benchmark suite",
+            extra={
+                "component": COMPONENT,
+                "agent_id": aid,
+                "run_id": run_id,
+                "overall_score": result["overall_score"],
+            },
+        )
         return result
 
     @staticmethod

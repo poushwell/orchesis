@@ -22,6 +22,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.routing import APIRoute
 from fastapi.responses import JSONResponse, Response
 
+from orchesis.api_ecosystem import router as ecosystem_router
+from orchesis.api_security import router as security_router
 from orchesis.auth import AgentAuthenticator, CredentialStore
 from orchesis.ari import AgentReadinessIndex
 from orchesis.agent_health import AgentHealthScore
@@ -148,6 +150,10 @@ from orchesis.whatsapp_expiry import WhatsAppExpiryTracker
 from orchesis.webchat_inject import WebChatInjector
 from orchesis.h43_quantum import H43QuantumMVE
 from orchesis import __version__
+
+# Core routes (~294 endpoints): policy, proxy, fleet, health, stats, dashboard
+# Ecosystem routes: see api_ecosystem.py
+# Security routes: see api_security.py
 
 
 @dataclass
@@ -2683,99 +2689,6 @@ def create_api_app(
         rows = app.state.arc_readiness.list_certificates()
         return {"certificates": rows, "total": len(rows)}
 
-    @app.get("/api/v1/casura/incidents/stats")
-    def casura_incident_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        return app.state.casura_db.get_stats()
-
-    @app.post("/api/v1/casura/incidents/search")
-    def casura_incident_search(
-        body: dict[str, Any] | None = None,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        payload = body if isinstance(body, dict) else {}
-        query = str(payload.get("query", "") or "")
-        filters = payload.get("filters", {})
-        rows = app.state.casura_db.search(query=query, filters=filters if isinstance(filters, dict) else None)
-        return {"incidents": rows, "total": len(rows)}
-
-    @app.get("/api/v1/casura/incidents")
-    def casura_incidents(
-        limit: int = 100,
-        offset: int = 0,
-        paginated: bool = False,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        rows = app.state.casura_db.search(query="")
-        if not paginated:
-            return {"incidents": rows, "total": len(rows)}
-        return asdict(paginate(rows, limit=limit, offset=offset, max_limit=1000))
-
-    @app.post("/api/v1/casura/incidents")
-    def casura_create_incident(
-        body: dict[str, Any] | None = None,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        payload = body if isinstance(body, dict) else {}
-        return app.state.casura_db.create_incident(payload)
-
-    @app.get("/api/v1/casura/incidents/{incident_id}")
-    def casura_get_incident(
-        incident_id: str,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        item = app.state.casura_db._incidents.get(incident_id)
-        if not isinstance(item, dict):
-            raise HTTPException(status_code=404, detail={"error": "incident not found"})
-        return dict(item)
-
-    @app.get("/api/v1/casura/intelligence/patterns")
-    def casura_intel_patterns(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        incidents = app.state.casura_db.search(query="")
-        return app.state.casura_intel.analyze_patterns(incidents)
-
-    @app.get("/api/v1/casura/intelligence/mitre-coverage")
-    def casura_mitre_coverage(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        incidents = app.state.casura_db.search(query="")
-        return app.state.casura_intel.get_mitre_coverage(incidents)
-
-    @app.get("/api/v1/aabb/leaderboard")
-    def aabb_leaderboard(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        rows = app.state.aabb_benchmark.get_leaderboard()
-        return {"leaderboard": rows, "total": len(rows)}
-
-    @app.post("/api/v1/aabb/run/{agent_id}")
-    def aabb_run(
-        agent_id: str,
-        body: dict[str, Any] | None = None,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        payload = body if isinstance(body, dict) else {}
-        proxy_url = str(payload.get("proxy_url", "http://localhost:8080") or "http://localhost:8080")
-        return app.state.aabb_benchmark.run_suite(agent_id=agent_id, proxy_url=proxy_url)
-
-    @app.get("/api/v1/aabb/stats")
-    def aabb_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        return app.state.aabb_benchmark.get_benchmark_stats()
-
-    @app.get("/api/v1/aabb/compare/{agent_a}/{agent_b}")
-    def aabb_compare(
-        agent_a: str,
-        agent_b: str,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        return app.state.aabb_benchmark.compare_agents(agent_a, agent_b)
-
     @app.post("/api/v1/compare/metric")
     def compare_record_metric(
         body: dict[str, Any] | None = None,
@@ -2879,229 +2792,6 @@ def create_api_app(
         _require_auth(authorization)
         return app.state.context_timeline.summarize(session_id)
 
-    @app.post("/api/v1/persona/baseline")
-    def persona_baseline(
-        body: dict[str, Any] | None = None,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        payload = body if isinstance(body, dict) else {}
-        identity_files = payload.get("identity_files")
-        files = [str(item) for item in identity_files if isinstance(item, str) and item.strip()] if isinstance(identity_files, list) else []
-        return app.state.persona_guardian.initialize_baseline(files)
-
-    @app.post("/api/v1/persona/check")
-    def persona_check(
-        body: dict[str, Any] | None = None,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        payload = body if isinstance(body, dict) else {}
-        identity_files = payload.get("identity_files")
-        files = [str(item) for item in identity_files if isinstance(item, str) and item.strip()] if isinstance(identity_files, list) else []
-        findings = app.state.persona_guardian.check_identity_files(files)
-        alert = app.state.persona_guardian.check_zenity_pattern()
-        return {"findings": findings, "count": len(findings), "alert": alert}
-
-    @app.post("/api/v1/persona/cron-event")
-    def persona_cron_event(
-        body: dict[str, Any] | None = None,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        payload = body if isinstance(body, dict) else {}
-        cron_expression = str(payload.get("cron_expression", "") or "").strip()
-        source = str(payload.get("source", "unknown") or "unknown").strip() or "unknown"
-        if not cron_expression:
-            raise HTTPException(status_code=400, detail={"error": "cron_expression is required"})
-        event = app.state.persona_guardian.record_cron_event(cron_expression=cron_expression, source=source)
-        alert = app.state.persona_guardian.check_zenity_pattern()
-        return {"event": event, "alert": alert}
-
-    @app.get("/api/v1/persona/zenity-check")
-    def persona_zenity_check(
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        alert = app.state.persona_guardian.check_zenity_pattern()
-        return {"detected": alert is not None, "alert": alert}
-
-    @app.get("/api/v1/persona/stats")
-    def persona_stats(
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        return app.state.persona_guardian.get_stats()
-
-    @app.post("/api/v1/persona/restore/{file_path:path}")
-    def persona_restore(
-        file_path: str,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        return app.state.persona_guardian.auto_restore(str(file_path or ""))
-
-    @app.get("/api/v1/persona/steganography")
-    def persona_steganography(
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        results = app.state.persona_guardian.scan_all_identity_files()
-        return {"results": results, "count": len(results)}
-
-    @app.post("/api/v1/persona/steganography/scan")
-    def persona_steganography_scan(
-        body: dict[str, Any] | None = None,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        payload = body if isinstance(body, dict) else {}
-        file_path = str(payload.get("file_path", "") or "").strip()
-        if not file_path:
-            raise HTTPException(status_code=400, detail={"error": "file_path is required"})
-        return app.state.persona_guardian.scan_steganography(file_path)
-
-    @app.post("/api/v1/are/slo")
-    def are_define_slo(
-        body: dict[str, Any],
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        name = str(body.get("name", "")).strip()
-        sli = str(body.get("sli", "")).strip()
-        target = body.get("target")
-        window_days = body.get("window_days", 30)
-        if not name or not sli or target is None:
-            raise HTTPException(status_code=400, detail={"error": "name, sli, target are required"})
-        try:
-            row = app.state.are.define_slo(
-                name=name,
-                sli=sli,
-                target=float(target),
-                window_days=int(window_days),
-            )
-        except (ValueError, TypeError) as error:
-            raise HTTPException(status_code=400, detail={"error": str(error)}) from error
-        return {"slo": row}
-
-    @app.post("/api/v1/are/sli/{slo_name}")
-    def are_record_sli(
-        slo_name: str,
-        body: dict[str, Any],
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        if "value" not in body:
-            raise HTTPException(status_code=400, detail={"error": "value is required"})
-        try:
-            app.state.are.record_sli(slo_name, float(body.get("value")))
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail={"error": str(error)}) from error
-        except (TypeError, ValueError) as error:
-            raise HTTPException(status_code=400, detail={"error": str(error)}) from error
-        return {"ok": True, "slo_name": slo_name}
-
-    @app.get("/api/v1/are/budget/{slo_name}")
-    def are_budget(
-        slo_name: str,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        try:
-            return app.state.are.get_error_budget(slo_name)
-        except KeyError as error:
-            raise HTTPException(status_code=404, detail={"error": str(error)}) from error
-
-    @app.get("/api/v1/are/report")
-    def are_report(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        return app.state.are.get_reliability_report()
-
-    @app.get("/api/v1/are/alerts")
-    def are_alerts(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        report = app.state.are.get_reliability_report()
-        alerts: list[dict[str, Any]] = []
-        for row in report.get("slos", []):
-            if not isinstance(row, dict):
-                continue
-            slo_name = str(row.get("slo_name", "")).strip()
-            if not slo_name:
-                continue
-            alert = app.state.are.get_burn_rate_alert(slo_name)
-            if isinstance(alert, dict):
-                alerts.append(alert)
-        return {"alerts": alerts, "count": len(alerts)}
-
-    @app.get("/api/v1/competitive/latest")
-    def competitive_latest(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        incidents = app.state.casura_db.search(query="")
-        changes = app.state.competitive_monitor.detect_ecosystem_changes(
-            incidents if isinstance(incidents, list) else []
-        )
-        leaderboard = app.state.aabb_benchmark.get_leaderboard()
-        competitor_alerts: list[dict[str, Any]] = []
-        if isinstance(leaderboard, list):
-            for row in leaderboard[:5]:
-                if not isinstance(row, dict):
-                    continue
-                agent_name = str(row.get("agent_id", "") or "")
-                score = float(row.get("score", 0.0) or 0.0)
-                if score >= 0.8:
-                    competitor_alerts.append(
-                        {
-                            "event": "competitor_stars_spike",
-                            "title": f"High-performing competitor signal: {agent_name}",
-                            "severity": "medium",
-                            "score": score,
-                        }
-                    )
-        alerts = changes + competitor_alerts
-        return {"alerts": alerts, "count": len(alerts)}
-
-    @app.get("/api/v1/monitoring/parse-hn")
-    async def monitoring_parse_hn(
-        request: Request,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        payload = await request.json() if request is not None else {}
-        if not isinstance(payload, dict):
-            payload = {}
-        item = payload.get("item", {})
-        if not isinstance(item, dict):
-            raise HTTPException(status_code=400, detail={"error": "item must be an object"})
-        parsed = app.state.social_parsers.parse_hn_item(item)
-        app.state.monitoring_items.append(parsed)
-        if len(app.state.monitoring_items) > 1000:
-            app.state.monitoring_items = app.state.monitoring_items[-1000:]
-        app.state.monitoring_opportunities = app.state.social_parsers.extract_opportunities(
-            app.state.monitoring_items[-200:]
-        )
-        return {"parsed": parsed}
-
-    @app.get("/api/v1/monitoring/opportunities")
-    def monitoring_opportunities(
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        rows = app.state.monitoring_opportunities[-20:]
-        return {"opportunities": rows, "count": len(rows)}
-
-    @app.get("/api/v1/monitoring/weekly-report")
-    def monitoring_weekly_report(
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        feed_items = app.state.monitoring_items[-200:]
-        report = app.state.competitive_monitor.generate_weekly_report(
-            {
-                "competitors": {},
-                "feed": feed_items,
-            }
-        )
-        return report
 
     @app.get("/api/v1/weekly-report")
     def weekly_report_endpoint(
@@ -3150,17 +2840,6 @@ def create_api_app(
             },
         }
         return app.state.weekly_report_generator.generate(data)
-
-    @app.post("/api/v1/monitoring/score-relevance")
-    def monitoring_score_relevance(
-        body: dict[str, Any] | None = None,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        payload = body if isinstance(body, dict) else {}
-        text = str(payload.get("text", "") or "")
-        score = app.state.social_parsers.score_relevance(text)
-        return {"text": text, "relevance_score": score}
 
     @app.post("/api/v1/cost-of-freedom/calculate")
     def cost_of_freedom_calculate(
@@ -3297,60 +2976,6 @@ def create_api_app(
     ) -> dict[str, Any]:
         _require_auth(authorization)
         return app.state.complement_cascade.get_cascade_stats()
-
-    @app.get("/api/v1/ecosystem/summary")
-    def ecosystem_summary(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        casura_stats = app.state.casura_db.get_stats()
-        leaderboard = app.state.aabb_benchmark.get_leaderboard()
-        are_payload = app.state.are.get_reliability_report()
-        competitive_payload = competitive_latest(authorization)
-        return {
-            "casura": casura_stats,
-            "aabb": {
-                "leaderboard": leaderboard[:5] if isinstance(leaderboard, list) else [],
-                "total": len(leaderboard) if isinstance(leaderboard, list) else 0,
-            },
-            "are": are_payload,
-            "competitive": competitive_payload,
-        }
-
-    @app.post("/api/v1/channels/{channel}/event")
-    def channels_record_event(
-        channel: str,
-        body: dict[str, Any] | None = None,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        payload = body if isinstance(body, dict) else {}
-        event_type = str(payload.get("event_type", "") or "").strip().lower()
-        if event_type not in {"inbound", "outbound"}:
-            raise HTTPException(status_code=400, detail={"error": "event_type must be inbound or outbound"})
-        metadata = payload.get("metadata", {})
-        app.state.channel_monitor.record_event(
-            channel=str(channel or "").strip().lower(),
-            event_type=event_type,
-            metadata=metadata if isinstance(metadata, dict) else {},
-        )
-        return {"ok": True, "channel": channel, "event_type": event_type}
-
-    @app.get("/api/v1/channels/health")
-    def channels_health(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        return app.state.channel_monitor.check_health()
-
-    @app.get("/api/v1/channels/stats")
-    def channels_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        return app.state.channel_monitor.get_stats()
-
-    @app.get("/api/v1/channels/{channel}/status")
-    def channels_status(channel: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        payload = app.state.channel_monitor.get_channel_status(str(channel or "").strip().lower())
-        if not payload:
-            raise HTTPException(status_code=404, detail={"error": "unknown channel"})
-        return payload
 
     @app.post("/api/v1/whatsapp/session")
     def whatsapp_register_session(
@@ -4070,59 +3695,6 @@ def create_api_app(
         _require_auth(authorization)
         return app.state.fleet_coordinator.rebalance()
 
-    @app.post("/api/v1/vibe-audit/code")
-    def vibe_audit_code_endpoint(
-        body: dict[str, Any],
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        code = str(body.get("code", "") or "")
-        language = str(body.get("language", "python") or "python")
-        severity = str(body.get("severity", "low") or "low")
-        return _build_vibe_audit_payload(code, language, severity=severity)
-
-    @app.post("/api/v1/vibe-audit/analyze")
-    def vibe_audit_analyze_endpoint(
-        body: dict[str, Any],
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        code = str(body.get("code", "") or "")
-        language = str(body.get("language", "python") or "python")
-        severity = str(body.get("severity", "low") or "low")
-        report = _build_vibe_audit_payload(code, language, severity=severity)
-        checks = body.get("checks")
-        if isinstance(checks, list) and checks:
-            allow = {str(item).strip() for item in checks if str(item).strip()}
-            report["findings"] = [
-                item for item in report.get("findings", []) if str(item.get("check", "")) in allow
-            ]
-            report["critical_count"] = sum(
-                1 for item in report["findings"] if str(item.get("severity", "")) == "critical"
-            )
-            report["high_count"] = sum(
-                1 for item in report["findings"] if str(item.get("severity", "")) == "high"
-            )
-        return report
-
-    @app.post("/api/v1/vibe-audit/directory")
-    def vibe_audit_directory_endpoint(
-        body: dict[str, Any],
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        dir_path = str(body.get("dir", ".") or ".")
-        summary = bool(body.get("summary", True))
-        severity = str(body.get("severity", "low") or "low")
-        ext_raw = body.get("extensions")
-        extensions = [str(item) for item in ext_raw if str(item).strip()] if isinstance(ext_raw, list) else None
-        return _build_vibe_audit_directory_payload(
-            dir_path=dir_path,
-            summary=summary,
-            extensions=extensions,
-            severity=severity,
-        )
-
     @app.get("/api/v1/ari/{agent_id}")
     def get_ari(
         agent_id: str,
@@ -4714,171 +4286,6 @@ def create_api_app(
             ],
         }
 
-    @app.get("/api/v1/threat-patterns")
-    def list_threat_patterns(
-        category: str | None = None,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        library = app.state.threat_patterns
-        if isinstance(category, str) and category.strip():
-            rows = library.list_by_category(category)
-        else:
-            rows = []
-            for pattern_id in sorted(library.PATTERNS.keys()):
-                item = library.get_pattern(pattern_id)
-                if isinstance(item, dict):
-                    rows.append(item)
-        return {"patterns": rows, "count": len(rows), "stats": library.get_stats()}
-
-    @app.get("/api/v1/threat-patterns/{pattern_id}")
-    def get_threat_pattern(
-        pattern_id: str,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        row = app.state.threat_patterns.get_pattern(pattern_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail={"error": "pattern not found"})
-        return row
-
-    @app.post("/api/v1/threat-patterns/match")
-    def match_threat_patterns(
-        body: dict[str, Any] | None = None,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        payload = body if isinstance(body, dict) else {}
-        text = payload.get("text")
-        if not isinstance(text, str):
-            raise HTTPException(status_code=400, detail={"error": "text is required"})
-        matches = app.state.threat_patterns.match(text)
-        return {"matches": matches, "count": len(matches)}
-
-    @app.get("/api/v1/threat-feed/status")
-    def threat_feed_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        return app.state.threat_feed.get_stats()
-
-    @app.post("/api/v1/threat-feed/update")
-    def threat_feed_update(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        added = app.state.threat_feed.fetch()
-        return {"added": len(added), "signatures": added}
-
-    @app.get("/api/v1/threat-feed/signatures")
-    def threat_feed_signatures(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        return {"signatures": list(app.state.threat_feed._signatures)}
-
-    @app.get("/api/v1/signatures")
-    def list_signatures(
-        category: str | None = None,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        return {"signatures": app.state.signature_editor.list_all(category=category)}
-
-    @app.post("/api/v1/signatures")
-    def create_signature(
-        body: dict[str, Any],
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        try:
-            return app.state.signature_editor.create(body)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-
-    @app.post("/api/v1/signatures/test-pattern")
-    def test_signature_pattern(
-        body: dict[str, Any],
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        payload = body if isinstance(body, dict) else {}
-        pattern = str(payload.get("pattern", ""))
-        test_text = str(payload.get("test_text", ""))
-        return app.state.signature_editor.test_pattern(pattern, test_text)
-
-    @app.get("/api/v1/signatures/{sig_id}")
-    def get_signature(
-        sig_id: str,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        rows = app.state.signature_editor.list_all()
-        for row in rows:
-            if str(row.get("id", "")) == str(sig_id):
-                return row
-        raise HTTPException(status_code=404, detail={"error": "signature not found"})
-
-    @app.put("/api/v1/signatures/{sig_id}")
-    def update_signature(
-        sig_id: str,
-        body: dict[str, Any],
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        try:
-            return app.state.signature_editor.update(sig_id, body)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail={"error": "signature not found"}) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-
-    @app.delete("/api/v1/signatures/{sig_id}")
-    def delete_signature(
-        sig_id: str,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        deleted = app.state.signature_editor.delete(sig_id)
-        if not deleted:
-            raise HTTPException(status_code=404, detail={"error": "signature not found"})
-        return {"deleted": True, "id": sig_id}
-
-    @app.get("/api/v1/alert-rules")
-    def alert_rules_list(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        rows = app.state.alert_rules_engine.list_rules()
-        return {"rules": rows, "count": len(rows)}
-
-    @app.post("/api/v1/alert-rules")
-    def alert_rules_add(
-        body: dict[str, Any],
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        try:
-            rule = app.state.alert_rules_engine.add_rule(body)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-        return rule.to_dict()
-
-    @app.delete("/api/v1/alert-rules/{name}")
-    def alert_rules_remove(
-        name: str,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        ok = app.state.alert_rules_engine.remove_rule(name)
-        if not ok:
-            raise HTTPException(status_code=404, detail={"error": "rule not found"})
-        return {"deleted": True, "name": name}
-
-    @app.post("/api/v1/alert-rules/evaluate")
-    def alert_rules_evaluate(
-        body: dict[str, Any] | None = None,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        payload = body if isinstance(body, dict) else {}
-        metrics_input = payload.get("metrics")
-        metric_values = metrics_input if isinstance(metrics_input, dict) else _default_alert_metrics()
-        fired = app.state.alert_rules_engine.evaluate(metric_values)
-        return {"fired": fired, "count": len(fired), "metrics": metric_values}
-
     @app.get("/api/v1/flywheel/stats")
     def flywheel_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
@@ -5157,30 +4564,6 @@ def create_api_app(
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         headers = {"Content-Disposition": f'attachment; filename="orchesis-export-{stamp}.zip"'}
         return Response(content=payload, media_type="application/zip", headers=headers)
-
-    @app.get("/api/v1/mcp/monitor/status")
-    def mcp_monitor_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        monitor = app.state.mcp_monitor
-        stats = monitor.get_stats()
-        return {"status": "ok", "monitor": stats}
-
-    @app.get("/api/v1/mcp/monitor/alerts")
-    def mcp_monitor_alerts(
-        since: float | None = None,
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_auth(authorization)
-        monitor = app.state.mcp_monitor
-        alerts = monitor.get_alerts(since=since)
-        return {"alerts": alerts, "total": len(alerts)}
-
-    @app.post("/api/v1/mcp/monitor/check")
-    def mcp_monitor_check(authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        _require_auth(authorization)
-        monitor = app.state.mcp_monitor
-        changes = monitor.check_once()
-        return {"changes": changes, "count": len(changes)}
 
     @app.get("/favicon.ico")
     def favicon() -> Response:
@@ -6024,6 +5407,9 @@ def create_api_app(
     def h43_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_auth(authorization)
         return app.state.h43_quantum.get_stats()
+
+    app.include_router(ecosystem_router)
+    app.include_router(security_router)
 
     return app
 

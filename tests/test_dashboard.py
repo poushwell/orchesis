@@ -11,7 +11,14 @@ from urllib.request import Request as UrlRequest, urlopen
 
 import pytest
 
-from orchesis.dashboard import get_dashboard_html
+from orchesis.dashboard import get_dashboard_html, render_dashboard
+from orchesis.dashboard_components import (
+    render_css,
+    render_ecosystem_tab,
+    render_js,
+    render_overview_tab,
+    render_security_tab,
+)
 from orchesis.proxy import HTTPProxyConfig, LLMHTTPProxy
 
 
@@ -747,3 +754,67 @@ def test_stats_endpoint_still_works(tmp_path: Path) -> None:
         proxy.stop()
         upstream.shutdown()
         upstream.server_close()
+
+
+def test_render_css_dark() -> None:
+    css = render_css("dark")
+    assert isinstance(css, str)
+    assert css
+    assert "background" in css
+    assert 'data-theme="dark"' in css
+
+
+def test_render_css_light() -> None:
+    css = render_css("light")
+    assert isinstance(css, str)
+    assert css
+    assert "#ffffff" in css
+    assert "#090909" in css
+
+
+def test_render_js() -> None:
+    js = render_js()
+    assert isinstance(js, str)
+    assert js
+    assert "function" in js or "addEventListener" in js
+
+
+def test_render_overview_tab() -> None:
+    html = render_overview_tab({"total_requests": 10, "blocked_requests": 2})
+    assert isinstance(html, str)
+    assert html
+    assert "Overview" in html
+    assert "Total requests" in html
+
+
+def test_render_security_tab() -> None:
+    html = render_security_tab({"security_findings": [{"id": 1}]})
+    assert isinstance(html, str)
+    assert html
+    assert "Security" in html
+    assert "Security findings" in html
+
+
+def test_render_ecosystem_tab() -> None:
+    html = render_ecosystem_tab({"casura": "ok", "aabb": "ok", "are": "ok"})
+    assert isinstance(html, str)
+    assert html
+    assert "Ecosystem" in html
+    assert "CASURA" in html
+    assert "AABB" in html
+    assert "ARE" in html
+
+
+def test_dashboard_components_import() -> None:
+    assert callable(render_css)
+    assert callable(render_js)
+    assert callable(render_overview_tab)
+    assert callable(render_security_tab)
+    assert callable(render_ecosystem_tab)
+
+
+def test_dashboard_still_works() -> None:
+    html = render_dashboard({})
+    assert isinstance(html, str)
+    assert "<html" in html.lower()
+    assert "</html>" in html.lower()

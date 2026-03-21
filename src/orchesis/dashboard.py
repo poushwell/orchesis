@@ -6,6 +6,14 @@ import re
 import os
 from pathlib import Path
 
+from orchesis.dashboard_components import (
+    render_css,
+    render_ecosystem_tab,
+    render_fleet_tab,
+    render_js,
+    render_overview_tab,
+    render_security_tab,
+)
 
 def _dashboard_dist_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "dashboard" / "dist"
@@ -65,6 +73,36 @@ def register_dashboard_static_routes(app) -> None:
     @app.route("/dashboard/<path:path>")
     def serve_dashboard(path):  # type: ignore[unused-ignore]
         return send_from_directory(str(dist_dir), path)
+
+
+def _assemble_page(css: str, tabs: list[str], js: str) -> str:
+    return (
+        "<!doctype html>"
+        '<html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1.0">'
+        "<title>Orchesis Dashboard</title>"
+        f"<style>{css}</style>"
+        "</head><body>"
+        '<main id="main-content">'
+        + "".join(tabs)
+        + "</main>"
+        + f"<script>{js}</script>"
+        + "</body></html>"
+    )
+
+
+def render_dashboard(data: dict, theme: str = "dark") -> str:
+    """Render modular dashboard HTML via component functions."""
+    payload = data if isinstance(data, dict) else {}
+    css = render_css(theme)
+    tabs = [
+        render_overview_tab(payload),
+        render_security_tab(payload),
+        render_ecosystem_tab(payload),
+        render_fleet_tab(payload),
+    ]
+    js = render_js()
+    return _assemble_page(css, tabs, js)
 
 
 def get_dashboard_html(demo_mode: bool = False) -> str:
@@ -1383,6 +1421,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       <button id="tab-research" class="tab-btn" data-tab="research" role="tab" aria-selected="false" aria-controls="research">🔬 Research</button>
       <button id="tab-compliance" class="tab-btn" data-tab="compliance" role="tab" aria-selected="false" aria-controls="compliance">📘 Compliance</button>
       <button id="tab-overwatch" class="tab-btn" data-tab="overwatch" role="tab" aria-selected="false" aria-controls="overwatch">🛰️ Overwatch</button>
+      <button id="tab-channels" class="tab-btn" data-tab="channels" role="tab" aria-selected="false" aria-controls="channels">📡 Channels</button>
       <button id="tab-ecosystem" class="tab-btn" data-tab="ecosystem" role="tab" aria-selected="false" aria-controls="ecosystem">🌐 Ecosystem</button>
       <button id="tab-approvals" class="tab-btn" data-tab="approvals" role="tab" aria-selected="false" aria-controls="approvals">✅ Approvals</button>
     </div>
@@ -1946,6 +1985,26 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       <div id="nlce-confirmed-results"></div>
       <div id="nlce-theorems"></div>
       <div id="nlce-pipeline-state"></div>
+    </section>
+    <section id="channels" class="screen tab-section hidden" role="tabpanel" aria-labelledby="tab-channels">
+      <div class="grid-2">
+        <div class="panel panel-primary">
+          <div class="section-title"><strong>Telegram</strong></div>
+          <div id="telegram-status" class="subtle">No data</div>
+        </div>
+        <div class="panel panel-primary">
+          <div class="section-title"><strong>WhatsApp</strong></div>
+          <div id="whatsapp-status" class="subtle">No data</div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="section-title"><strong>WebChat</strong></div>
+        <div id="webchat-status" class="subtle">No data</div>
+      </div>
+      <div class="panel">
+        <div class="section-title"><strong>Channel Alerts</strong></div>
+        <div id="channel-alerts" class="subtle">No alerts.</div>
+      </div>
     </section>
     <section id="ecosystem" class="screen" role="tabpanel" aria-labelledby="tab-ecosystem">
       <div class="grid-2">
@@ -4526,6 +4585,29 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       });
     }
 
+    function renderChannels(payload){
+      const statuses = payload && payload.statuses && typeof payload.statuses === "object" ? payload.statuses : {};
+      const alerts = Array.isArray(payload && payload.alerts) ? payload.alerts : [];
+      const tg = document.getElementById("telegram-status");
+      if(tg){ tg.textContent = `Status: ${String(statuses.telegram || "unknown")}`; }
+      const wa = document.getElementById("whatsapp-status");
+      if(wa){ wa.textContent = `Status: ${String(statuses.whatsapp || "unknown")}`; }
+      const wc = document.getElementById("webchat-status");
+      if(wc){ wc.textContent = `Status: ${String(statuses.webchat || "unknown")}`; }
+      const alertsEl = document.getElementById("channel-alerts");
+      if(alertsEl){
+        alertsEl.textContent = alerts.length
+          ? alerts.map((a)=> `${String(a.channel || "channel")}: ${String(a.type || "alert")}`).join(" · ")
+          : "No alerts.";
+      }
+    }
+
+    async function pollChannels() {
+      const resp = await fetch('/api/v1/channels/health');
+      const data = await resp.json();
+      renderChannels(data);
+    }
+
     function renderResearch({metrics, theorems}) {
       const metricsData = metrics && metrics.value ? metrics.value : {};
       const theoremData = theorems && theorems.value ? theorems.value : {};
@@ -4593,6 +4675,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       if(tab === "research") return pollResearch();
       if(tab === "compliance") return pollCompliance();
       if(tab === "overwatch") return pollOverwatch();
+      if(tab === "channels") return pollChannels();
       if(tab === "ecosystem") return pollEcosystem();
       if(tab === "approvals") return pollApprovals();
     }

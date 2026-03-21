@@ -3,19 +3,14 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-import logging
 from typing import Any
 
 from orchesis.models.ecosystem import IncidentRecord
-
-try:
-    from orchesis.utils.log import get_logger  # type: ignore
-except Exception:  # pragma: no cover
-    def get_logger(name: str):
-        return logging.getLogger(name)
+from orchesis.utils.log import get_logger
 
 
 logger = get_logger(__name__)
+COMPONENT = "casura.intelligence"
 
 
 class IncidentIntelligence:
@@ -39,7 +34,10 @@ class IncidentIntelligence:
 
     def analyze_patterns(self, incidents: list[dict]) -> dict:
         rows = [item for item in incidents if isinstance(item, dict)]
-        logger.debug("Analyzing %d incidents for CASURA patterns", len(rows))
+        logger.info(
+            "Analyzing CASURA incident patterns",
+            extra={"component": COMPONENT, "incident_count": len(rows)},
+        )
         vector_counter: Counter[str] = Counter()
         framework_heatmap: dict[str, int] = defaultdict(int)
         severity_trend: dict[str, int] = defaultdict(int)
@@ -88,13 +86,22 @@ class IncidentIntelligence:
             for bucket, count in sorted(severity_trend.items())
         ]
 
-        return {
+        result = {
             "top_attack_vectors": top_attack_vectors,
             "framework_heatmap": dict(framework_heatmap),
             "severity_trend": trend_rows,
             "common_tags": common_tags,
             "emerging_threats": emerging_threats,
         }
+        logger.debug(
+            "CASURA pattern analysis complete",
+            extra={
+                "component": COMPONENT,
+                "top_attack_vectors": len(top_attack_vectors),
+                "common_tags": len(common_tags),
+            },
+        )
+        return result
 
     def detect_clusters(self, incidents: list[dict]) -> list[dict]:
         """Group related incidents by similarity."""

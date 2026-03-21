@@ -8,6 +8,11 @@ from typing import Optional
 from uuid import uuid4
 
 from orchesis.models.ecosystem import IncidentRecord
+from orchesis.utils.log import get_logger
+
+
+logger = get_logger(__name__)
+COMPONENT = "casura.api_v2"
 
 
 class CasuraCategory(Enum):
@@ -165,7 +170,19 @@ class BulkImporter:
         return incident, []
 
     def import_incidents(self, incidents: list[dict]) -> BulkResult:
+        logger.info(
+            "Starting CASURA bulk import",
+            extra={"component": COMPONENT, "batch_size": len(incidents)},
+        )
         if len(incidents) > self.max_batch_size:
+            logger.warning(
+                "CASURA bulk import rejected: batch too large",
+                extra={
+                    "component": COMPONENT,
+                    "batch_size": len(incidents),
+                    "max_batch_size": self.max_batch_size,
+                },
+            )
             return BulkResult(
                 imported_count=0,
                 failed_count=len(incidents),
@@ -192,13 +209,33 @@ class BulkImporter:
             if row_errors:
                 failed_count += 1
                 errors.extend(row_errors)
+                logger.warning(
+                    "CASURA incident failed validation",
+                    extra={
+                        "component": COMPONENT,
+                        "row_index": index,
+                        "error_count": len(row_errors),
+                    },
+                )
                 continue
             if incident is None:
                 failed_count += 1
+                logger.warning(
+                    "CASURA incident import skipped after validation",
+                    extra={"component": COMPONENT, "row_index": index},
+                )
                 continue
 
             if incident.incident_id in self._store or incident.incident_id in seen_batch:
                 deduped_count += 1
+                logger.info(
+                    "CASURA incident deduplicated",
+                    extra={
+                        "component": COMPONENT,
+                        "row_index": index,
+                        "incident_id": incident.incident_id,
+                    },
+                )
                 continue
 
             self._store[incident.incident_id] = incident
@@ -206,13 +243,23 @@ class BulkImporter:
             imported_count += 1
             imported_ids.append(incident.incident_id)
 
-        return BulkResult(
+        result = BulkResult(
             imported_count=imported_count,
             failed_count=failed_count,
             deduped_count=deduped_count,
             errors=errors,
             imported_ids=imported_ids,
         )
+        logger.info(
+            "Completed CASURA bulk import",
+            extra={
+                "component": COMPONENT,
+                "imported_count": imported_count,
+                "failed_count": failed_count,
+                "deduped_count": deduped_count,
+            },
+        )
+        return result
 
     def get_all_incidents(self) -> list[Incident]:
         return list(self._store.values())

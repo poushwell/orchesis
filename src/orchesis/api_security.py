@@ -144,7 +144,7 @@ def list_threat_patterns(
     category: str | None = None,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    paginated: bool = Query(True),
+    paginated: bool = Query(False),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _require_auth(request, authorization)
@@ -210,7 +210,7 @@ def threat_feed_signatures(
     request: Request,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    paginated: bool = Query(True),
+    paginated: bool = Query(False),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _require_auth(request, authorization)
@@ -226,7 +226,7 @@ def list_signatures(
     category: str | None = None,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    paginated: bool = Query(True),
+    paginated: bool = Query(False),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _require_auth(request, authorization)
@@ -310,7 +310,7 @@ def alert_rules_list(
     request: Request,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    paginated: bool = Query(True),
+    paginated: bool = Query(False),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _require_auth(request, authorization)
@@ -359,3 +359,37 @@ def alert_rules_evaluate(
     metric_values = metrics_input if isinstance(metrics_input, dict) else {"deny_rate": 0.0, "events_per_minute": 0.0}
     fired = request.app.state.alert_rules_engine.evaluate(metric_values)
     return {"fired": fired, "count": len(fired), "metrics": metric_values}
+
+
+@router.get("/mcp/monitor/status")
+def mcp_monitor_status(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_auth(request, authorization)
+    monitor = request.app.state.mcp_monitor
+    stats = monitor.get_stats()
+    return {"status": "ok", "monitor": stats}
+
+
+@router.get("/mcp/monitor/alerts")
+def mcp_monitor_alerts(
+    request: Request,
+    since: float | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_auth(request, authorization)
+    monitor = request.app.state.mcp_monitor
+    alerts = monitor.get_alerts(since=since)
+    return {"alerts": alerts, "total": len(alerts)}
+
+
+@router.post("/mcp/monitor/check")
+def mcp_monitor_check(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_auth(request, authorization)
+    monitor = request.app.state.mcp_monitor
+    changes = monitor.check_once()
+    return {"changes": changes, "count": len(changes)}

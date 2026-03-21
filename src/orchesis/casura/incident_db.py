@@ -3,22 +3,17 @@
 from __future__ import annotations
 
 import json
-import logging
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from orchesis.models.ecosystem import Finding, IncidentRecord
-
-try:
-    from orchesis.utils.log import get_logger  # type: ignore
-except Exception:  # pragma: no cover
-    def get_logger(name: str):
-        return logging.getLogger(name)
+from orchesis.utils.log import get_logger
 
 
 logger = get_logger(__name__)
+COMPONENT = "casura.incident_db"
 
 
 class CASURAIncidentDB:
@@ -58,11 +53,19 @@ class CASURAIncidentDB:
     def _load(self) -> None:
         with self._lock:
             if not self._index_file.exists():
+                logger.debug(
+                    "CASURA incident index not found; starting empty",
+                    extra={"component": COMPONENT},
+                )
                 return
             try:
                 payload = json.loads(self._index_file.read_text(encoding="utf-8"))
             except (OSError, ValueError):
-                logger.exception("Failed to load CASURA incidents from %s", self._index_file)
+                logger.exception(
+                    "Failed to load CASURA incidents from %s",
+                    self._index_file,
+                    extra={"component": COMPONENT},
+                )
                 return
             if isinstance(payload, dict):
                 self._incidents = {
@@ -70,6 +73,13 @@ class CASURAIncidentDB:
                     for key, value in payload.items()
                     if isinstance(value, dict)
                 }
+                logger.info(
+                    "Loaded CASURA incidents",
+                    extra={
+                        "component": COMPONENT,
+                        "incident_count": len(self._incidents),
+                    },
+                )
 
     def _persist(self) -> None:
         self._storage.mkdir(parents=True, exist_ok=True)
@@ -165,6 +175,14 @@ class CASURAIncidentDB:
             incident["framework_mappings"] = self.map_to_frameworks(incident)
             self._incidents[incident_id] = incident
             self._persist()
+            logger.info(
+                "Created CASURA incident",
+                extra={
+                    "component": COMPONENT,
+                    "incident_id": incident_id,
+                    "severity": severity,
+                },
+            )
             return dict(incident)
 
     @staticmethod
@@ -277,6 +295,14 @@ class CASURAIncidentDB:
                     continue
             rows.append(dict(item))
         rows.sort(key=lambda row: str(row.get("created_at", "")), reverse=True)
+        logger.debug(
+            "CASURA incident search complete",
+            extra={
+                "component": COMPONENT,
+                "query": needle,
+                "result_count": len(rows),
+            },
+        )
         return rows
 
     def get_stats(self) -> dict:

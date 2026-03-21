@@ -84,7 +84,7 @@ def casura_incidents(
     request: Request,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    paginated: bool = Query(True),
+    paginated: bool = Query(False),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _require_auth(request, authorization)
@@ -138,7 +138,7 @@ def aabb_leaderboard(
     request: Request,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    paginated: bool = Query(True),
+    paginated: bool = Query(False),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _require_auth(request, authorization)
@@ -247,7 +247,7 @@ def are_alerts(
     request: Request,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    paginated: bool = Query(True),
+    paginated: bool = Query(False),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _require_auth(request, authorization)
@@ -322,7 +322,7 @@ def monitoring_opportunities(
     request: Request,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    paginated: bool = Query(True),
+    paginated: bool = Query(False),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _require_auth(request, authorization)
