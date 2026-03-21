@@ -1,3 +1,23 @@
+## [0.5.0] - 2026-03-21
+
+### Added
+- Channel Health Monitor: silent_drop detection with HIGH/MEDIUM/LOW severity classification
+- Channel-specific amplification: WhatsApp session expiry, WebChat stale pong, Telegram webhook errors
+- orchesis serve - production server with TLS support (self-signed + custom certs)
+- Startup banner with TLS status, policy info, and pre-flight checks
+- Vibe Code Audit file watcher (VibeWatcher) - polling-based, zero external deps
+- JSONL output and callback modes for vibe-watch
+- CASURA API v2: bulk incident import with AISS v2.0 schema validation
+- CASURA STIX 2.1 export (StixExporter) for threat intelligence sharing
+- CasuraCategory enum with 12 AI-specific incident categories
+- Deduplication by incident_id in bulk imports
+
+### Changed
+- Version bump 0.4.0 -> 0.5.0
+
+### Fixed
+- Channel Health Monitor: _check_channel() no longer returns empty stub
+
 ## [0.4.0] — 2026-03-19
 
 ### Added

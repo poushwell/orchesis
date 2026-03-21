@@ -1193,8 +1193,20 @@ def rollback(policy_path: str) -> None:
 
 
 @main.command()
-@click.option("--port", type=int, default=8090)
-@click.option("--policy", "policy_path", type=click.Path(exists=True), default="policy.yaml")
+@click.option("--host", default="0.0.0.0", help="Bind host")
+@click.option("--port", type=int, default=8100, help="Bind port")
+@click.option("--tls-cert", type=click.Path(), default=None, help="Path to TLS certificate")
+@click.option("--tls-key", type=click.Path(), default=None, help="Path to TLS private key")
+@click.option("--tls-self-signed", is_flag=True, default=False, help="Generate self-signed cert")
+@click.option("--workers", default=1, type=int, help="Number of workers")
+@click.option(
+    "--log-level",
+    default="info",
+    type=click.Choice(["debug", "info", "warning", "error"]),
+    help="Log level",
+)
+@click.option("--policy", "policy_path", type=click.Path(), default=None, help="Path to orchesis.yaml policy")
+@click.option("--skip-verify", is_flag=True, default=False, help="Skip pre-flight checks")
 @click.option(
     "--cors",
     "cors_value",
@@ -1216,21 +1228,55 @@ def rollback(policy_path: str) -> None:
     help="Plugin module path(s), e.g. orchesis.contrib.pii_detector",
 )
 def serve(
+    host: str,
     port: int,
-    policy_path: str,
+    tls_cert: str | None,
+    tls_key: str | None,
+    tls_self_signed: bool,
+    workers: int,
+    log_level: str,
+    policy_path: str | None,
+    skip_verify: bool,
     cors_value: str | None,
     api_token: str | None,
     plugin_modules: tuple[str, ...],
 ) -> None:
-    """Run Orchesis control API server."""
+    """Start Orchesis production server with optional TLS."""
+    use_legacy_mode = (
+        bool(cors_value)
+        or bool(api_token)
+        or bool(plugin_modules)
+        or (not tls_cert and not tls_key and not tls_self_signed and workers == 1 and log_level == "info" and not skip_verify)
+    )
+    if not use_legacy_mode:
+        from orchesis.serve import ServeConfig, start_server
+
+        config = ServeConfig(
+            host=host,
+            port=port,
+            tls_cert=tls_cert,
+            tls_key=tls_key,
+            tls_self_signed=tls_self_signed,
+            workers=workers,
+            log_level=log_level,
+            policy=policy_path,
+            skip_verify=skip_verify,
+        )
+        try:
+            start_server(config)
+        except Exception as error:  # noqa: BLE001
+            raise click.ClickException(str(error)) from error
+        return
+
+    effective_policy_path = policy_path or "policy.yaml"
     uvicorn, create_api_app, _orchesis_proxy_cls, _proxy_config_cls = _load_server_runtime()
     try:
-        policy = load_policy(policy_path)
+        policy = load_policy(effective_policy_path)
     except (ValueError, YAMLError, OSError) as error:
         raise click.ClickException(f"Failed to load policy: {error}") from error
 
     store = PolicyStore()
-    version = store.load(policy_path)
+    version = store.load(effective_policy_path)
     registry = load_agent_registry(policy)
     policy_api_cfg = policy.get("api") if isinstance(policy, dict) and isinstance(policy.get("api"), dict) else {}
     policy_token = policy_api_cfg.get("token") if isinstance(policy_api_cfg.get("token"), str) else None
@@ -1250,19 +1296,19 @@ def serve(
     click.echo(f"  URL:   http://localhost:{port}")
     click.echo(f"  Token: {token_to_use}  ← copy this")
     click.echo(f"  Docs:  http://localhost:{port}/docs")
-    click.echo(f"Policy: {policy_path} (version {version.version_id[:12]})")
+    click.echo(f"Policy: {effective_policy_path} (version {version.version_id[:12]})")
     click.echo(
         f"Agents: {len(registry.agents)} registered, default tier: {registry.default_tier.name.lower()}"
     )
     click.echo("Endpoints: /health, /docs, /api/v1/policy, /api/v1/agents, /api/v1/evaluate, /api/v1/status")
-    OPERATIONS_LOG.info("starting api server", port=port, policy_path=policy_path)
+    OPERATIONS_LOG.info("starting api server", port=port, policy_path=effective_policy_path)
     app = create_api_app(
-        policy_path=policy_path,
+        policy_path=effective_policy_path,
         api_token=token_to_use,
         cors_origins=cors_origins,
         plugin_modules=_normalize_plugin_modules(plugin_modules),
     )
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host=host, port=port)
 
 
 @main.command("proxy")
