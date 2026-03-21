@@ -34,7 +34,7 @@ class RemoteSkillScanner:
         timeout: float = 10.0,
     ):
         self._skill_scanner = skill_scanner or SkillScanner()
-        self._ioc_matcher = ioc_matcher or IoCMatcher()
+        self._ioc_matcher = ioc_matcher or IoCMatcher(enable_opt_in_v1_1=True)
         self._secret_scanner = secret_scanner or SecretScanner()
         self._mcp_scanner = McpConfigScanner()
         self._timeout = timeout

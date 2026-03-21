@@ -268,7 +268,7 @@ class SkillScanner:
 
     def __init__(self) -> None:
         self._secret_scanner = SecretScanner()
-        self._ioc_matcher = IoCMatcher()
+        self._ioc_matcher = IoCMatcher(enable_opt_in_v1_1=True)
 
     def scan(self, path: str) -> ScanReport:
         source = Path(path)

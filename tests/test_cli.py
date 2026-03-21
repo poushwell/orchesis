@@ -423,3 +423,33 @@ def test_version_matches_init() -> None:
     result = runner.invoke(main, ["--version"])
     assert result.exit_code == 0
     assert __version__ in result.output
+
+
+def test_casura_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["casura", "--help"])
+    assert result.exit_code == 0
+
+
+def test_casura_stats_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["casura", "stats", "--help"])
+    assert result.exit_code == 0
+
+
+def test_channels_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["channels", "--help"])
+    assert result.exit_code == 0
+
+
+def test_are_report_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["are-report", "--help"])
+    assert result.exit_code == 0
+
+
+def test_vibe_watch_help() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["vibe-watch", "--help"])
+    assert result.exit_code == 0

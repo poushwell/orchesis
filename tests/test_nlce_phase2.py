@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from orchesis.core.nlce_pipeline import AgentState, Phase2_ContextQualityAssessment
 
 
@@ -32,7 +34,8 @@ def test_stale_crystal_detected() -> None:
         psi=0.8,
         slope_cqs_window=[0.86, 0.84, 0.8, 0.77, 0.73, 0.68, 0.64, 0.6],
     )
-    assert phase2._check_stale_crystal(state) is True
+    slope = phase2._compute_slope_cqs(state)
+    assert phase2._check_stale_crystal(state, slope) is True
 
 
 def test_kalman_full_3x3_update() -> None:
@@ -48,3 +51,22 @@ def test_kalman_full_3x3_update() -> None:
     assert len(result["P_full"]) == 9
     assert len(result["innovation"]) == 3
     assert float(result["innovation_norm"]) > 0.0
+
+
+def test_slope_written_by_assess() -> None:
+    phase2 = Phase2_ContextQualityAssessment()
+    state = AgentState(slope_cqs_window=[0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3])
+
+    phase2.assess(state, {"cqs": 0.2})
+
+    assert state.slope_cqs != 0.0
+
+
+def test_slope_not_duplicated() -> None:
+    phase2 = Phase2_ContextQualityAssessment()
+    state = AgentState(slope_cqs_window=[0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3])
+
+    with patch.object(phase2, "_compute_slope_cqs", wraps=phase2._compute_slope_cqs) as mock_slope:
+        phase2.assess(state, {"cqs": 0.2})
+
+    assert mock_slope.call_count == 1

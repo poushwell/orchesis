@@ -105,8 +105,14 @@ from orchesis.evidence_record import EvidenceRecord
 from orchesis.agent_autopsy import AgentAutopsy
 from orchesis.arc_readiness import AgentReadinessCertifier
 from orchesis.aabb.benchmark import AABBBenchmark
+from orchesis.are.framework import AREFramework
+from orchesis.casura.api_v2 import BulkImporter, Incident
+from orchesis.casura.incident_db import CASURAIncidentDB
+from orchesis.casura.stix_export import StixExporter
+from orchesis.channel_monitor import ChannelHealthMonitor
 from orchesis.migrator import PolicyMigrator
 from orchesis.backup_manager import BackupManager
+from orchesis.vibe_watch import VibeWatcher
 from orchesis import __version__
 
 DEFAULT_KEYS_DIR = Path(".orchesis") / "keys"
@@ -4719,6 +4725,126 @@ def arc_list_command(policy_path: str) -> None:
                 certifier.certify(agent_id=aid, metrics=metrics, policy=policy)
     rows = certifier.list_certificates()
     click.echo(json.dumps({"certificates": rows, "total": len(rows)}, ensure_ascii=False, indent=2))
+
+
+@main.group("casura")
+def casura_group() -> None:
+    """CASURA - AI Incident Intelligence."""
+
+
+@casura_group.command("stats")
+@click.option("--format", "fmt", default="text", type=click.Choice(["text", "json"]))
+def casura_stats_command(fmt: str) -> None:
+    """Show CASURA incident statistics."""
+    db = CASURAIncidentDB()
+    stats = db.get_stats()
+    if fmt == "json":
+        click.echo(json.dumps(stats, ensure_ascii=False, indent=2))
+        return
+    click.echo(f"Total incidents: {int(stats.get('total_incidents', 0) or 0)}")
+    click.echo(f"By severity: {stats.get('by_severity', {})}")
+    click.echo(f"By framework: {stats.get('by_framework', {})}")
+
+
+@casura_group.command("import")
+@click.argument("file", type=click.Path(exists=True))
+@click.option("--format", "fmt", default="json", type=click.Choice(["json"]))
+def casura_import_command(file: str, fmt: str) -> None:
+    """Bulk import incidents from JSON file."""
+    _ = fmt
+    with open(file, encoding="utf-8") as handle:
+        data = json.load(handle)
+    rows = data if isinstance(data, list) else [data]
+    importer = BulkImporter()
+    result = importer.import_incidents([item for item in rows if isinstance(item, dict)])
+    click.echo(
+        f"Imported: {int(result.imported_count)}, Failed: {int(result.failed_count)}, Deduped: {int(result.deduped_count)}"
+    )
+
+
+@casura_group.command("export-stix")
+@click.option("--output", "-o", required=True, type=click.Path())
+def casura_export_stix_command(output: str) -> None:
+    """Export incidents to STIX 2.1 format."""
+    db = CASURAIncidentDB()
+    incidents_raw = db.search("", filters=None)
+    incidents: list[Incident] = []
+    for item in incidents_raw:
+        if not isinstance(item, dict):
+            continue
+        incidents.append(
+            Incident(
+                incident_id=str(item.get("incident_id", "")),
+                title=str(item.get("title", "Untitled incident")),
+                severity=float(item.get("aiss_score", 0.0) or 0.0),
+                category="context_manipulation",
+                description=str(item.get("description", "")),
+                source="casura_incident_db",
+                timestamp=str(item.get("created_at", "")),
+                tags=[str(tag) for tag in item.get("tags", []) if isinstance(tag, str)],
+                cve_ids=[],
+                affected_systems=[],
+            )
+        )
+    exporter = StixExporter()
+    exporter.export_to_file(incidents, output)
+    click.echo(f"STIX bundle exported to {output}")
+
+
+@main.command("channels")
+@click.option("--format", "fmt", default="text", type=click.Choice(["text", "json"]))
+def channels_command(fmt: str) -> None:
+    """Show channel health status."""
+    monitor = ChannelHealthMonitor()
+    status = monitor.check_health()
+    if fmt == "json":
+        click.echo(json.dumps(status, ensure_ascii=False, indent=2, default=str))
+        return
+    click.echo(f"Overall: {status.get('overall', 'unknown')}")
+    click.echo(f"Statuses: {status.get('statuses', {})}")
+    click.echo(f"Alerts: {len(status.get('alerts', []))}")
+
+
+@main.command("are-report")
+@click.option("--format", "fmt", default="text", type=click.Choice(["text", "json"]))
+def are_report_command(fmt: str) -> None:
+    """Show ARE (Agent Reliability Engineering) report."""
+    fw = AREFramework()
+    report = fw.get_reliability_report()
+    if fmt == "json":
+        click.echo(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        return
+    click.echo(
+        f"ARE Report: total={int(report.get('total_slos', 0) or 0)}, "
+        f"healthy={int(report.get('healthy', 0) or 0)}, "
+        f"exhausted={int(report.get('exhausted', 0) or 0)}"
+    )
+
+
+@main.command("vibe-watch")
+@click.argument("directory", type=click.Path(exists=True))
+@click.option("--interval", default=2.0, type=float, help="Poll interval seconds")
+@click.option("--extensions", default=None, help="Comma-separated extensions")
+def vibe_watch_cmd(directory: str, interval: float, extensions: str | None) -> None:
+    """Watch directory for file changes and run Vibe Code Audit."""
+    ext_set: set[str] | None = None
+    if isinstance(extensions, str) and extensions.strip():
+        ext_set = {
+            ext.strip() if ext.strip().startswith(".") else f".{ext.strip()}"
+            for ext in extensions.split(",")
+            if ext.strip()
+        }
+    watcher = VibeWatcher(target_dir=directory, interval=float(interval), extensions=ext_set)
+    click.echo(f"Watching {directory} (interval={float(interval):.1f}s)...")
+    try:
+        watcher.start(blocking=True)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        watcher.stop()
+        summary = watcher.get_summary()
+        click.echo("")
+        click.echo(summary.format())
 
 
 @main.command("aabb")

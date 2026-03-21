@@ -2,8 +2,10 @@
 
 import hashlib
 import logging
+import os
 import posixpath
 import re
+import time
 import unicodedata
 from copy import deepcopy
 from urllib.parse import unquote
@@ -1483,10 +1485,26 @@ def validate_policy_warnings(policy: dict[str, Any]) -> list[str]:
 class PolicyWatcher:
     """Monitors policy file and reloads on change."""
 
-    def __init__(self, path: str, on_reload: Callable[[dict[str, Any]], None]):
+    def __init__(
+        self,
+        path: str,
+        on_reload: Callable[[dict[str, Any]], None],
+        *,
+        check_interval_s: float | None = None,
+    ):
         self.path = Path(path)
         self.on_reload = on_reload
         self._last_hash: str = ""
+        self._cached_hash: str = ""
+        self._cached_policy: dict[str, Any] = {}
+        self._last_check_time: float | None = None
+        self._check_interval_s: float = (
+            _resolve_config_check_interval() if check_interval_s is None else max(0.0, float(check_interval_s))
+        )
+
+    @property
+    def check_interval_s(self) -> float:
+        return self._check_interval_s
 
     def current_hash(self) -> str:
         if not self.path.exists():
@@ -1495,11 +1513,19 @@ class PolicyWatcher:
         return hashlib.sha256(content).hexdigest()
 
     def check(self) -> bool:
+        now = time.monotonic()
+        if (
+            self._check_interval_s > 0.0
+            and self._last_check_time is not None
+            and (now - self._last_check_time) < self._check_interval_s
+        ):
+            return False
+        self._last_check_time = now
         try:
             new_hash = self.current_hash()
         except OSError:
             return False
-        if not new_hash or new_hash == self._last_hash:
+        if not new_hash or new_hash == self._cached_hash:
             return False
 
         try:
@@ -1507,5 +1533,19 @@ class PolicyWatcher:
         except ValueError:
             return False
         self.on_reload(policy)
+        self._cached_policy = policy
+        self._cached_hash = new_hash
         self._last_hash = new_hash
         return True
+
+
+def _resolve_config_check_interval() -> float:
+    raw = os.getenv("ORCHESIS_CONFIG_CHECK_INTERVAL")
+    if raw is not None:
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            return 1.0
+    if os.getenv("CI"):
+        return 0.0
+    return 1.0

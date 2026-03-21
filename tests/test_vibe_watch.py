@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import inspect
 import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import orchesis.vibe_watch
 from orchesis.vibe_watch import DEFAULT_EXCLUDES, DEFAULT_EXTENSIONS, AuditResult, VibeWatcher, WatchEvent
 
 
@@ -142,3 +144,8 @@ def test_callback_mode(tmp_path: Path) -> None:
     watcher._run_audit = MagicMock(return_value=AuditResult(filepath=path, issues=[], timestamp=time.time()))  # type: ignore[method-assign]  # noqa: SLF001
     watcher._handle_event(event)  # noqa: SLF001
     callback.assert_called_once()
+
+
+def test_vibe_watch_no_phantom_import() -> None:
+    source = inspect.getsource(orchesis.vibe_watch)
+    assert "vibe_code_audit" not in source

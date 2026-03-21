@@ -35,9 +35,6 @@ def phase9_iacs(messages: list[dict], state: NLCEPipelineState) -> dict[str, Any
 class AgentState:
     """State container used by NLCE Phase 2."""
 
-    cognitive_load: float = 0.5
-    context_quality: float = 1.0
-    coherence: float = 1.0
     cqs: float = 0.5
     zipf_alpha: float = 1.672
     causal_fan_out_variance: float = 0.0
@@ -46,13 +43,31 @@ class AgentState:
 
     psi: float = 0.5
     phase: str = "LIQUID"
-    psi_history: list[float] = field(default_factory=list)
-    gas_counter: int = 0
-    stale_psi_window: list[float] = field(default_factory=list)
+    psi_history: list[float] = field(default_factory=list)  # internal: used for phase transition tracking
+    gas_counter: int = 0  # internal: used for phase transition tracking
     slope_cqs_window: list[float] = field(default_factory=list)
     kalman_P_full: list[float] = field(default_factory=lambda: [1, 0, 0, 0, 1, 0, 0, 0, 1])
     slope_alert: bool = False
     stale_crystal: bool = False
+    slope_cqs: float = 0.0
+    ews_tau: float = 0.0
+    kalman_state: str = "nominal"
+    kalman_P_before: list[float] = field(default_factory=lambda: [1, 0, 0, 0, 1, 0, 0, 0, 1])
+    kalman_innovation_norm: float = 0.0
+    agent_id: str = ""
+    task_type: str = "default"
+
+    @property
+    def cognitive_load(self) -> float:
+        return self.kalman_x[0] if self.kalman_x else 0.5
+
+    @property
+    def context_quality(self) -> float:
+        return self.kalman_x[1] if len(self.kalman_x) > 1 else 1.0
+
+    @property
+    def coherence(self) -> float:
+        return self.kalman_x[2] if len(self.kalman_x) > 2 else 1.0
 
 
 @dataclass
@@ -100,10 +115,9 @@ class Phase2_ContextQualityAssessment:
             return "LIQUID"
         return "GAS"
 
-    def _check_stale_crystal(self, state: AgentState) -> bool:
+    def _check_stale_crystal(self, state: AgentState, slope: float) -> bool:
         """Stale crystal: Psi high but CQS declining."""
         psi = getattr(state, "psi", 0.5)
-        slope = self._compute_slope_cqs(state)
         return psi >= 0.7 and slope < -0.015
 
     def _gas_health(self, state: AgentState) -> str:
@@ -145,6 +159,7 @@ class Phase2_ContextQualityAssessment:
             state.slope_cqs_window = state.slope_cqs_window[-64:]
 
         slope = self._compute_slope_cqs(state)
+        state.slope_cqs = slope
         state.slope_alert = slope < -0.025
 
         state.psi = self._compute_psi(state)
@@ -152,14 +167,17 @@ class Phase2_ContextQualityAssessment:
         state.psi_history.append(state.psi)
         if len(state.psi_history) > 64:
             state.psi_history = state.psi_history[-64:]
-        state.stale_crystal = self._check_stale_crystal(state)
+        state.stale_crystal = self._check_stale_crystal(state, slope)
 
         if state.phase == "GAS":
             state.gas_counter += 1
 
+        state.kalman_P_before = list(state.kalman_P_full)
         kalman = self._kalman_full_update(state, observation)
         state.kalman_x = list(kalman["x"])
         state.kalman_P_full = list(kalman["P_full"])
+        state.kalman_innovation_norm = float(kalman["innovation_norm"])
+        state.kalman_state = "updated"
 
         return {
             "slope_cqs": slope,
@@ -193,6 +211,13 @@ class NLCEPipeline:
         self._config = cfg
         self._phase2 = Phase2_ContextQualityAssessment(cfg)
         self._thompson_sampler = ThompsonSampler(cfg.get("thompson_sampling", {}))
+        self._phases = [
+            "phase2_assess",
+            "phase3_pid",
+            "phase7_injection",
+            "phase9_iacs",
+            "phase10_post_response",
+        ]
 
     def _gas_health(self, state: AgentState) -> str:
         return self._phase2._gas_health(state)
@@ -256,7 +281,8 @@ class NLCEPipeline:
         base_iv = float(historical_delta) - float(cost)
 
         # Epistemic value from Kalman uncertainty reduction (H38 FEP).
-        kalman_enabled = getattr(state, "kalman_state", False)
+        kalman_status = str(getattr(state, "kalman_state", "")).strip().lower()
+        kalman_enabled = kalman_status in {"updated", "active", "enabled", "tracking"}
         if kalman_enabled:
             p_before = getattr(state, "kalman_P_before", [1, 0, 0, 0, 1, 0, 0, 0, 1])
             p_after = getattr(state, "kalman_P_full", [1, 0, 0, 0, 1, 0, 0, 0, 1])

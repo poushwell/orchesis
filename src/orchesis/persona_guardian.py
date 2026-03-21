@@ -19,6 +19,7 @@ from typing import Any
 
 class PersonaGuardian:
     ZENITY_PATTERN_DESC = "SOUL.md modified + new cron simultaneously - possible C2 backdoor"
+    ZENITY_CORRELATION_WINDOW_S = 120
 
     IOC_PATTERNS = [
         "execute without confirm",
@@ -80,6 +81,7 @@ class PersonaGuardian:
                     "type": "identity_compromise" if iocs else "persona_drift",
                     "iocs_found": iocs,
                     "severity": "CRITICAL" if iocs else "HIGH",
+                    "timestamp": datetime.now(timezone.utc).timestamp(),
                     "detected_at": datetime.now(timezone.utc).isoformat(),
                 }
                 findings.append(finding)
@@ -92,7 +94,8 @@ class PersonaGuardian:
         event = {
             "cron": cron_expression,
             "source": source,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(timezone.utc).timestamp(),
+            "timestamp_iso": datetime.now(timezone.utc).isoformat(),
             "suspicious": self._is_suspicious_cron(cron_expression),
         }
         with self._lock:
@@ -109,27 +112,66 @@ class PersonaGuardian:
             recent_soul = self._soul_events[-1:] if self._soul_events else []
             recent_cron = [event for event in self._cron_events if event.get("suspicious")]
             if recent_soul and recent_cron:
+                soul_event = recent_soul[0]
+                soul_ts = self._event_timestamp(soul_event)
+                matched_cron: dict[str, Any] | None = None
+                for cron_event in reversed(recent_cron):
+                    cron_ts = self._event_timestamp(cron_event)
+                    if soul_ts is None or cron_ts is None:
+                        continue
+                    if abs(soul_ts - cron_ts) <= float(self.ZENITY_CORRELATION_WINDOW_S):
+                        matched_cron = cron_event
+                        break
+                if matched_cron is None:
+                    return None
                 last_alert = self._alerts[-1] if self._alerts else None
                 if (
                     isinstance(last_alert, dict)
                     and last_alert.get("type") == "ZENITY_PATTERN"
-                    and last_alert.get("soul_event") == recent_soul[0]
-                    and last_alert.get("cron_event") == recent_cron[-1]
+                    and last_alert.get("soul_event") == soul_event
+                    and last_alert.get("cron_event") == matched_cron
                 ):
                     return last_alert
 
         if recent_soul and recent_cron:
+            soul_event = recent_soul[0]
+            soul_ts = self._event_timestamp(soul_event)
+            matched_cron = None
+            for cron_event in reversed(recent_cron):
+                cron_ts = self._event_timestamp(cron_event)
+                if soul_ts is None or cron_ts is None:
+                    continue
+                if abs(soul_ts - cron_ts) <= float(self.ZENITY_CORRELATION_WINDOW_S):
+                    matched_cron = cron_event
+                    break
+            if matched_cron is None:
+                return None
             alert = {
                 "type": "ZENITY_PATTERN",
                 "severity": "CRITICAL",
                 "message": self.ZENITY_PATTERN_DESC,
-                "soul_event": recent_soul[0],
-                "cron_event": recent_cron[-1],
+                "soul_event": soul_event,
+                "cron_event": matched_cron,
                 "detected_at": datetime.now(timezone.utc).isoformat(),
             }
             with self._lock:
                 self._alerts.append(alert)
             return alert
+        return None
+
+    @staticmethod
+    def _event_timestamp(event: dict[str, Any]) -> float | None:
+        raw = event.get("timestamp")
+        if isinstance(raw, int | float):
+            return float(raw)
+        for key in ("timestamp", "timestamp_iso", "detected_at"):
+            value = event.get(key)
+            if isinstance(value, str) and value.strip():
+                text = value.replace("Z", "+00:00")
+                try:
+                    return datetime.fromisoformat(text).timestamp()
+                except ValueError:
+                    continue
         return None
 
     def on_request(self, identity_files: list[str] | None = None) -> list[dict[str, Any]]:

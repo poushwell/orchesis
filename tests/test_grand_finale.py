@@ -51,7 +51,10 @@ def test_17_pipeline_phases() -> None:
     from orchesis.core.nlce_pipeline import NLCEPipeline
 
     pipeline = NLCEPipeline({})
-    assert hasattr(pipeline, "_phases") or True
+    assert hasattr(pipeline, "_phases")
+    assert len(pipeline._phases) == 5
+    assert "phase2_assess" in pipeline._phases
+    assert "phase9_iacs" in pipeline._phases
 
 
 def test_viral_tools_all_work() -> None:

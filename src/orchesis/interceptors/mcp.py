@@ -22,7 +22,7 @@ class McpInterceptor:
         self._event_bus = event_bus
         self._policy = policy if isinstance(policy, dict) else {}
         self._secret_scanner = SecretScanner()
-        self._ioc_matcher = IoCMatcher()
+        self._ioc_matcher = IoCMatcher(enable_opt_in_v1_1=True)
         self._redactor = redactor if redactor is not None else AuditRedactor()
 
     def intercept_request(

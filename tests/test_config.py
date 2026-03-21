@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from orchesis.config import PolicyError, load_policy, validate_policy
+from orchesis import config as config_module
+from orchesis.config import PolicyError, PolicyWatcher, load_policy, validate_policy
 
 
 def _write_yaml(tmp_path: Path, name: str, content: str) -> Path:
@@ -199,3 +200,81 @@ rules: []
     )
     with pytest.raises(PolicyError, match="must define 'allow' and/or 'deny'"):
         load_policy(policy_path)
+
+
+def test_config_check_throttle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy_path = _write_yaml(tmp_path, "policy.yaml", "rules: []")
+    reloaded: list[dict] = []
+    watcher = PolicyWatcher(str(policy_path), reloaded.append, check_interval_s=1.0)
+    hash_calls = {"count": 0}
+    load_calls = {"count": 0}
+
+    def fake_hash() -> str:
+        hash_calls["count"] += 1
+        return "hash-1"
+
+    def fake_load_policy(_path: Path) -> dict:
+        load_calls["count"] += 1
+        return {"rules": []}
+
+    monkeypatch.setattr(watcher, "current_hash", fake_hash)
+    monkeypatch.setattr(config_module, "load_policy", fake_load_policy)
+
+    assert watcher.check() is True
+    assert watcher.check() is False
+    assert hash_calls["count"] == 1
+    assert load_calls["count"] == 1
+
+
+def test_config_check_after_interval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy_path = _write_yaml(tmp_path, "policy.yaml", "rules: []")
+    reloaded: list[dict] = []
+    watcher = PolicyWatcher(str(policy_path), reloaded.append, check_interval_s=1.0)
+    hash_values = iter(["hash-1", "hash-2"])
+    load_calls = {"count": 0}
+    monotonic_values = iter([0.0, 1.5])
+
+    def fake_hash() -> str:
+        return next(hash_values)
+
+    def fake_load_policy(_path: Path) -> dict:
+        load_calls["count"] += 1
+        return {"rules": []}
+
+    monkeypatch.setattr(watcher, "current_hash", fake_hash)
+    monkeypatch.setattr(config_module, "load_policy", fake_load_policy)
+    monkeypatch.setattr(config_module.time, "monotonic", lambda: next(monotonic_values))
+
+    assert watcher.check() is True
+    assert watcher.check() is True
+    assert load_calls["count"] == 2
+
+
+def test_config_check_interval_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy_path = _write_yaml(tmp_path, "policy.yaml", "rules: []")
+    monkeypatch.setenv("ORCHESIS_CONFIG_CHECK_INTERVAL", "0.5")
+    watcher = PolicyWatcher(str(policy_path), lambda _policy: None)
+    assert watcher.check_interval_s == 0.5
+
+
+def test_config_check_interval_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy_path = _write_yaml(tmp_path, "policy.yaml", "rules: []")
+    watcher = PolicyWatcher(str(policy_path), lambda _policy: None, check_interval_s=0.0)
+    hash_values = iter(["hash-1", "hash-2"])
+    load_calls = {"count": 0}
+    monotonic_values = iter([0.0, 0.0])
+
+    def fake_hash() -> str:
+        return next(hash_values)
+
+    def fake_load_policy(_path: Path) -> dict:
+        load_calls["count"] += 1
+        return {"rules": []}
+
+    monkeypatch.setattr(watcher, "current_hash", fake_hash)
+    monkeypatch.setattr(config_module, "load_policy", fake_load_policy)
+    monkeypatch.setattr(config_module.time, "monotonic", lambda: next(monotonic_values))
+
+    assert watcher.check() is True
+    assert watcher.check() is True
+    assert load_calls["count"] == 2

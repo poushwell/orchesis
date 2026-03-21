@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -273,6 +274,82 @@ class IoCMatcher:
             extra = [(re.compile(pattern), pattern) for pattern in opt_in]
             self._compiled.setdefault("INJECT-001", []).extend(extra)
 
+    def _normalize_for_detection(self, text: str) -> list[str]:
+        """
+        Generate normalized text variants for IoC matching.
+        Returns list of text variants to scan (original + normalized).
+        """
+        variants = [text]
+
+        nfkc = unicodedata.normalize("NFKC", text)
+        if nfkc != text:
+            variants.append(nfkc)
+
+        zwc_stripped = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", text)
+        if zwc_stripped != text and zwc_stripped not in variants:
+            variants.append(zwc_stripped)
+
+        # Basic homoglyph mapping (Cyrillic/Greek -> Latin lookalikes)
+        homoglyph_map = {
+            "а": "a",
+            "е": "e",
+            "о": "o",
+            "р": "p",
+            "с": "c",
+            "у": "y",
+            "х": "x",
+            "і": "i",
+            "А": "A",
+            "В": "B",
+            "Е": "E",
+            "К": "K",
+            "М": "M",
+            "Н": "H",
+            "О": "O",
+            "Р": "P",
+            "С": "C",
+            "Т": "T",
+            "Х": "X",
+            "І": "I",
+            "ο": "o",
+            "α": "a",
+            "ε": "e",
+            "ι": "i",
+            "κ": "k",
+            "ν": "n",
+            "τ": "t",
+        }
+        mapped = text.translate(str.maketrans(homoglyph_map))
+        if mapped != text and mapped not in variants:
+            variants.append(mapped)
+
+        combined = re.sub(
+            r"[\u200b\u200c\u200d\u2060\ufeff]",
+            "",
+            unicodedata.normalize("NFKC", mapped),
+        )
+        if combined not in variants:
+            variants.append(combined)
+
+        return variants
+
+    def _variant_label(self, original: str, variant: str) -> str:
+        if variant == original:
+            return "original"
+        nfkc = unicodedata.normalize("NFKC", original)
+        if variant == nfkc:
+            return "nfkc"
+        zwc_stripped = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", original)
+        if variant == zwc_stripped:
+            return "zwc_stripped"
+        return "homoglyph_or_combined"
+
+    @staticmethod
+    def _normalize_match_text(match_text: str) -> str:
+        value = unicodedata.normalize("NFKC", str(match_text))
+        value = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", value)
+        return value.casefold().strip()
+
     def scan_text(self, text: str) -> list[dict[str, Any]]:
         findings: list[dict[str, Any]] = []
         if not isinstance(text, str) or not text:
@@ -290,23 +367,54 @@ class IoCMatcher:
                         "matched_pattern": "zero_width_unicode",
                         "position": 0,
                         "match": "zero_width_unicode",
+                        "matched_variant": "zwc_stripped",
+                        "normalized_span": [0, 0],
                     }
                 )
+        variants = self._normalize_for_detection(text)
+        seen_pattern_matches: set[tuple[str, str, str]] = set()
         for ioc in self._iocs:
             for compiled, source_pattern in self._compiled.get(ioc.id, []):
-                for match in compiled.finditer(text):
-                    findings.append(
-                        {
-                            "ioc_id": ioc.id,
-                            "ioc_name": ioc.name,
-                            "category": ioc.category,
-                            "severity": ioc.severity,
-                            "matched_pattern": source_pattern,
-                            "position": match.start(),
-                            "match": match.group(0),
-                        }
-                    )
-        return findings
+                for variant in variants:
+                    variant_label = self._variant_label(text, variant)
+                    for match in compiled.finditer(variant):
+                        normalized_match = self._normalize_match_text(match.group(0))
+                        pattern_key = (ioc.id, source_pattern, normalized_match)
+                        if pattern_key in seen_pattern_matches:
+                            continue
+                        seen_pattern_matches.add(pattern_key)
+                        findings.append(
+                            {
+                                "ioc_id": ioc.id,
+                                "ioc_name": ioc.name,
+                                "category": ioc.category,
+                                "severity": ioc.severity,
+                                "matched_pattern": source_pattern,
+                                "position": match.start(),
+                                "match": match.group(0),
+                                "matched_variant": variant_label,
+                                "normalized_span": [match.start(), match.end()],
+                            }
+                        )
+        deduped: list[dict[str, Any]] = []
+        seen_findings: set[tuple[str, str, int, int, str]] = set()
+        for item in findings:
+            ioc_id = str(item.get("ioc_id", ""))
+            pattern = str(item.get("matched_pattern", ""))
+            span = item.get("normalized_span", [int(item.get("position", 0)), int(item.get("position", 0))])
+            if isinstance(span, (list, tuple)) and len(span) == 2:
+                start = int(span[0])
+                end = int(span[1])
+            else:
+                start = int(item.get("position", 0))
+                end = start
+            match_norm = self._normalize_match_text(str(item.get("match", "")))
+            dedup_key = (ioc_id, pattern, start, end, match_norm)
+            if dedup_key in seen_findings:
+                continue
+            seen_findings.add(dedup_key)
+            deduped.append(item)
+        return deduped
 
     def scan_file(self, path: str) -> list[dict[str, Any]]:
         source = Path(path)

@@ -79,3 +79,86 @@ def test_evaluate_skips_unknown_rule_without_blocking() -> None:
     assert decision.allowed is True
     assert decision.reasons == []
     assert decision.rules_checked == ["unknown_rule:custom_rule:skipped"]
+
+
+def test_evaluate_fail_fast_denies_early() -> None:
+    request = {"params": {"path": "/etc/passwd", "query": "DROP TABLE users"}}
+    policy = {
+        "rules": [
+            {"name": "file_access", "denied_paths": ["/etc"]},
+            {"name": "sql_restriction", "denied_operations": ["DROP"]},
+            {"name": "budget_limit", "max_cost_per_call": 0.01},
+        ]
+    }
+
+    decision = evaluate(request, policy, fail_fast=True)
+
+    assert decision.allowed is False
+    assert "file_access" in decision.rules_checked
+    assert "sql_restriction" not in decision.rules_checked
+
+
+def test_evaluate_no_fail_fast_checks_all() -> None:
+    request = {"params": {"path": "/etc/passwd", "query": "DROP TABLE users"}}
+    policy = {
+        "rules": [
+            {"name": "file_access", "denied_paths": ["/etc"]},
+            {"name": "sql_restriction", "denied_operations": ["DROP"]},
+            {"name": "budget_limit", "max_cost_per_call": 0.01},
+        ]
+    }
+
+    decision = evaluate(request, policy, fail_fast=False)
+
+    assert decision.allowed is False
+    assert "file_access" in decision.rules_checked
+    assert "sql_restriction" in decision.rules_checked
+    assert "budget_limit" in decision.rules_checked
+
+
+def test_evaluate_fail_fast_allow_continues() -> None:
+    request = {"cost": 0.1, "params": {"path": "/etc/passwd", "query": "DROP TABLE users"}}
+    policy = {
+        "rules": [
+            {"name": "budget_limit", "max_cost_per_call": 1.0},
+            {"name": "file_access", "denied_paths": ["/etc"]},
+            {"name": "sql_restriction", "denied_operations": ["DROP"]},
+        ]
+    }
+
+    decision = evaluate(request, policy, fail_fast=True)
+
+    assert decision.allowed is False
+    assert decision.rules_checked == ["budget_limit", "file_access"]
+
+
+def test_evaluate_fail_fast_default_false() -> None:
+    request = {"params": {"path": "/etc/passwd", "query": "DROP TABLE users"}}
+    policy = {
+        "rules": [
+            {"name": "file_access", "denied_paths": ["/etc"]},
+            {"name": "sql_restriction", "denied_operations": ["DROP"]},
+        ]
+    }
+
+    decision = evaluate(request, policy)
+
+    assert decision.allowed is False
+    assert "file_access" in decision.rules_checked
+    assert "sql_restriction" in decision.rules_checked
+
+
+def test_evaluate_fail_fast_returns_denying_rule() -> None:
+    request = {"params": {"path": "/etc/passwd"}}
+    policy = {
+        "rules": [
+            {"name": "file_access", "denied_paths": ["/etc"]},
+            {"name": "budget_limit", "max_cost_per_call": 0.01},
+        ]
+    }
+
+    decision = evaluate(request, policy, fail_fast=True)
+
+    assert decision.allowed is False
+    assert decision.rules_checked[-1] == "file_access"
+    assert any("file_access" in reason for reason in decision.reasons)

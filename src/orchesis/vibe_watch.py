@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import threading
@@ -176,30 +175,16 @@ class VibeWatcher:
 
     def _run_audit(self, filepath: str) -> AuditResult:
         now = time.time()
-        for module_name in ("orchesis.vibe_code_audit", "orchesis.vibe_audit"):
-            try:
-                module = importlib.import_module(module_name)
-            except Exception:
-                continue
+        try:
+            from orchesis.vibe_audit import VibeCodeAuditor
 
-            scan_fn = getattr(module, "scan_file", None)
-            if callable(scan_fn):
-                try:
-                    payload = scan_fn(filepath)
-                    return AuditResult(filepath=filepath, issues=self._normalize_issues(payload), timestamp=now)
-                except Exception:
-                    continue
-
-            auditor_cls = getattr(module, "VibeCodeAuditor", None)
-            if auditor_cls is None:
-                continue
-            try:
-                auditor = auditor_cls()
-                if hasattr(auditor, "audit_file"):
-                    payload = auditor.audit_file(filepath)
-                    return AuditResult(filepath=filepath, issues=self._normalize_issues(payload), timestamp=now)
-            except Exception:
-                continue
+            auditor = VibeCodeAuditor()
+            payload = auditor.audit_file(filepath)
+            return AuditResult(filepath=filepath, issues=self._normalize_issues(payload), timestamp=now)
+        except ImportError:
+            pass
+        except Exception:
+            pass
 
         # TODO: wire a hard dependency-free scanner fallback if no audit module is importable.
         return AuditResult(filepath=filepath, issues=[], timestamp=now)

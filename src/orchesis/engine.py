@@ -1687,6 +1687,7 @@ class PolicyEngine:
         debug: bool = False,
         session_type: str = "cli",
         channel: str | None = None,
+        fail_fast: bool = False,
     ) -> Decision:
         return evaluate(
             request=request,
@@ -1699,6 +1700,7 @@ class PolicyEngine:
             debug=debug,
             session_type=session_type,
             channel=channel,
+            fail_fast=fail_fast,
         )
 
 
@@ -1714,6 +1716,7 @@ def evaluate(
     debug: bool = False,
     session_type: str = "cli",
     channel: str | None = None,
+    fail_fast: bool = False,
 ) -> Decision:
     """Evaluate request against policy rules."""
     started_ns = time.perf_counter_ns()
@@ -1728,6 +1731,12 @@ def evaluate(
     effective_tier_for_eval = _normalize_tier(identity)
     policy_version_hash = _policy_version_hash(policy) if (emitter is not None or debug) else ""
     policy_version = policy_version_hash if emitter is not None else None
+    policy_fail_fast = False
+    if isinstance(policy, dict):
+        engine_cfg = policy.get("engine")
+        if isinstance(engine_cfg, dict):
+            policy_fail_fast = bool(engine_cfg.get("fail_fast", False))
+    effective_fail_fast = bool(fail_fast or policy_fail_fast)
     decision: Decision
     debug_rule_results: list[dict[str, Any]] = []
     debug_identity_passed = identity is None
@@ -1746,6 +1755,23 @@ def evaluate(
     )
     reasons.extend(tool_access_reasons)
     rules_checked.extend(tool_access_checked)
+    if effective_fail_fast and tool_access_reasons:
+        decision_reason = "fail_fast:tool_access_control"
+        decision = Decision(allowed=False, reasons=reasons, rules_checked=rules_checked)
+        _emit_event(
+            emitter=emitter,
+            request=request,
+            policy=policy,
+            agent_id=agent_id,
+            tracker=tracker,
+            session_id=session_id,
+            decision=decision,
+            started_ns=started_ns,
+            policy_version=policy_version,
+            decision_reason=decision_reason,
+            decision_context={"denied_by_rule": "tool_access_control"},
+        )
+        return decision
     if debug and tool_access_checked:
         debug_rule_results.append(
             {
@@ -1772,6 +1798,23 @@ def evaluate(
     )
     reasons.extend(token_reasons)
     rules_checked.extend(token_checked)
+    if effective_fail_fast and token_reasons:
+        decision_reason = "fail_fast:token_budget"
+        decision = Decision(allowed=False, reasons=reasons, rules_checked=rules_checked)
+        _emit_event(
+            emitter=emitter,
+            request=request,
+            policy=policy,
+            agent_id=agent_id,
+            tracker=tracker,
+            session_id=session_id,
+            decision=decision,
+            started_ns=started_ns,
+            policy_version=policy_version,
+            decision_reason=decision_reason,
+            decision_context={"denied_by_rule": "token_budget"},
+        )
+        return decision
     if debug and token_checked:
         debug_rule_results.append(
             {
@@ -1794,6 +1837,23 @@ def evaluate(
     )
     reasons.extend(channel_reasons)
     rules_checked.extend(channel_checked)
+    if effective_fail_fast and channel_reasons:
+        decision_reason = "fail_fast:channel_policy"
+        decision = Decision(allowed=False, reasons=reasons, rules_checked=rules_checked)
+        _emit_event(
+            emitter=emitter,
+            request=request,
+            policy=policy,
+            agent_id=agent_id,
+            tracker=tracker,
+            session_id=session_id,
+            decision=decision,
+            started_ns=started_ns,
+            policy_version=policy_version,
+            decision_reason=decision_reason,
+            decision_context={"denied_by_rule": "channel_policy"},
+        )
+        return decision
     if debug and channel_checked:
         debug_rule_results.append(
             {
@@ -1811,6 +1871,23 @@ def evaluate(
     )
     reasons.extend(sandbox_reasons)
     rules_checked.extend(sandbox_checked)
+    if effective_fail_fast and sandbox_reasons:
+        decision_reason = "fail_fast:sandbox"
+        decision = Decision(allowed=False, reasons=reasons, rules_checked=rules_checked)
+        _emit_event(
+            emitter=emitter,
+            request=request,
+            policy=policy,
+            agent_id=agent_id,
+            tracker=tracker,
+            session_id=session_id,
+            decision=decision,
+            started_ns=started_ns,
+            policy_version=policy_version,
+            decision_reason=decision_reason,
+            decision_context={"denied_by_rule": "sandbox"},
+        )
+        return decision
     if debug and sandbox_checked:
         debug_rule_results.append(
             {
@@ -2108,6 +2185,24 @@ def evaluate(
 
             reasons.extend(rule_reasons)
             rules_checked.extend(checked)
+            if effective_fail_fast and rule_reasons:
+                decision_reason = f"fail_fast:{safe_rule_name}"
+                decision = Decision(allowed=False, reasons=reasons, rules_checked=rules_checked)
+                _attach_debug_trace(decision)
+                _emit_event(
+                    emitter=emitter,
+                    request=request,
+                    policy=policy,
+                    agent_id=agent_id,
+                    tracker=tracker,
+                    session_id=session_id,
+                    decision=decision,
+                    started_ns=started_ns,
+                    policy_version=policy_version,
+                    decision_reason=decision_reason,
+                    decision_context={"denied_by_rule": safe_rule_name, "rule_type": rule_type},
+                )
+                return decision
 
     for unknown_type, rule in unknown_explicit_rules:
         plugin_handler = plugins.get_handler(unknown_type) if plugins is not None else None
@@ -2129,6 +2224,24 @@ def evaluate(
             checked = [unknown_type]
         reasons.extend(plugin_reasons)
         rules_checked.extend(checked)
+        if effective_fail_fast and plugin_reasons:
+            decision_reason = f"fail_fast:{unknown_type}"
+            decision = Decision(allowed=False, reasons=reasons, rules_checked=rules_checked)
+            _attach_debug_trace(decision)
+            _emit_event(
+                emitter=emitter,
+                request=request,
+                policy=policy,
+                agent_id=agent_id,
+                tracker=tracker,
+                session_id=session_id,
+                decision=decision,
+                started_ns=started_ns,
+                policy_version=policy_version,
+                decision_reason=decision_reason,
+                decision_context={"denied_by_rule": unknown_type, "rule_type": "plugin"},
+            )
+            return decision
         if debug:
             debug_rule_results.append(
                 {
@@ -2272,6 +2385,24 @@ def evaluate(
             if action == "deny":
                 allowed = False
                 reasons.append(f"evaluator:{reason}")
+                if effective_fail_fast:
+                    decision_reason = "fail_fast:evaluator"
+                    decision = Decision(allowed=False, reasons=reasons, rules_checked=rules_checked)
+                    _attach_debug_trace(decision)
+                    _emit_event(
+                        emitter=emitter,
+                        request=request,
+                        policy=policy,
+                        agent_id=agent_id,
+                        tracker=tracker,
+                        session_id=session_id,
+                        decision=decision,
+                        started_ns=started_ns,
+                        policy_version=policy_version,
+                        decision_reason=decision_reason,
+                        decision_context={"denied_by_rule": "evaluator"},
+                    )
+                    return decision
             elif action == "warn":
                 reasons.append(f"warning:evaluator:{reason}")
 
