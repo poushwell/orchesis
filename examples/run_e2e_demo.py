@@ -76,7 +76,8 @@ async def _proxy_session(policy_path: Path, decisions_log: Path, state_log: Path
         command=sys.executable,
         args=["-m", "orchesis.mcp_proxy"],
         env=env,
-        cwd=Path(__file__).resolve().parent,
+        # Keep process cwd aligned with caller workspace.
+        cwd=Path.cwd(),
     )
     async with stdio_client(params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
@@ -85,7 +86,7 @@ async def _proxy_session(policy_path: Path, decisions_log: Path, state_log: Path
 
 
 async def run_demo(rate_burst: int = 100) -> dict[str, int | float | str]:
-    runtime_dir = Path(".orchesis")
+    runtime_dir = Path(".orchesis").resolve()
     runtime_dir.mkdir(parents=True, exist_ok=True)
     policy_path = runtime_dir / "e2e_demo_policy.yaml"
     decisions_log = runtime_dir / "decisions.jsonl"

@@ -17,3 +17,13 @@ budgets:
 recording:
   enabled: false
 
+cost_attribution:
+  rules:
+    - agent_pattern: "research_*"
+      team: "research"
+      project: "nlp-project"
+      cost_center: "CC-001"
+    - agent_pattern: "coding_*"
+      team: "engineering"
+      cost_center: "CC-002"
+

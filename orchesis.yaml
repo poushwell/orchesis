@@ -2,22 +2,7 @@ rules: []
 proxy:
   host: "0.0.0.0"
   port: 8080
-  timeout: 300
 upstream:
   url: "https://api.openai.com"
 dashboard:
-  enabled: true
-budgets:
-  daily: 10.00
-recording:
-  enabled: false
-threat_intel:
-  enabled: true
-adaptive_detection:
-  enabled: true
-loop_detection:
-  enabled: true
-cost_optimizer:
-  enabled: true
-semantic_cache:
   enabled: true

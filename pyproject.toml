@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta:__legacy__"
 [project]
 name = "orchesis"
 version = "0.5.0"
-description = "Transparent HTTP proxy for AI agents. Block threats, cut token waste, monitor your fleet. Zero code changes. MIT license."
+description = "Runtime Gateway for AI Agents. 17-phase security pipeline."
 readme = "README-PYPI.md"
 license = {text = "MIT"}
 requires-python = ">=3.12"
@@ -60,9 +60,11 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://orchesis.io"
+Homepage = "https://orchesis.ai"
 Repository = "https://github.com/poushwell/orchesis"
-Issues = "https://github.com/poushwell/orchesis/issues"
+Documentation = "https://github.com/poushwell/orchesis/blob/main/QUICK_START.md"
+"Bug Tracker" = "https://github.com/poushwell/orchesis/issues"
+"MCP Scanner" = "https://orchesis.ai/scan"
 
 [project.scripts]
 orchesis = "orchesis.cli:main"
@@ -83,4 +85,4 @@ ignore = ["E501", "F401", "I001"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "examples"]

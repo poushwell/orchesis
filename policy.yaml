@@ -32,7 +32,7 @@ budgets:
   daily_limit_usd: 50.0
 
 loop_detection:
-  enabled: true
+  enabled: false
   threshold: 5
   window_seconds: 60
   action: warn
