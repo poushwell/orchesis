@@ -3,7 +3,19 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+import logging
 from typing import Any
+
+from orchesis.models.ecosystem import IncidentRecord
+
+try:
+    from orchesis.utils.log import get_logger  # type: ignore
+except Exception:  # pragma: no cover
+    def get_logger(name: str):
+        return logging.getLogger(name)
+
+
+logger = get_logger(__name__)
 
 
 class IncidentIntelligence:
@@ -13,8 +25,21 @@ class IncidentIntelligence:
     def _safe_list(value: Any) -> list[Any]:
         return value if isinstance(value, list) else []
 
+    @staticmethod
+    def to_canonical(incident: dict[str, Any]) -> IncidentRecord:
+        from orchesis.casura.incident_db import CASURAIncidentDB
+
+        return CASURAIncidentDB.to_canonical(incident)
+
+    @staticmethod
+    def from_canonical(record: IncidentRecord) -> dict[str, Any]:
+        from orchesis.casura.incident_db import CASURAIncidentDB
+
+        return CASURAIncidentDB.from_canonical(record)
+
     def analyze_patterns(self, incidents: list[dict]) -> dict:
         rows = [item for item in incidents if isinstance(item, dict)]
+        logger.debug("Analyzing %d incidents for CASURA patterns", len(rows))
         vector_counter: Counter[str] = Counter()
         framework_heatmap: dict[str, int] = defaultdict(int)
         severity_trend: dict[str, int] = defaultdict(int)

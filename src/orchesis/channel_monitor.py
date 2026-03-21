@@ -11,6 +11,10 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from orchesis.utils.log import get_logger
+
+logger = get_logger(__name__)
+
 
 @dataclass
 class ChannelAlert:
@@ -82,6 +86,10 @@ class ChannelHealthMonitor:
 
     def record_event(self, channel: str, event_type: str, metadata: dict) -> None:
         """Record channel traffic event."""
+        logger.debug(
+            "recording channel event",
+            extra={"component": "channel_monitor", "channel_type": channel},
+        )
         with self._lock:
             if channel not in self._channel_state:
                 return
@@ -154,6 +162,11 @@ class ChannelHealthMonitor:
             channel_alerts = self._check_channel(channel_state)
             alerts.extend(self._serialize_alert(alert) for alert in channel_alerts)
             statuses[channel] = "healthy" if not channel_alerts else "degraded"
+            if channel_alerts:
+                logger.info(
+                    "channel alerts detected",
+                    extra={"component": "channel_monitor", "channel_type": channel},
+                )
 
         wa = state.get("whatsapp", {})
         age = float(wa.get("session_age_days", 0.0) or 0.0)

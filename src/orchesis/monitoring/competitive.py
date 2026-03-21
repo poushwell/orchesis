@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from orchesis.utils.log import get_logger
+
+logger = get_logger(__name__)
+
 
 class CompetitiveMonitor:
     """Monitor competitors and ecosystem changes."""
@@ -86,6 +90,7 @@ class CompetitiveMonitor:
 
     def generate_weekly_report(self, data: dict) -> dict:
         """Generate weekly competitive intelligence report."""
+        logger.debug("generating weekly competitive report", extra={"component": "monitoring"})
         payload = data if isinstance(data, dict) else {}
         competitors = payload.get("competitors", {})
         feed = payload.get("feed", [])

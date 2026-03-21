@@ -7,7 +7,7 @@ from pathlib import Path
 from tests.cli_test_utils import CliRunner
 
 from orchesis.cli import main
-from orchesis.contrib.ioc_database import IoCMatcher
+from orchesis.contrib.ioc_database import INJECTION_SHIELD_VERSION, TOTAL_PATTERNS, IoCMatcher
 from orchesis.scanner import SkillScanner
 
 
@@ -155,3 +155,25 @@ def test_indirect_injection_detected_when_opt_in() -> None:
     on = IoCMatcher(enable_opt_in_v1_1=True).scan_text(text)
     assert not any(item.get("ioc_id") == "INJECT-001" for item in off)
     assert any(item.get("ioc_id") == "INJECT-001" for item in on)
+
+
+def test_injection_shield_version_is_string() -> None:
+    assert isinstance(INJECTION_SHIELD_VERSION, str)
+
+
+def test_injection_shield_version_value() -> None:
+    assert INJECTION_SHIELD_VERSION == "1.1"
+
+
+def test_total_patterns_is_int() -> None:
+    assert isinstance(TOTAL_PATTERNS, int)
+
+
+def test_total_patterns_value() -> None:
+    assert TOTAL_PATTERNS == 50
+
+
+def test_no_compat_wrappers() -> None:
+    source = Path("src/orchesis/contrib/ioc_database.py").read_text(encoding="utf-8")
+    assert "_CompatVersion" not in source
+    assert "_CompatInt" not in source

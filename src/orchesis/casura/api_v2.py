@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 from uuid import uuid4
+
+from orchesis.models.ecosystem import IncidentRecord
 
 
 class CasuraCategory(Enum):
@@ -45,6 +48,52 @@ class Incident:
     tags: list[str] = field(default_factory=list)
     cve_ids: list[str] = field(default_factory=list)
     affected_systems: list[str] = field(default_factory=list)
+
+    def to_canonical(self) -> IncidentRecord:
+        ts_value = self.timestamp
+        parsed_ts: float
+        if isinstance(ts_value, str) and ts_value.strip():
+            try:
+                dt = datetime.fromisoformat(ts_value.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                parsed_ts = dt.timestamp()
+            except ValueError:
+                parsed_ts = 0.0
+        else:
+            parsed_ts = 0.0
+        return IncidentRecord(
+            incident_id=self.incident_id,
+            title=self.title,
+            severity=float(self.severity),
+            category=self.category,
+            description=self.description,
+            source=self.source,
+            timestamp=parsed_ts,
+            tags=list(self.tags),
+            cve_ids=list(self.cve_ids),
+            affected_systems=list(self.affected_systems),
+        )
+
+    @classmethod
+    def from_canonical(cls, record: IncidentRecord) -> "Incident":
+        ts_text = ""
+        try:
+            ts_text = datetime.fromtimestamp(float(record.timestamp), tz=timezone.utc).isoformat()
+        except (TypeError, ValueError, OSError):
+            ts_text = ""
+        return cls(
+            incident_id=str(record.incident_id),
+            title=str(record.title),
+            severity=float(record.severity),
+            category=str(record.category),
+            description=str(record.description),
+            source=str(record.source),
+            timestamp=ts_text,
+            tags=[str(item) for item in record.tags],
+            cve_ids=[str(item) for item in record.cve_ids],
+            affected_systems=[str(item) for item in record.affected_systems],
+        )
 
 
 @dataclass(slots=True)

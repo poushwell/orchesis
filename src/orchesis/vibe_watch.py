@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from orchesis.utils.log import get_logger
+
 DEFAULT_EXTENSIONS = {".py", ".js", ".ts", ".jsx", ".tsx"}
 DEFAULT_EXCLUDES = {
     "__pycache__",
@@ -60,6 +62,9 @@ class AuditResult:
     filepath: str
     issues: list
     timestamp: float
+
+
+logger = get_logger(__name__)
 
 
 class VibeWatcher:
@@ -182,9 +187,17 @@ class VibeWatcher:
             payload = auditor.audit_file(filepath)
             return AuditResult(filepath=filepath, issues=self._normalize_issues(payload), timestamp=now)
         except ImportError:
+            logger.debug(
+                "vibe_audit module not importable",
+                extra={"component": "vibe_watch", "filepath": filepath},
+            )
             pass
         except Exception:
-            pass
+            logger.warning(
+                "audit execution failed",
+                exc_info=True,
+                extra={"component": "vibe_watch", "filepath": filepath},
+            )
 
         # TODO: wire a hard dependency-free scanner fallback if no audit module is importable.
         return AuditResult(filepath=filepath, issues=[], timestamp=now)

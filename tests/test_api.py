@@ -5,7 +5,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from orchesis.api import create_api_app
+from orchesis.api import create_api_app, paginate
 
 
 def _policy_yaml(max_cost: float = 1.0) -> str:
@@ -405,3 +405,96 @@ async def test_timeline_api(tmp_path: Path) -> None:
     payload = timeline.json()
     assert payload["agent_id"] == "timeline_bot"
     assert len(payload["events"]) >= 3
+
+
+def test_paginate_basic() -> None:
+    items = list(range(50))
+    page = paginate(items, limit=10, offset=0)
+    assert len(page.items) == 10
+    assert page.total == 50
+    assert page.has_more is True
+
+
+def test_paginate_offset() -> None:
+    items = list(range(50))
+    page = paginate(items, limit=10, offset=40)
+    assert page.items == list(range(40, 50))
+    assert page.has_more is False
+
+
+def test_paginate_last_page() -> None:
+    items = list(range(50))
+    page = paginate(items, limit=10, offset=45)
+    assert page.items == list(range(45, 50))
+    assert page.has_more is False
+
+
+def test_paginate_max_limit() -> None:
+    items = list(range(2000))
+    page = paginate(items, limit=5000, offset=0)
+    assert page.limit == 1000
+    assert len(page.items) == 1000
+
+
+def test_paginate_empty() -> None:
+    page = paginate([], limit=10, offset=0)
+    assert page.items == []
+    assert page.total == 0
+    assert page.has_more is False
+
+
+@pytest.mark.asyncio
+async def test_api_incidents_paginated(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(_policy_yaml(), encoding="utf-8")
+    app = create_api_app(
+        policy_path=str(policy_path),
+        state_persist=str(tmp_path / "state.jsonl"),
+        decisions_log=str(tmp_path / "decisions.jsonl"),
+        history_path=str(tmp_path / "policy_versions.jsonl"),
+    )
+    async with await _client(app) as client:
+        for i in range(7):
+            created = await client.post(
+                "/api/v1/casura/incidents",
+                headers=_auth(),
+                json={"title": f"incident-{i}", "description": "test"},
+            )
+            assert created.status_code == 200
+        res = await client.get(
+            "/api/v1/casura/incidents?limit=5&offset=0&paginated=true",
+            headers=_auth(),
+        )
+    assert res.status_code == 200
+    payload = res.json()
+    assert "items" in payload
+    assert len(payload["items"]) == 5
+    assert payload["has_more"] is True
+
+
+@pytest.mark.asyncio
+async def test_api_routes_still_accessible(tmp_path: Path) -> None:
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text(_policy_yaml(), encoding="utf-8")
+    app = create_api_app(
+        policy_path=str(policy_path),
+        state_persist=str(tmp_path / "state.jsonl"),
+        decisions_log=str(tmp_path / "decisions.jsonl"),
+        history_path=str(tmp_path / "policy_versions.jsonl"),
+    )
+    endpoints = [
+        "/api/v1/casura/incidents/stats",
+        "/api/v1/casura/incidents",
+        "/api/v1/aabb/leaderboard",
+        "/api/v1/are/report",
+        "/api/v1/competitive/latest",
+        "/api/v1/monitoring/opportunities",
+        "/api/v1/channels/health",
+        "/api/v1/persona/stats",
+        "/api/v1/threat-patterns",
+        "/api/v1/alert-rules",
+    ]
+    async with await _client(app) as client:
+        for path in endpoints:
+            res = await client.get(path, headers=_auth())
+            assert res.status_code == 200, f"{path} returned {res.status_code}"

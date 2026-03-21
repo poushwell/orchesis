@@ -46,12 +46,12 @@ def test_soul_md_cron_combination() -> None:
     assert any(item["ioc_id"] == "INJECT-001" for item in findings)
 
 
-def test_total_patterns_33() -> None:
-    assert TOTAL_PATTERNS == 33
+def test_total_patterns_50() -> None:
+    assert TOTAL_PATTERNS == 50
 
 
-def test_version_1_0() -> None:
-    assert INJECTION_SHIELD_VERSION == "1.0"
+def test_version_1_1() -> None:
+    assert INJECTION_SHIELD_VERSION == "1.1"
 
 
 def test_all_new_patterns_compile() -> None:

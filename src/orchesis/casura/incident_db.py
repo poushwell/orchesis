@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from orchesis.models.ecosystem import Finding, IncidentRecord
+
+try:
+    from orchesis.utils.log import get_logger  # type: ignore
+except Exception:  # pragma: no cover
+    def get_logger(name: str):
+        return logging.getLogger(name)
+
+
+logger = get_logger(__name__)
 
 
 class CASURAIncidentDB:
@@ -50,6 +62,7 @@ class CASURAIncidentDB:
             try:
                 payload = json.loads(self._index_file.read_text(encoding="utf-8"))
             except (OSError, ValueError):
+                logger.exception("Failed to load CASURA incidents from %s", self._index_file)
                 return
             if isinstance(payload, dict):
                 self._incidents = {
@@ -153,6 +166,82 @@ class CASURAIncidentDB:
             self._incidents[incident_id] = incident
             self._persist()
             return dict(incident)
+
+    @staticmethod
+    def to_canonical(incident: dict[str, Any]) -> IncidentRecord:
+        payload = incident if isinstance(incident, dict) else {}
+        created = str(payload.get("created_at", "") or "")
+        timestamp = 0.0
+        if created:
+            try:
+                dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                timestamp = dt.timestamp()
+            except ValueError:
+                timestamp = 0.0
+        severity_raw = payload.get("aiss_score", payload.get("severity", 0.0))
+        try:
+            severity = float(severity_raw)
+        except (TypeError, ValueError):
+            severity = 0.0
+        return IncidentRecord(
+            incident_id=str(payload.get("incident_id", "")),
+            title=str(payload.get("title", "")),
+            severity=severity,
+            category=str(payload.get("category", "prompt_injection")),
+            description=str(payload.get("description", "")),
+            source=str(payload.get("source", "casura")),
+            timestamp=timestamp,
+            tags=[str(item) for item in payload.get("tags", []) if isinstance(item, str)],
+            cve_ids=[str(item) for item in payload.get("cve_ids", []) if isinstance(item, str)],
+            affected_systems=[str(item) for item in payload.get("affected_systems", []) if isinstance(item, str)],
+            findings=[
+                Finding(
+                    title=str(item.get("title", "finding")),
+                    severity=str(item.get("severity", "MEDIUM")),
+                    category=str(item.get("category", "")),
+                    description=str(item.get("description", "")),
+                    source_module="casura",
+                    metadata=dict(item.get("metadata", {})) if isinstance(item.get("metadata"), dict) else {},
+                )
+                for item in payload.get("findings", [])
+                if isinstance(item, dict)
+            ],
+            status=str(payload.get("status", "open")),
+        )
+
+    @staticmethod
+    def from_canonical(record: IncidentRecord) -> dict[str, Any]:
+        created_at = ""
+        try:
+            created_at = datetime.fromtimestamp(float(record.timestamp), tz=timezone.utc).isoformat()
+        except (TypeError, ValueError, OSError):
+            created_at = ""
+        return {
+            "incident_id": str(record.incident_id),
+            "title": str(record.title),
+            "description": str(record.description),
+            "aiss_score": float(record.severity),
+            "severity": str(record.severity),
+            "created_at": created_at,
+            "framework_mappings": {},
+            "tags": [str(item) for item in record.tags],
+            "status": str(record.status),
+            "cve_ids": [str(item) for item in record.cve_ids],
+            "affected_systems": [str(item) for item in record.affected_systems],
+            "findings": [
+                {
+                    "finding_id": item.finding_id,
+                    "title": item.title,
+                    "severity": item.severity,
+                    "category": item.category,
+                    "description": item.description,
+                    "metadata": item.metadata,
+                }
+                for item in record.findings
+            ],
+        }
 
     def search(self, query: str, filters: dict | None = None) -> list[dict]:
         """Full-text search across incidents."""

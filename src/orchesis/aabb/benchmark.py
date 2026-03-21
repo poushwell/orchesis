@@ -4,9 +4,21 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+import logging
 import threading
 import uuid
 from typing import Any
+
+from orchesis.models.ecosystem import BenchmarkEntry
+
+try:
+    from orchesis.utils.log import get_logger  # type: ignore
+except Exception:  # pragma: no cover
+    def get_logger(name: str):
+        return logging.getLogger(name)
+
+
+logger = get_logger(__name__)
 
 
 class AABBBenchmark:
@@ -119,7 +131,39 @@ class AABBBenchmark:
             ranks = {row["agent_id"]: row["rank"] for row in leaderboard}
             result["rank"] = ranks.get(aid)
             self._results[run_id]["rank"] = result["rank"]
+        logger.debug("AABB run complete agent=%s run_id=%s score=%s", aid, run_id, result["overall_score"])
         return result
+
+    @staticmethod
+    def to_canonical(result: dict[str, Any]) -> BenchmarkEntry:
+        payload = result if isinstance(result, dict) else {}
+        return BenchmarkEntry(
+            agent_id=str(payload.get("agent_id", "")),
+            agent_name=str(payload.get("agent_name", payload.get("agent_id", ""))),
+            scores={str(k): float(v) for k, v in dict(payload.get("category_scores", {})).items()},
+            overall_score=float(payload.get("overall_score", 0.0) or 0.0),
+            metadata={
+                "run_id": payload.get("run_id"),
+                "timestamp": payload.get("timestamp"),
+                "passed": payload.get("passed"),
+                "failed": payload.get("failed"),
+                "rank": payload.get("rank"),
+            },
+        )
+
+    @staticmethod
+    def from_canonical(entry: BenchmarkEntry) -> dict[str, Any]:
+        return {
+            "agent_id": entry.agent_id,
+            "agent_name": entry.agent_name,
+            "overall_score": float(entry.overall_score),
+            "category_scores": dict(entry.scores),
+            "timestamp": datetime.fromtimestamp(entry.timestamp, tz=timezone.utc).isoformat(),
+            "run_id": entry.metadata.get("run_id"),
+            "passed": entry.metadata.get("passed", 0),
+            "failed": entry.metadata.get("failed", 0),
+            "rank": entry.metadata.get("rank"),
+        }
 
     def get_leaderboard(self) -> list[dict]:
         """Public leaderboard ranked by overall score."""

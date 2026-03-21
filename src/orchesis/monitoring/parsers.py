@@ -5,6 +5,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from orchesis.utils.log import get_logger
+
+logger = get_logger(__name__)
+
 
 class SocialMonitoringParsers:
     """Parse monitoring feeds for AI agent topics."""
@@ -93,6 +97,7 @@ class SocialMonitoringParsers:
 
     def extract_opportunities(self, items: list[dict]) -> list[dict]:
         """Find comment/engagement opportunities."""
+        logger.debug("extracting monitoring opportunities", extra={"component": "monitoring"})
         opportunities: list[dict] = []
         for item in items if isinstance(items, list) else []:
             if not isinstance(item, dict):

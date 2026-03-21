@@ -3,8 +3,20 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
 import threading
 from typing import Any
+
+from orchesis.models.ecosystem import ReliabilityReport, SLOTarget
+
+try:
+    from orchesis.utils.log import get_logger  # type: ignore
+except Exception:  # pragma: no cover
+    def get_logger(name: str):
+        return logging.getLogger(name)
+
+
+logger = get_logger(__name__)
 
 
 class AREFramework:
@@ -59,6 +71,7 @@ class AREFramework:
         with self._lock:
             self._slos[slo_name] = row
             self._sli_history.setdefault(slo_name, [])
+        logger.debug("Defined SLO name=%s sli=%s target=%s", slo_name, sli_name, float(target))
         return dict(row)
 
     def record_sli(self, name: str, value: float) -> None:
@@ -128,6 +141,36 @@ class AREFramework:
             "exhausted": exhausted_count,
             "healthy": len(entries) - exhausted_count,
         }
+
+    def get_reliability_report_canonical(self, agent_id: str = "") -> ReliabilityReport:
+        report = self.get_reliability_report()
+        slos = []
+        with self._lock:
+            for row in self._slos.values():
+                if not isinstance(row, dict):
+                    continue
+                slos.append(
+                    SLOTarget(
+                        name=str(row.get("name", "")),
+                        target=float(row.get("target", 0.99) or 0.99),
+                        window_hours=int(row.get("window_days", 30) or 30) * 24,
+                        metric=str(row.get("sli", "")),
+                    )
+                )
+        current_values = {
+            str(item.get("slo_name", "")): float(item.get("current", 0.0) or 0.0)
+            for item in report.get("slos", [])
+            if isinstance(item, dict)
+        }
+        exhausted = int(report.get("exhausted", 0) or 0)
+        total = max(1, int(report.get("total_slos", 0) or 0))
+        error_budget_remaining = max(0.0, 1.0 - (exhausted / float(total)))
+        return ReliabilityReport(
+            agent_id=str(agent_id or ""),
+            slos=slos,
+            current_values=current_values,
+            error_budget_remaining=round(error_budget_remaining, 6),
+        )
 
     def get_burn_rate_alert(self, slo_name: str) -> dict | None:
         """Alert if error budget burning too fast."""

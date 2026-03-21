@@ -9,33 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-class _CompatVersion(str):
-    """Version string compatible with legacy assertions."""
-
-    def __eq__(self, other: object) -> bool:
-        if str.__eq__(self, other):
-            return True
-        return str(other) == "1.0"
-
-
-class _CompatInt(int):
-    """Int value compatible with legacy TOTAL_PATTERNS checks."""
-
-    def __new__(cls, value: int, legacy: int | None = None):
-        obj = int.__new__(cls, value)
-        obj._legacy = legacy  # type: ignore[attr-defined]
-        return obj
-
-    def __eq__(self, other: object) -> bool:
-        if int.__eq__(self, other):
-            return True
-        legacy = getattr(self, "_legacy", None)
-        if legacy is None:
-            return False
-        return int(other) == legacy if isinstance(other, int) else False
-
-
-INJECTION_SHIELD_VERSION = _CompatVersion("1.1")
+INJECTION_SHIELD_VERSION = "1.1"
 
 INJECTION_SHIELD_PATTERNS: dict[str, list[str]] = {
     "prompt_override": [
@@ -131,7 +105,7 @@ OPT_IN_CATEGORIES = (
     "soul_pack_steganography",
 )
 
-TOTAL_PATTERNS = _CompatInt(50, legacy=33)
+TOTAL_PATTERNS = 50
 TOTAL_PATTERNS_DEFAULT_ON = 36
 TOTAL_PATTERNS_OPT_IN = 14
 

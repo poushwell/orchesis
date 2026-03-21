@@ -26,8 +26,8 @@ class NLCEPipelineState:
 def phase9_iacs(messages: list[dict], state: NLCEPipelineState) -> dict[str, Any]:
     """Phase 9: discourse coherence (IACS) computation."""
     iacs_result = compute_iacs_full(messages)
-    state.iacs = iacs_result["iacs"]
-    state.iacs_breakdown = iacs_result
+    state.iacs = float(iacs_result["iacs"])
+    state.iacs_breakdown = dict(iacs_result)
     return iacs_result
 
 

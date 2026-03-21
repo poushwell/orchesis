@@ -12,11 +12,14 @@ import sys
 from typing import Optional
 
 from orchesis import __version__
+from orchesis.utils.log import get_logger
 
 try:
     import uvicorn
 except ModuleNotFoundError:  # pragma: no cover
     uvicorn = None  # type: ignore[assignment]
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -72,9 +75,13 @@ def generate_self_signed_cert(output_dir: str | os.PathLike[str] | None = None) 
         )
         return str(cert_path), str(key_path)
     except ModuleNotFoundError:
-        pass
+        logger.debug("cryptography not installed; falling back to openssl", extra={"component": "serve"})
     except Exception:
-        pass
+        logger.warning(
+            "cryptography self-signed generation failed",
+            exc_info=True,
+            extra={"component": "serve"},
+        )
 
     openssl_cmd = [
         "openssl",
@@ -99,7 +106,11 @@ def generate_self_signed_cert(output_dir: str | os.PathLike[str] | None = None) 
         if completed.returncode == 0 and cert_path.exists() and key_path.exists():
             return str(cert_path), str(key_path)
     except Exception:
-        pass
+        logger.warning(
+            "openssl self-signed generation failed",
+            exc_info=True,
+            extra={"component": "serve"},
+        )
 
     raise RuntimeError(
         "Unable to generate self-signed cert. Install 'cryptography' or OpenSSL and retry."
@@ -151,6 +162,11 @@ def run_preflight(policy: str | None = None) -> bool:
             _ = load_policy(policy)
         return True
     except Exception:
+        logger.warning(
+            "preflight failed",
+            exc_info=True,
+            extra={"component": "serve"},
+        )
         return False
 
 
@@ -176,7 +192,10 @@ def start_server(config: ServeConfig) -> None:
 
     print(build_startup_banner(config, tls_info))
     if tls_info == "disabled":
-        print("WARNING: TLS disabled; running plain HTTP.", file=sys.stderr)
+        logger.warning(
+            "TLS disabled; running plain HTTP.",
+            extra={"component": "serve"},
+        )
 
     if uvicorn is None:  # pragma: no cover
         raise RuntimeError("uvicorn is not installed. Run: pip install orchesis[server]")
@@ -184,6 +203,10 @@ def start_server(config: ServeConfig) -> None:
     api_module = importlib.import_module("orchesis.api")
     app_target = "orchesis.api:app"
     if hasattr(api_module, "app"):
+        logger.info(
+            "starting uvicorn with app target",
+            extra={"component": "serve"},
+        )
         uvicorn.run(
             app_target,
             host=config.host,
@@ -197,6 +220,10 @@ def start_server(config: ServeConfig) -> None:
 
     create_api_app = getattr(api_module, "create_api_app", None)
     if callable(create_api_app):
+        logger.info(
+            "starting uvicorn with callable app",
+            extra={"component": "serve"},
+        )
         app = create_api_app(policy_path=(config.policy or "policy.yaml"))
         uvicorn.run(
             app,

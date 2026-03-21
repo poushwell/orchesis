@@ -11,7 +11,7 @@ import hashlib
 import threading
 from contextlib import asynccontextmanager
 from collections import defaultdict
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -148,6 +148,34 @@ from orchesis.whatsapp_expiry import WhatsAppExpiryTracker
 from orchesis.webchat_inject import WebChatInjector
 from orchesis.h43_quantum import H43QuantumMVE
 from orchesis import __version__
+
+
+@dataclass
+class PaginatedResponse:
+    items: list[Any]
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+
+
+def paginate(
+    items: list[Any],
+    limit: int = 100,
+    offset: int = 0,
+    max_limit: int = 1000,
+) -> PaginatedResponse:
+    safe_limit = max(1, min(int(limit), int(max_limit)))
+    safe_offset = max(0, int(offset))
+    total = len(items)
+    page = items[safe_offset : safe_offset + safe_limit]
+    return PaginatedResponse(
+        items=page,
+        total=total,
+        limit=safe_limit,
+        offset=safe_offset,
+        has_more=(safe_offset + safe_limit) < total,
+    )
 
 
 def create_api_app(
@@ -819,6 +847,8 @@ def create_api_app(
         provided = authorization.split(" ", 1)[1].strip()
         if provided != expected:
             raise HTTPException(status_code=401, detail={"error": "unauthorized"})
+
+    app.state.require_auth = _require_auth
 
     def _audit_engine() -> AuditEngine:
         return AuditEngine(app.state.decisions_log)
@@ -2671,10 +2701,17 @@ def create_api_app(
         return {"incidents": rows, "total": len(rows)}
 
     @app.get("/api/v1/casura/incidents")
-    def casura_incidents(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    def casura_incidents(
+        limit: int = 100,
+        offset: int = 0,
+        paginated: bool = False,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
         _require_auth(authorization)
         rows = app.state.casura_db.search(query="")
-        return {"incidents": rows, "total": len(rows)}
+        if not paginated:
+            return {"incidents": rows, "total": len(rows)}
+        return asdict(paginate(rows, limit=limit, offset=offset, max_limit=1000))
 
     @app.post("/api/v1/casura/incidents")
     def casura_create_incident(
@@ -3441,7 +3478,12 @@ def create_api_app(
         }
 
     @app.get("/api/v1/agents")
-    def get_agents(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    def get_agents(
+        limit: int = 100,
+        offset: int = 0,
+        paginated: bool = False,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
         _require_auth(authorization)
         _refresh_current_version()
         registry = app.state.current_version.registry
@@ -3460,7 +3502,12 @@ def create_api_app(
                     "rate_limit_per_minute": identity.rate_limit_per_minute,
                 }
             )
-        return {"agents": agents, "default_tier": registry.default_tier.name.lower()}
+        if not paginated:
+            return {"agents": agents, "default_tier": registry.default_tier.name.lower()}
+        return {
+            **asdict(paginate(agents, limit=limit, offset=offset, max_limit=1000)),
+            "default_tier": registry.default_tier.name.lower(),
+        }
 
     @app.get("/api/v1/agents/graph")
     def agents_graph(authorization: str | None = Header(default=None)) -> dict[str, Any]:

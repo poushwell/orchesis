@@ -16,6 +16,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from orchesis.utils.log import get_logger
+
+logger = get_logger(__name__)
+
 
 class PersonaGuardian:
     ZENITY_PATTERN_DESC = "SOUL.md modified + new cron simultaneously - possible C2 backdoor"
@@ -91,6 +95,7 @@ class PersonaGuardian:
 
     def record_cron_event(self, cron_expression: str, source: str = "unknown") -> dict[str, Any]:
         """Record a new cron job creation event."""
+        logger.debug("recording cron event", extra={"component": "persona_guardian"})
         event = {
             "cron": cron_expression,
             "source": source,
@@ -156,6 +161,10 @@ class PersonaGuardian:
             }
             with self._lock:
                 self._alerts.append(alert)
+            logger.warning(
+                "zenity pattern detected",
+                extra={"component": "persona_guardian"},
+            )
             return alert
         return None
 
