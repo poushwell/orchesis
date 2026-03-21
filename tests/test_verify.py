@@ -9,6 +9,7 @@ from unittest.mock import patch
 from orchesis.verify import (
     Severity,
     check_config_schema_injection,
+    check_openclaw_compatibility,
     check_openclaw_proxy_routing,
     check_proxy_connectivity,
     run_all_checks,
@@ -124,3 +125,53 @@ class TestRunAllChecks:
             report = run_all_checks(openclaw_config_path=config_file)
 
         assert report.results[0].name == "config_schema_injection"
+
+
+class TestOpenClawCompatibility:
+    def test_verify_openclaw_compat_pass(self, tmp_path: Path) -> None:
+        policy = {
+            "threat_intel": {
+                "default_action": "block",
+                "disabled_threats": ["ORCH-TA-002"],
+            },
+            "loop_detection": {"openclaw_memory_whitelist": True},
+        }
+        policy_file = tmp_path / "orchesis.yaml"
+        policy_file.write_text(json.dumps(policy), encoding="utf-8")
+
+        result = check_openclaw_compatibility(policy_file)
+        assert result.severity == Severity.OK
+        assert "OpenClaw-compatible" in result.message
+
+    def test_verify_openclaw_compat_fail(self, tmp_path: Path) -> None:
+        policy = {
+            "threat_intel": {
+                "default_action": "block",
+                "disabled_threats": [],
+            },
+            "loop_detection": {"openclaw_memory_whitelist": True},
+        }
+        policy_file = tmp_path / "orchesis.yaml"
+        policy_file.write_text(json.dumps(policy), encoding="utf-8")
+
+        result = check_openclaw_compatibility(policy_file)
+        assert result.severity == Severity.CRITICAL
+        assert "issue" in result.message.lower()
+        assert result.detail is not None
+        assert "ORCH-TA-002" in result.detail
+
+    def test_verify_openclaw_loop_whitelist(self, tmp_path: Path) -> None:
+        policy = {
+            "threat_intel": {
+                "default_action": "warn",
+                "disabled_threats": [],
+            },
+            "loop_detection": {"openclaw_memory_whitelist": False},
+        }
+        policy_file = tmp_path / "orchesis.yaml"
+        policy_file.write_text(json.dumps(policy), encoding="utf-8")
+
+        result = check_openclaw_compatibility(policy_file)
+        assert result.severity == Severity.WARNING
+        assert result.detail is not None
+        assert "whitelist" in result.detail.lower()

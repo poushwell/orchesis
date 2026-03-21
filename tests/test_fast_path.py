@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from orchesis.fast_path import (
+    FastPathDecision,
     FRAMEWORK_TRUST,
     MANDATORY_PHASES,
     SKIPPABLE_PHASES,
     FastPathEvaluator,
     TrustLevel,
 )
+from orchesis.proxy import LLMHTTPProxy
 
 
 def test_untrusted_no_skip() -> None:
@@ -83,3 +87,46 @@ def test_decision_has_reason() -> None:
     unknown = FastPathEvaluator().evaluate(headers={})
     assert basic.reason
     assert unknown.reason
+
+
+def test_fast_path_integrated() -> None:
+    proxy = LLMHTTPProxy.__new__(LLMHTTPProxy)
+    proxy._fast_path = FastPathEvaluator()
+    proxy._fast_path_mandatory_phases = set(MANDATORY_PHASES)
+    ctx = SimpleNamespace(
+        handler=SimpleNamespace(headers={"user-agent": "OpenClaw/1.0"}),
+        body={},
+        skip_phases=set(),
+        proc_result={"cost": 0.0},
+    )
+    proxy._compute_fast_path_skip_phases(ctx)  # noqa: SLF001
+    assert ctx.proc_result.get("fast_path") is True
+    assert ctx.proc_result.get("fast_path_framework") == "openclaw"
+    assert len(ctx.skip_phases) > 0
+
+
+def test_mandatory_not_skipped_in_proxy() -> None:
+    class _FakeFastPath:
+        def evaluate(self, headers=None, body=None):  # noqa: ANN001, ANN002
+            _ = (headers, body)
+            return FastPathDecision(
+                fast_path=True,
+                trust_level=TrustLevel.BASIC,
+                skip_phases=["policy", "secrets", "budget", "upstream", "experiment"],
+                framework="openclaw",
+                reason="fake",
+            )
+
+    proxy = LLMHTTPProxy.__new__(LLMHTTPProxy)
+    proxy._fast_path = _FakeFastPath()
+    proxy._fast_path_mandatory_phases = set(MANDATORY_PHASES)
+    ctx = SimpleNamespace(
+        handler=SimpleNamespace(headers={"user-agent": "OpenClaw/1.0"}),
+        body={},
+        skip_phases=set(),
+        proc_result={"cost": 0.0},
+    )
+    proxy._compute_fast_path_skip_phases(ctx)  # noqa: SLF001
+    for mandatory in MANDATORY_PHASES:
+        assert mandatory not in ctx.skip_phases
+    assert "experiment" in ctx.skip_phases

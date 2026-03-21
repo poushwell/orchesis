@@ -208,6 +208,57 @@ class OrchesisVerifier:
             return {"status": "PASS", "message": f"{section} is enabled"}
         return {"status": "WARN", "message": f"{section} not enabled in policy"}
 
+    def _check_openclaw_compat(self, policy_path: str) -> dict[str, Any]:
+        """Check if policy is compatible with OpenClaw agents."""
+        import yaml
+
+        p = Path(policy_path)
+        if not p.exists():
+            return {"status": "WARN", "message": "No policy file - OpenClaw compatibility not checked"}
+        try:
+            cfg = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        except Exception as error:
+            return {"status": "WARN", "message": f"Could not parse policy: {error}"}
+        if not isinstance(cfg, dict):
+            return {"status": "WARN", "message": "Policy format invalid for OpenClaw compatibility checks"}
+
+        issues: list[str] = []
+        warnings: list[str] = []
+
+        threat_config = cfg.get("threat_intel", {})
+        if isinstance(threat_config, dict):
+            disabled = threat_config.get("disabled_threats", [])
+            disabled_list = [str(item) for item in disabled] if isinstance(disabled, list) else []
+            default_action = str(threat_config.get("default_action", "block")).strip().lower() or "block"
+            if "ORCH-TA-002" not in disabled_list and default_action == "block":
+                issues.append(
+                    "ORCH-TA-002 is active with block action. This can cause false positives for OpenClaw tool calls. "
+                    "Fix: add ORCH-TA-002 to threat_intel.disabled_threats or set threat_intel.default_action: warn."
+                )
+
+        loop_config = cfg.get("loop_detection", {})
+        if isinstance(loop_config, dict):
+            if loop_config.get("openclaw_memory_whitelist", True) is False:
+                warnings.append(
+                    "loop_detection.openclaw_memory_whitelist is disabled. This can trigger false loop warnings "
+                    "for OpenClaw memory reads."
+                )
+
+        if issues:
+            details = issues + warnings
+            return {
+                "status": "FAIL",
+                "message": f"Found {len(issues)} OpenClaw compatibility issue(s)",
+                "details": details,
+            }
+        if warnings:
+            return {
+                "status": "WARN",
+                "message": "OpenClaw compatibility warnings found",
+                "details": warnings,
+            }
+        return {"status": "PASS", "message": "Policy is OpenClaw-compatible"}
+
     def format_report(self, result: dict[str, Any]) -> str:
         lines = ["\norchesis verify\n" + "-" * 40]
         icons = {"PASS": "OK", "FAIL": "FAIL", "WARN": "WARN"}
@@ -387,15 +438,94 @@ def check_openclaw_proxy_routing(openclaw_config_path: Path | None = None) -> Ch
     )
 
 
+def check_openclaw_compatibility(orchesis_config_path: Path | None = None) -> CheckResult:
+    """Validate OpenClaw-related compatibility flags in Orchesis policy."""
+    import yaml
+
+    candidates = []
+    if orchesis_config_path is not None:
+        candidates.append(orchesis_config_path)
+    candidates.extend([Path("orchesis.yaml"), Path("policy.yaml")])
+    policy_file = next((path for path in candidates if path.exists()), None)
+    if policy_file is None:
+        return CheckResult(
+            name="openclaw_compatibility",
+            severity=Severity.WARNING,
+            message="Orchesis policy not found - cannot verify OpenClaw compatibility",
+            fix="Create orchesis.yaml with threat_intel and loop_detection sections.",
+        )
+
+    try:
+        cfg = yaml.safe_load(policy_file.read_text(encoding="utf-8")) or {}
+    except Exception as error:
+        return CheckResult(
+            name="openclaw_compatibility",
+            severity=Severity.WARNING,
+            message=f"Could not parse policy for OpenClaw compatibility: {error}",
+        )
+    if not isinstance(cfg, dict):
+        return CheckResult(
+            name="openclaw_compatibility",
+            severity=Severity.WARNING,
+            message="Policy format invalid for OpenClaw compatibility checks",
+        )
+
+    issues: list[str] = []
+    warnings: list[str] = []
+
+    threat_config = cfg.get("threat_intel", {})
+    if isinstance(threat_config, dict):
+        disabled = threat_config.get("disabled_threats", [])
+        disabled_list = [str(item) for item in disabled] if isinstance(disabled, list) else []
+        default_action = str(threat_config.get("default_action", "block")).strip().lower() or "block"
+        if "ORCH-TA-002" not in disabled_list and default_action == "block":
+            issues.append(
+                "ORCH-TA-002 is active with block action and may false-positive OpenClaw tool calls."
+            )
+
+    loop_config = cfg.get("loop_detection", {})
+    if isinstance(loop_config, dict):
+        if loop_config.get("openclaw_memory_whitelist", True) is False:
+            warnings.append(
+                "openclaw_memory_whitelist is disabled; memory read loops may be incorrectly flagged."
+            )
+
+    if issues:
+        details = "; ".join(issues + warnings)
+        return CheckResult(
+            name="openclaw_compatibility",
+            severity=Severity.CRITICAL,
+            message=f"Found {len(issues)} OpenClaw compatibility issue(s)",
+            detail=details,
+            fix=(
+                "Set threat_intel.disabled_threats to include ORCH-TA-002 or set "
+                "threat_intel.default_action: warn."
+            ),
+        )
+    if warnings:
+        return CheckResult(
+            name="openclaw_compatibility",
+            severity=Severity.WARNING,
+            message="OpenClaw compatibility warning(s) found",
+            detail="; ".join(warnings),
+            fix="Set loop_detection.openclaw_memory_whitelist: true.",
+        )
+    return CheckResult(
+        name="openclaw_compatibility",
+        severity=Severity.OK,
+        message="Policy is OpenClaw-compatible",
+    )
+
+
 def run_all_checks(
     openclaw_config_path: Path | None = None,
     orchesis_config_path: Path | None = None,
     proxy_host: str = "127.0.0.1",
     proxy_port: int = 8080,
 ) -> VerifyReport:
-    del orchesis_config_path
     report = VerifyReport()
     report.add(check_config_schema_injection(openclaw_config_path))
     report.add(check_proxy_connectivity(proxy_host=proxy_host, proxy_port=proxy_port))
     report.add(check_openclaw_proxy_routing(openclaw_config_path=openclaw_config_path))
+    report.add(check_openclaw_compatibility(orchesis_config_path=orchesis_config_path))
     return report

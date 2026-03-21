@@ -1838,6 +1838,7 @@ class _RequestContext:
     healing_pre_score: float = 0.0
     thompson_category: str = ""
     thompson_selected_model: str = ""
+    skip_phases: set[str] = field(default_factory=set)
 
 
 class LLMHTTPProxy:
@@ -1857,6 +1858,23 @@ class LLMHTTPProxy:
                 self._policy = load_policy(policy_path)
             except Exception:
                 self._policy = {}
+        self._fast_path = None
+        self._fast_path_mandatory_phases = {
+            "parse",
+            "policy",
+            "secrets",
+            "budget",
+            "upstream",
+            "post_upstream",
+            "send",
+        }
+        try:
+            from orchesis.fast_path import FastPathEvaluator, MANDATORY_PHASES as _FAST_PATH_MANDATORY_PHASES
+
+            self._fast_path = FastPathEvaluator(policy=self._policy)
+            self._fast_path_mandatory_phases = set(_FAST_PATH_MANDATORY_PHASES)
+        except ImportError:
+            self._fast_path = None
         self._openclaw_safe_policy = apply_openclaw_preset(self._policy)
         safe_ti_cfg = OPENCLAW_SAFE_POLICY.get("threat_intel", {})
         disabled = safe_ti_cfg.get("disabled_threats", []) if isinstance(safe_ti_cfg, dict) else []
@@ -3174,6 +3192,8 @@ class LLMHTTPProxy:
         extra_attrs: dict[str, str | int | float | bool] | None = None,
     ) -> bool:
         """Run a phase and optionally emit a span. Returns phase result."""
+        if phase_name in getattr(ctx, "skip_phases", set()):
+            return True
         if self._span_emitter is None or ctx.trace_ctx is None:
             return phase_fn(ctx)
         parent_id = ctx.root_span.span_id if ctx.root_span else None
@@ -3226,6 +3246,28 @@ class LLMHTTPProxy:
             if not ctx.session_id:
                 ctx.session_id = parsed_session_id.strip() or "unknown"
         return True
+
+    def _compute_fast_path_skip_phases(self, ctx: _RequestContext) -> None:
+        skip_phases: set[str] = set()
+        if self._fast_path is not None:
+            headers_dict = self._normalize_header_map(ctx.handler.headers)
+            fp_decision = self._fast_path.evaluate(headers=headers_dict, body=ctx.body)
+            if bool(getattr(fp_decision, "fast_path", False)):
+                skip_phases = set(getattr(fp_decision, "skip_phases", []) or [])
+                skip_phases -= set(self._fast_path_mandatory_phases)
+                _HTTP_PROXY_LOGGER.debug(
+                    "Fast path enabled: skipping %d phases (framework=%s trust=%s)",
+                    len(skip_phases),
+                    str(getattr(fp_decision, "framework", "")),
+                    str(getattr(getattr(fp_decision, "trust_level", ""), "value", "")),
+                )
+            ctx.proc_result["fast_path"] = bool(getattr(fp_decision, "fast_path", False))
+            ctx.proc_result["fast_path_framework"] = str(getattr(fp_decision, "framework", ""))
+            ctx.proc_result["fast_path_trust"] = str(
+                getattr(getattr(fp_decision, "trust_level", ""), "value", "")
+            )
+        ctx.skip_phases = skip_phases
+        ctx.proc_result["skip_phases"] = sorted(skip_phases)
 
     def _phase_experiment(self, ctx: _RequestContext) -> bool:
         """Assign A/B variant and override model if needed."""
@@ -5441,6 +5483,7 @@ class LLMHTTPProxy:
                     },
                 )
                 return
+            self._compute_fast_path_skip_phases(ctx)
             if not self._phase_parse(ctx):
                 return
             if self._span_emitter and ctx.trace_ctx:
