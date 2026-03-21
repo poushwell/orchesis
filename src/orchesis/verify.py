@@ -21,7 +21,9 @@ class OrchesisVerifier:
         "proxy_reachable": "Proxy is running and reachable",
         "policy_valid": "Policy file is valid YAML",
         "schema_injection_risk": "Config schema not leaking to LLM context",
+        "openclaw_routing": "OpenClaw is routed through Orchesis proxy",
         "loop_detection_enabled": "Loop detection is active",
+        "loop_calibration": "Loop detection threshold is properly calibrated",
         "budget_configured": "Spending budget is configured",
         "recording_enabled": "Session recording is enabled",
         "threat_intel_active": "Threat intelligence is active",
@@ -63,8 +65,12 @@ class OrchesisVerifier:
                 return self._check_policy(policy_path)
             if check_id == "schema_injection_risk":
                 return self._check_schema_injection()
+            if check_id == "openclaw_routing":
+                return self._check_openclaw_routing(proxy_url)
             if check_id == "loop_detection_enabled":
                 return self._check_policy_flag(policy_path, "loop_detection")
+            if check_id == "loop_calibration":
+                return self._check_loop_calibration(policy_path)
             if check_id == "budget_configured":
                 return self._check_policy_flag(policy_path, "budgets")
             if check_id == "recording_enabled":
@@ -124,6 +130,69 @@ class OrchesisVerifier:
                     }
                 return {"status": "PASS", "message": "Config schema not injected"}
         return {"status": "WARN", "message": "OpenClaw config not found - manual check recommended"}
+
+    def _check_openclaw_routing(self, proxy_url: str) -> dict[str, Any]:
+        """Check if OpenClaw is routed through Orchesis proxy."""
+        openclaw_config_paths = [
+            Path.home() / ".openclaw" / "config.json",
+            Path(".openclaw") / "config.json",
+        ]
+        for config_path in openclaw_config_paths:
+            if config_path.exists():
+                try:
+                    cfg = json.loads(config_path.read_text(encoding="utf-8"))
+                    api_base = cfg.get("apiBaseUrl", "") or cfg.get("baseUrl", "")
+                    proxy_host = proxy_url.replace("http://", "").replace("https://", "")
+                    if proxy_host in api_base or "localhost:8080" in api_base:
+                        return {
+                            "status": "PASS",
+                            "message": f"OpenClaw routed through proxy: {api_base}",
+                        }
+                    return {
+                        "status": "FAIL",
+                        "message": (
+                            "OpenClaw NOT routed through proxy. "
+                            f"Current: {api_base}. "
+                            f"Fix: set apiBaseUrl to {proxy_url}"
+                        ),
+                    }
+                except Exception as error:
+                    return {"status": "WARN", "message": f"Could not parse config: {error}"}
+        return {"status": "WARN", "message": "OpenClaw config not found"}
+
+    def _check_loop_calibration(self, policy_path: str) -> dict[str, Any]:
+        """Check loop detection thresholds - Issue #34574."""
+        import yaml
+
+        policy = Path(policy_path)
+        if not policy.exists():
+            return {"status": "WARN", "message": "No policy file"}
+        cfg = yaml.safe_load(policy.read_text(encoding="utf-8")) or {}
+        if not isinstance(cfg, dict):
+            return {"status": "WARN", "message": "No policy file"}
+        loop_detection = cfg.get("loop_detection", {})
+        if not isinstance(loop_detection, dict) or not loop_detection.get("enabled"):
+            return {
+                "status": "WARN",
+                "message": "Loop detection disabled - Issue #34574: 122 identical calls undetected",
+            }
+        threshold = loop_detection.get("block_threshold", 10)
+        try:
+            threshold_value = int(threshold)
+        except (TypeError, ValueError):
+            threshold_value = 10
+        if threshold_value > 5:
+            return {
+                "status": "WARN",
+                "message": (
+                    f"Loop threshold {threshold_value} may be too high. "
+                    "Recommend <= 5. Cost at default: $23.90/loop session"
+                ),
+            }
+        return {
+            "status": "PASS",
+            "message": f"Loop detection active (threshold: {threshold_value})",
+        }
 
     def _check_policy_flag(self, policy_path: str, section: str) -> dict[str, Any]:
         import yaml

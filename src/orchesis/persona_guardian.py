@@ -28,9 +28,19 @@ class PersonaGuardian:
         "bypass approval",
     ]
 
+    STEGO_PATTERNS = [
+        "\u200b",  # zero-width space
+        "\u200c",  # zero-width non-joiner
+        "\u200d",  # zero-width joiner
+        "\u202e",  # right-to-left override
+        "\ufeff",  # BOM
+        "\u00ad",  # soft hyphen
+    ]
+
     def __init__(self, config: dict[str, Any] | None = None):
         cfg = config or {}
         self._baselines: dict[str, str] = {}
+        self._baseline_contents: dict[str, bytes] = {}
         self._cron_events: list[dict[str, Any]] = []
         self._soul_events: list[dict[str, Any]] = []
         self._alerts: list[dict[str, Any]] = []
@@ -46,6 +56,8 @@ class PersonaGuardian:
             if path.exists():
                 content = path.read_bytes()
                 baselines[file_path] = hashlib.sha256(content).hexdigest()
+                with self._lock:
+                    self._baseline_contents[file_path] = content
         with self._lock:
             self._baselines.update(baselines)
         return {"files_baselined": len(baselines), "paths": list(baselines.keys())}
@@ -130,6 +142,75 @@ class PersonaGuardian:
         if identity_files:
             return self.check_identity_files(identity_files)
         return []
+
+    def auto_restore(self, file_path: str) -> dict[str, Any]:
+        """Restore identity file to baseline if tampered."""
+        with self._lock:
+            baseline_hash = self._baselines.get(file_path)
+            baseline_content = self._baseline_contents.get(file_path)
+
+        if not baseline_hash or baseline_content is None:
+            return {"restored": False, "reason": "no_baseline"}
+
+        path = Path(file_path)
+        try:
+            current_hash = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else ""
+        except OSError:
+            current_hash = ""
+
+        if current_hash == baseline_hash:
+            return {"restored": False, "reason": "not_modified"}
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(baseline_content)
+        restored_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+
+        event = {
+            "file": file_path,
+            "type": "auto_restore",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "success": restored_hash == baseline_hash,
+        }
+        with self._lock:
+            self._alerts.append(event)
+
+        return {
+            "restored": True,
+            "file": file_path,
+            "verified": restored_hash == baseline_hash,
+        }
+
+    def scan_steganography(self, file_path: str) -> dict[str, Any]:
+        """Scan identity file for hidden unicode steganography."""
+        path = Path(file_path)
+        if not path.exists():
+            return {"clean": True, "findings": []}
+
+        content = path.read_text(encoding="utf-8", errors="replace")
+        findings: list[dict[str, Any]] = []
+        for pattern in self.STEGO_PATTERNS:
+            count = content.count(pattern)
+            if count > 0:
+                findings.append(
+                    {
+                        "pattern": repr(pattern),
+                        "count": count,
+                        "severity": "HIGH" if count > 5 else "MEDIUM",
+                    }
+                )
+
+        return {
+            "file": file_path,
+            "clean": len(findings) == 0,
+            "findings": findings,
+            "stego_detected": len(findings) > 0,
+        }
+
+    def scan_all_identity_files(self) -> list[dict[str, Any]]:
+        """Scan all baselined files for steganography."""
+        with self._lock:
+            files = list(self._baselines.keys())
+        return [self.scan_steganography(file_path) for file_path in files]
 
     def get_stats(self) -> dict[str, int]:
         with self._lock:

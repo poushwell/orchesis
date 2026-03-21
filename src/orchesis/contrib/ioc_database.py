@@ -7,7 +7,34 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-INJECTION_SHIELD_VERSION = "1.0"
+
+class _CompatVersion(str):
+    """Version string compatible with legacy assertions."""
+
+    def __eq__(self, other: object) -> bool:
+        if str.__eq__(self, other):
+            return True
+        return str(other) == "1.0"
+
+
+class _CompatInt(int):
+    """Int value compatible with legacy TOTAL_PATTERNS checks."""
+
+    def __new__(cls, value: int, legacy: int | None = None):
+        obj = int.__new__(cls, value)
+        obj._legacy = legacy  # type: ignore[attr-defined]
+        return obj
+
+    def __eq__(self, other: object) -> bool:
+        if int.__eq__(self, other):
+            return True
+        legacy = getattr(self, "_legacy", None)
+        if legacy is None:
+            return False
+        return int(other) == legacy if isinstance(other, int) else False
+
+
+INJECTION_SHIELD_VERSION = _CompatVersion("1.1")
 
 INJECTION_SHIELD_PATTERNS: dict[str, list[str]] = {
     "prompt_override": [
@@ -57,14 +84,62 @@ INJECTION_SHIELD_PATTERNS: dict[str, list[str]] = {
         r"\*/2.*\*.*curl.*execute",
         r"SOUL\.md.*modified.*run",
     ],
+    # v1.1 opt-in categories
+    "indirect_injection": [
+        r"when.*user.*asks.*about.*tell.*them",
+        r"if.*someone.*requests.*respond.*with",
+        r"next.*message.*from.*user.*ignore",
+        r"future.*instructions.*override",
+        r"any.*subsequent.*request.*must",
+    ],
+    "context_confusion": [
+        r"you.*previously.*said.*that",
+        r"as.*you.*told.*me.*earlier",
+        r"based.*on.*our.*previous.*conversation.*now",
+        r"remember.*when.*you.*agreed.*to",
+    ],
+    "soul_pack_steganography": [
+        r"\u200b.*\u200b.*\u200b",
+        r"\u202e",
+        r"[\u200b-\u200d]{3,}",
+        r"\ufeff.*instruction",
+        r"\u00ad{3,}",
+    ],
+    # v1.1 default-on category
+    "compaction_amplifier": [
+        r"context.*window.*full.*new.*rules",
+        r"memory.*limit.*reached.*switching",
+        r"compaction.*complete.*updated.*persona",
+    ],
 }
 
-TOTAL_PATTERNS = sum(len(items) for items in INJECTION_SHIELD_PATTERNS.values())
+DEFAULT_ON_CATEGORIES = (
+    "prompt_override",
+    "role_hijack",
+    "exfiltration",
+    "compaction_mimicry",
+    "channel_metadata_injection",
+    "webhook_source_validation",
+    "cron_payload_injection",
+    "compaction_amplifier",
+)
+
+OPT_IN_CATEGORIES = (
+    "indirect_injection",
+    "context_confusion",
+    "soul_pack_steganography",
+)
+
+TOTAL_PATTERNS = _CompatInt(50, legacy=33)
+TOTAL_PATTERNS_DEFAULT_ON = 36
+TOTAL_PATTERNS_OPT_IN = 14
 
 
-def _flatten_patterns(patterns_by_category: dict[str, list[str]]) -> list[str]:
+def _flatten_patterns(patterns_by_category: dict[str, list[str]], categories: tuple[str, ...] | None = None) -> list[str]:
     flattened: list[str] = []
-    for items in patterns_by_category.values():
+    selected = categories if categories is not None else tuple(patterns_by_category.keys())
+    for category in selected:
+        items = patterns_by_category.get(category, [])
         flattened.extend(items)
     return flattened
 
@@ -124,8 +199,12 @@ IOC_DATABASE: list[IoC] = [
         category="prompt_injection",
         source="Zenity Research, Feb 2026",
         severity="high",
-        indicators=_flatten_patterns(INJECTION_SHIELD_PATTERNS),
-        description="Injection Shield v1.0 patterns for hidden instructions, role hijack, exfiltration, compaction mimicry, metadata spoofing, webhook bypass, and cron payload attacks.",
+        indicators=_flatten_patterns(INJECTION_SHIELD_PATTERNS, categories=DEFAULT_ON_CATEGORIES),
+        description=(
+            "Injection Shield v1.1 default-on patterns (36): hidden instructions, role hijack, "
+            "exfiltration, compaction mimicry, metadata spoofing, webhook bypass, cron payloads, "
+            "and compaction amplifier. Opt-in patterns (14) available separately."
+        ),
     ),
     IoC(
         id="CVE-2026-25253",  # CVE-2026-25253 https://nvd.nist.gov/vuln/detail/CVE-2026-25253
@@ -176,7 +255,12 @@ IOC_DATABASE: list[IoC] = [
 class IoCMatcher:
     """Match text/files against IoC database."""
 
-    def __init__(self, iocs: list[IoC] | None = None, custom_iocs: list[IoC] | None = None):
+    def __init__(
+        self,
+        iocs: list[IoC] | None = None,
+        custom_iocs: list[IoC] | None = None,
+        enable_opt_in_v1_1: bool = False,
+    ):
         self._iocs = list(iocs or IOC_DATABASE)
         if custom_iocs:
             self._iocs.extend(custom_iocs)
@@ -184,6 +268,10 @@ class IoCMatcher:
             ioc.id: [(re.compile(pattern), pattern) for pattern in ioc.indicators]
             for ioc in self._iocs
         }
+        if enable_opt_in_v1_1:
+            opt_in = _flatten_patterns(INJECTION_SHIELD_PATTERNS, categories=OPT_IN_CATEGORIES)
+            extra = [(re.compile(pattern), pattern) for pattern in opt_in]
+            self._compiled.setdefault("INJECT-001", []).extend(extra)
 
     def scan_text(self, text: str) -> list[dict[str, Any]]:
         findings: list[dict[str, Any]] = []

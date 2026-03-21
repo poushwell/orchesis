@@ -146,6 +146,7 @@ from orchesis.insights import OrchesisInsights
 from orchesis.channel_monitor import ChannelHealthMonitor
 from orchesis.whatsapp_expiry import WhatsAppExpiryTracker
 from orchesis.webchat_inject import WebChatInjector
+from orchesis.h43_quantum import H43QuantumMVE
 from orchesis import __version__
 
 
@@ -434,6 +435,7 @@ def create_api_app(
     app.state.orchesis_insights = OrchesisInsights()
     app.state.channel_monitor = ChannelHealthMonitor()
     app.state.webchat_injector = WebChatInjector()
+    app.state.h43_quantum = H43QuantumMVE()
     app.state.whatsapp_expiry = WhatsAppExpiryTracker()
     app.state.notifications: list[dict[str, Any]] = []
     app.state.notifications_lock = threading.Lock()
@@ -2893,6 +2895,34 @@ def create_api_app(
     ) -> dict[str, Any]:
         _require_auth(authorization)
         return app.state.persona_guardian.get_stats()
+
+    @app.post("/api/v1/persona/restore/{file_path:path}")
+    def persona_restore(
+        file_path: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.persona_guardian.auto_restore(str(file_path or ""))
+
+    @app.get("/api/v1/persona/steganography")
+    def persona_steganography(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        results = app.state.persona_guardian.scan_all_identity_files()
+        return {"results": results, "count": len(results)}
+
+    @app.post("/api/v1/persona/steganography/scan")
+    def persona_steganography_scan(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        file_path = str(payload.get("file_path", "") or "").strip()
+        if not file_path:
+            raise HTTPException(status_code=400, detail={"error": "file_path is required"})
+        return app.state.persona_guardian.scan_steganography(file_path)
 
     @app.post("/api/v1/are/slo")
     def are_define_slo(
@@ -5922,6 +5952,31 @@ def create_api_app(
         response = dict(response_payload) if isinstance(response_payload, dict) else dict(payload)
         injected = app.state.webchat_injector.inject_into_response(session_id, response)
         return {"session_id": session_id, "response": injected}
+
+    @app.post("/api/v1/h43/trial")
+    def h43_record_trial(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        order = str(payload.get("order", "") or "")
+        if order not in {"security_first", "task_first"}:
+            raise HTTPException(status_code=400, detail={"error": "order must be security_first or task_first"})
+        security_score = float(payload.get("security_score", 0.0))
+        task_score = float(payload.get("task_score", 0.0))
+        trial = app.state.h43_quantum.record_trial(order=order, security_score=security_score, task_score=task_score)
+        return {"ok": True, "trial": trial}
+
+    @app.get("/api/v1/h43/results")
+    def h43_results(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.h43_quantum.compute_delta_bar()
+
+    @app.get("/api/v1/h43/stats")
+    def h43_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.h43_quantum.get_stats()
 
     return app
 

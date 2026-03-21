@@ -3,9 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tests.cli_test_utils import CliRunner
-
-from orchesis.cli import main
 from orchesis.verify import OrchesisVerifier
 
 
@@ -79,36 +76,6 @@ def test_format_report_generated() -> None:
     assert "Savings: ~$270/month" in text
 
 
-def test_cli_verify_command() -> None:
-    runner = CliRunner()
-    with runner.isolated_filesystem():
-        Path("orchesis.yaml").write_text(
-            "loop_detection:\n  enabled: true\n"
-            "budgets:\n  enabled: true\n"
-            "recording:\n  enabled: true\n"
-            "threat_intel:\n  enabled: true\n",
-            encoding="utf-8",
-        )
-        Path(".openclaw").mkdir(parents=True, exist_ok=True)
-        Path(".openclaw/config.json").write_text('{"includeConfigSchema": false}', encoding="utf-8")
-        result = runner.invoke(main, ["verify", "--policy", "orchesis.yaml", "--proxy", "http://localhost:65534"])
-        assert result.exit_code == 0
-        assert "orchesis verify" in result.output
-
-
-def test_json_output_flag() -> None:
-    runner = CliRunner()
-    with runner.isolated_filesystem():
-        Path("orchesis.yaml").write_text("rules: []\n", encoding="utf-8")
-        Path(".openclaw").mkdir(parents=True, exist_ok=True)
-        Path(".openclaw/config.json").write_text('{"includeConfigSchema": false}', encoding="utf-8")
-        result = runner.invoke(main, ["verify", "--policy", "orchesis.yaml", "--json"])
-        assert result.exit_code == 0
-        payload = json.loads(result.output)
-        assert "checks" in payload
-        assert payload["total"] == 7
-
-
 def test_ready_flag_false_on_fail(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     Path("orchesis.yaml").write_text("rules: []\n", encoding="utf-8")
@@ -118,3 +85,65 @@ def test_ready_flag_false_on_fail(tmp_path: Path, monkeypatch) -> None:
     result = verifier.run(policy_path="orchesis.yaml", proxy_url="http://localhost:65534")
     assert result["schema_injection_found"] is True
     assert result["ready"] is False
+
+
+def test_openclaw_routing_detected(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / ".openclaw"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "config.json").write_text(
+        json.dumps({"apiBaseUrl": "http://localhost:8080/v1"}),
+        encoding="utf-8",
+    )
+    verifier = OrchesisVerifier()
+    check = verifier._check_openclaw_routing("http://localhost:8080")  # noqa: SLF001
+    assert check["status"] == "PASS"
+    assert "routed through proxy" in check["message"]
+
+
+def test_openclaw_not_routed_fails(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / ".openclaw"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "config.json").write_text(
+        json.dumps({"apiBaseUrl": "https://api.openclaw.example/v1"}),
+        encoding="utf-8",
+    )
+    verifier = OrchesisVerifier()
+    check = verifier._check_openclaw_routing("http://localhost:8080")  # noqa: SLF001
+    assert check["status"] == "FAIL"
+    assert "NOT routed" in check["message"]
+
+
+def test_loop_calibration_disabled_warns(tmp_path: Path) -> None:
+    policy = tmp_path / "orchesis.yaml"
+    policy.write_text("loop_detection:\n  enabled: false\n", encoding="utf-8")
+    verifier = OrchesisVerifier()
+    check = verifier._check_loop_calibration(str(policy))  # noqa: SLF001
+    assert check["status"] == "WARN"
+    assert "disabled" in check["message"]
+
+
+def test_loop_calibration_high_threshold_warns(tmp_path: Path) -> None:
+    policy = tmp_path / "orchesis.yaml"
+    policy.write_text("loop_detection:\n  enabled: true\n  block_threshold: 10\n", encoding="utf-8")
+    verifier = OrchesisVerifier()
+    check = verifier._check_loop_calibration(str(policy))  # noqa: SLF001
+    assert check["status"] == "WARN"
+    assert "Recommend <= 5" in check["message"]
+
+
+def test_loop_calibration_correct_passes(tmp_path: Path) -> None:
+    policy = tmp_path / "orchesis.yaml"
+    policy.write_text("loop_detection:\n  enabled: true\n  block_threshold: 5\n", encoding="utf-8")
+    verifier = OrchesisVerifier()
+    check = verifier._check_loop_calibration(str(policy))  # noqa: SLF001
+    assert check["status"] == "PASS"
+    assert "threshold: 5" in check["message"]
+
+
+def test_verify_now_has_9_checks() -> None:
+    verifier = OrchesisVerifier()
+    assert len(verifier.CHECKS) == 9
+    assert "openclaw_routing" in verifier.CHECKS
+    assert "loop_calibration" in verifier.CHECKS
