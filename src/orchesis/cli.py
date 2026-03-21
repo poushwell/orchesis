@@ -821,8 +821,8 @@ def keygen() -> None:
 
 
 @main.command()
-@click.argument("request_path", type=click.Path(exists=True))
-@click.option("--policy", "policy_path", type=click.Path(exists=True), required=True)
+@click.argument("request_path", required=False, type=click.Path(exists=True, path_type=Path))
+@click.option("--policy", "policy_path", type=click.Path(path_type=Path), default="orchesis.yaml")
 @click.option("--sign", "should_sign", is_flag=True, default=False)
 @click.option("--debug", "debug_mode", is_flag=True, default=False)
 @click.option(
@@ -831,16 +831,62 @@ def keygen() -> None:
     multiple=True,
     help="Plugin module path(s), e.g. orchesis.contrib.pii_detector",
 )
+@click.option(
+    "--openclaw-config",
+    "openclaw_config",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Path to openclaw.json",
+)
+@click.option(
+    "--config",
+    "orchesis_config",
+    "-c",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Path to orchesis.yaml",
+)
+@click.option("--proxy-host", default="127.0.0.1")
+@click.option("--proxy-port", default=8080, type=int)
+@click.option("--proxy", "proxy_url", default="http://localhost:8090", help="Proxy URL")
+@click.option("--json", "json_output", is_flag=True, default=False, help="Output results as JSON")
 def verify(
-    request_path: str,
-    policy_path: str,
+    request_path: Path | None,
+    policy_path: Path | None,
     should_sign: bool,
     debug_mode: bool,
     plugin_modules: tuple[str, ...],
+    openclaw_config: Path | None,
+    orchesis_config: Path | None,
+    proxy_host: str,
+    proxy_port: int,
+    proxy_url: str,
+    json_output: bool,
 ) -> None:
-    """Verify a request against policy."""
+    """Run pre-flight checks. Find config schema injection and misconfigurations."""
+    if request_path is None:
+        from orchesis.verify import OrchesisVerifier
+
+        resolved_policy = str(policy_path) if isinstance(policy_path, Path) else "orchesis.yaml"
+        if isinstance(orchesis_config, Path):
+            resolved_policy = str(orchesis_config)
+        resolved_proxy = str(proxy_url).strip()
+        if not resolved_proxy:
+            resolved_proxy = f"http://{proxy_host}:{proxy_port}"
+        verifier = OrchesisVerifier()
+        result = verifier.run(policy_path=resolved_policy, proxy_url=resolved_proxy)
+
+        if json_output:
+            click.echo(json.dumps(result, indent=2))
+        else:
+            click.echo(verifier.format_report(result))
+        raise SystemExit(0 if result["ready"] else 1)
+
+    if policy_path is None:
+        raise click.ClickException("--policy is required when verifying a request")
+
     try:
-        request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+        request = json.loads(request_path.read_text(encoding="utf-8"))
         policy = load_policy(policy_path)
         has_identity_config = "agents" in policy or "default_trust_tier" in policy
         registry = load_agent_registry(policy) if has_identity_config else None

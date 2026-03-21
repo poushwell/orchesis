@@ -73,6 +73,7 @@ from orchesis.memory_tracker import MemoryTracker
 from orchesis.fleet_coordinator import FleetCoordinator
 from orchesis.agent_compare import AgentComparer
 from orchesis.context_timeline import ContextTimeline
+from orchesis.persona_guardian import PersonaGuardian
 from orchesis.vibe_audit import VibeCodeAuditor
 from orchesis.token_yield import TokenYieldTracker
 from orchesis.token_yield_report import TokenYieldReportGenerator
@@ -132,6 +133,7 @@ from orchesis.system_health_report import SystemHealthReport
 from orchesis.policy_impact_analyzer import PolicyImpactAnalyzer
 from orchesis.request_explainer import RequestExplainer
 from orchesis.insights import OrchesisInsights
+from orchesis.channel_monitor import ChannelHealthMonitor
 from orchesis import __version__
 
 
@@ -223,6 +225,12 @@ def create_api_app(
     app.state.agent_comparer = AgentComparer()
     app.state.context_timeline = ContextTimeline()
     app.state.forensic_reconstructor = ForensicReconstructor(decisions_log)
+    persona_cfg = (
+        current_version.policy.get("persona_guardian")
+        if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("persona_guardian"), dict)
+        else {}
+    )
+    app.state.persona_guardian = PersonaGuardian(persona_cfg)
     quorum_cfg = (
         current_version.policy.get("quorum_sensing")
         if isinstance(current_version.policy, dict) and isinstance(current_version.policy.get("quorum_sensing"), dict)
@@ -412,6 +420,7 @@ def create_api_app(
     app.state.community_intel = CommunityIntel(community_cfg)
     app.state.system_health_report = SystemHealthReport()
     app.state.orchesis_insights = OrchesisInsights()
+    app.state.channel_monitor = ChannelHealthMonitor()
     app.state.notifications: list[dict[str, Any]] = []
     app.state.notifications_lock = threading.Lock()
     app.state.agent_lifecycle = AgentLifecycleManager()
@@ -2806,6 +2815,60 @@ def create_api_app(
         _require_auth(authorization)
         return app.state.context_timeline.summarize(session_id)
 
+    @app.post("/api/v1/persona/baseline")
+    def persona_baseline(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        identity_files = payload.get("identity_files")
+        files = [str(item) for item in identity_files if isinstance(item, str) and item.strip()] if isinstance(identity_files, list) else []
+        return app.state.persona_guardian.initialize_baseline(files)
+
+    @app.post("/api/v1/persona/check")
+    def persona_check(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        identity_files = payload.get("identity_files")
+        files = [str(item) for item in identity_files if isinstance(item, str) and item.strip()] if isinstance(identity_files, list) else []
+        findings = app.state.persona_guardian.check_identity_files(files)
+        alert = app.state.persona_guardian.check_zenity_pattern()
+        return {"findings": findings, "count": len(findings), "alert": alert}
+
+    @app.post("/api/v1/persona/cron-event")
+    def persona_cron_event(
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        cron_expression = str(payload.get("cron_expression", "") or "").strip()
+        source = str(payload.get("source", "unknown") or "unknown").strip() or "unknown"
+        if not cron_expression:
+            raise HTTPException(status_code=400, detail={"error": "cron_expression is required"})
+        event = app.state.persona_guardian.record_cron_event(cron_expression=cron_expression, source=source)
+        alert = app.state.persona_guardian.check_zenity_pattern()
+        return {"event": event, "alert": alert}
+
+    @app.get("/api/v1/persona/zenity-check")
+    def persona_zenity_check(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        alert = app.state.persona_guardian.check_zenity_pattern()
+        return {"detected": alert is not None, "alert": alert}
+
+    @app.get("/api/v1/persona/stats")
+    def persona_stats(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.persona_guardian.get_stats()
+
     @app.post("/api/v1/are/slo")
     def are_define_slo(
         body: dict[str, Any],
@@ -3159,6 +3222,43 @@ def create_api_app(
             "are": are_payload,
             "competitive": competitive_payload,
         }
+
+    @app.post("/api/v1/channels/{channel}/event")
+    def channels_record_event(
+        channel: str,
+        body: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = body if isinstance(body, dict) else {}
+        event_type = str(payload.get("event_type", "") or "").strip().lower()
+        if event_type not in {"inbound", "outbound"}:
+            raise HTTPException(status_code=400, detail={"error": "event_type must be inbound or outbound"})
+        metadata = payload.get("metadata", {})
+        app.state.channel_monitor.record_event(
+            channel=str(channel or "").strip().lower(),
+            event_type=event_type,
+            metadata=metadata if isinstance(metadata, dict) else {},
+        )
+        return {"ok": True, "channel": channel, "event_type": event_type}
+
+    @app.get("/api/v1/channels/health")
+    def channels_health(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.channel_monitor.check_health()
+
+    @app.get("/api/v1/channels/stats")
+    def channels_stats(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        return app.state.channel_monitor.get_stats()
+
+    @app.get("/api/v1/channels/{channel}/status")
+    def channels_status(channel: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        _require_auth(authorization)
+        payload = app.state.channel_monitor.get_channel_status(str(channel or "").strip().lower())
+        if not payload:
+            raise HTTPException(status_code=404, detail={"error": "unknown channel"})
+        return payload
 
     @app.get("/api/v1/compliance/report/{agent_id}")
     def compliance_report_endpoint(
