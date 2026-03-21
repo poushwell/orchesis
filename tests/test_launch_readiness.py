@@ -17,7 +17,7 @@ def test_zero_external_runtime_deps() -> None:
 
 def test_readme_has_all_key_sections() -> None:
     readme = open("README.md", encoding="utf-8").read()
-    for section in ["What's inside", "Quick start", "Why proxy"]:
+    for section in ["What is Orchesis?", "Quickstart", "Why proxy, not SDK?"]:
         assert section in readme, f"Missing: {section}"
 
 

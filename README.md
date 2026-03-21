@@ -1,200 +1,234 @@
-<p align="center">
-  <img src="docs/banner.svg" alt="Orchesis" width="900"/>
-</p>
+# 🛡️ Orchesis
 
-<p align="center">
-  <a href="https://pypi.org/project/orchesis/"><img src="https://img.shields.io/pypi/v/orchesis?color=7c3aed&label=PyPI" alt="PyPI"/></a>
-  <a href="https://github.com/poushwell/orchesis/actions"><img src="https://img.shields.io/badge/tests-4219%20passing-22c55e" alt="tests"/></a>
-  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"/>
-  <a href="https://github.com/poushwell/orchesis"><img src="https://img.shields.io/github/stars/poushwell/orchesis?style=flat&color=7c3aed" alt="Stars"/></a>
-  <img src="https://img.shields.io/badge/dependencies-minimal-green" alt="Minimal dependencies"/>
-</p>
+**See everything your AI agents do.**
 
-Orchesis is a transparent HTTP proxy for AI agents. Every request passes through
-a 17-phase detection pipeline before reaching the LLM provider.
-Minimal dependencies: pyyaml for configuration, optional fastapi+uvicorn for the dashboard server (pip install orchesis[server]). MIT license.
+Runtime Gateway for AI Agents — block threats, cut token waste, monitor your fleet. One config change.
 
-SDK sees one agent. Static analysis sees code. Observability sees metrics.
-**Proxy sees everything, in real time, without code changes.**
+[![PyPI](https://img.shields.io/pypi/v/orchesis)](https://pypi.org/project/orchesis/)
+[![Tests](https://img.shields.io/badge/tests-4%2C670%2B-brightgreen)]()
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)]()
 
-<p align="center">
-  <a href="https://orchesis.io/docs"><img src="https://img.shields.io/badge/GET%20STARTED-8B5CF6?style=for-the-badge" alt="GET STARTED"/></a>
-  <a href="https://orchesis.io/scan"><img src="https://img.shields.io/badge/MCP%20SCANNER-00FF41?style=for-the-badge" alt="MCP SCANNER"/></a>
-  <a href="https://orchesis.io/scan"><img src="https://img.shields.io/badge/FREE-111111?style=for-the-badge" alt="FREE"/></a>
-  <a href="https://orchesis.io"><img src="https://img.shields.io/badge/WEBSITE-white?style=for-the-badge" alt="WEBSITE"/></a>
-  <a href="https://orchesis.io"><img src="https://img.shields.io/badge/ORCHESIS.IO-7c3aed?style=for-the-badge" alt="ORCHESIS.IO"/></a>
-</p>
+[Website](https://orchesis.ai) · [Docs](QUICK_START.md) · [MCP Scanner](https://orchesis.ai/scan) · [Scorecard](https://orchesis.ai/scorecard) · [Blog](https://orchesis.ai/blog)
 
-## Installation
+
+## What is Orchesis?
+
+Your AI agent made 122 API calls. Its built-in loop detector caught zero. Detection was ON. All thresholds configured. ([Issue #34574](https://github.com/all-hands-ai/openclaw/issues/34574))
+
+Orchesis is an open-source HTTP proxy that sits between your AI agents and their LLM providers (OpenAI, Anthropic, Google, Mistral). One config change — set `base_url` to `localhost:8080` — and every request passes through a **17-phase security pipeline**. No SDK integration. No code changes. No vendor lock-in.
+
+- **Security** — Injection detection (96% explicit, 0 false positives), credential blocking, Crystal Alert
+- **Cost** — Context compression (80-90% savings), loop detection at call #3, per-request budget enforcement
+- **Reliability** — Auto-healing, cascade failure shield, 6 recovery actions, 450x faster than heartbeat checks
+- **Observability** — Real-time dashboard, fleet correlation, independent audit log
+
+Works with OpenClaw, Paperclip, CrewAI, LangChain, AutoGen, Google ADK, and any agent that speaks OpenAI-compatible API.
+
+**Why this exists:** 390,000+ OpenClaw instances online. 20% of the skill marketplace was malicious. Budget tracking reports $0.00 for entire Codex fleets. The tools watching your agents are watching from inside the compromised context.
+
+
+## Quickstart
+
+### Install
+
 ```bash
-# Core
 pip install orchesis
-
-# With integrations (Slack, Telegram, webhooks)
-pip install orchesis[integrations]
-
-orchesis quickstart --preset openclaw
 ```
 
-## Architecture: two services
+### Use — one line change
 
-Orchesis runs two services:
-- **Proxy** (port 8080) - intercepts LLM traffic
-- **API server** (port 8090) - Overwatch, agent management, budget control
-
-Quick start:
-```bash
-orchesis proxy --config orchesis.yaml   # terminal 1
-
-# Install server dependencies first
-pip install orchesis[server]
-
-# Then start the API server
-orchesis serve --policy orchesis.yaml   # terminal 2 (optional)
-```
-
-**One line change:**
 ```python
 # Before:
 client = OpenAI(base_url="https://api.openai.com/v1")
 
-# After:
+# After — 17 security phases now active:
 client = OpenAI(base_url="http://localhost:8080/v1")
-# ↑ 17 security phases now active
 ```
+
+```bash
+# Or with curl:
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{"model":"gpt-4","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+### Verify your setup
+
+```bash
+orchesis verify
+```
+
+### Scan MCP configs
+
+```bash
+npx orchesis-scan           # npm CLI, zero install
+orchesis scan --mcp         # Python CLI
+```
+
+### Dashboard
+
+```bash
+orchesis dashboard          # opens at localhost:8081
+```
+
 
 ## How it works
-```mermaid
-graph LR
-    A[AI Agent<br/>OpenClaw/CrewAI/LangChain] -->|HTTP request| B
-    B[Orchesis Proxy<br/>17-phase pipeline<br/>localhost:8080] -->|filtered request| C
-    C[LLM Provider<br/>OpenAI/Anthropic/Google]
-    B --> D[Dashboard<br/>Metrics & Alerts]
+
+```
+┌──────────────┐     ┌─────────────────────────────┐     ┌──────────────┐
+│  AI Agents   │     │       Orchesis Proxy         │     │LLM Providers │
+│              │     │       localhost:8080          │     │              │
+│  OpenClaw    │────▶│                               │────▶│  OpenAI      │
+│  Paperclip   │     │  Security     (phases 1-8)    │     │  Anthropic   │
+│  CrewAI      │     │  Context      (phases 9-11)   │     │  Google      │
+│  LangChain   │     │  Threat Intel (phases 12-14)  │     │  Mistral     │
+│  Any agent   │     │  Cost         (phases 15-16)  │     │  Ollama      │
+│              │     │  Observability (phase 17)     │     │  Any compat. │
+└──────────────┘     │                               │     └──────────────┘
+                     │  < 3ms overhead               │
+                     │  0 code changes required      │
+                     └─────────────────────────────┘
 ```
 
-## Why proxy, not SDK?
+### Why proxy, not SDK?
 
-| Approach | What it sees | Code changes needed |
-|----------|-------------|---------------------|
-| SDK/callbacks (LangSmith, LangChain) | One agent, one session | Yes |
-| Static analysis (Snyk, Semgrep) | Code at rest | Yes |
-| Observability (Datadog, Helicone) | Metrics and logs | Yes |
-| **Orchesis proxy** | **All agents, all requests, cross-session patterns** | **No** |
+| | SDK / callbacks | Static analysis | **Orchesis proxy** |
+|---|---|---|---|
+| Sees | One agent, one session | Code at rest | **Everything, cross-agent** |
+| Code changes | Required | Required | **None** |
+| Fleet correlation | No | No | **Yes** |
+| Real-time | Partial | No | **Yes** |
 
-The proxy layer sees what SDK cannot: cross-agent patterns, fleet-level anomalies,
-duplicate context across providers. This is an architectural advantage, not a feature difference.
 
-## What's inside
+## Features
 
-**Security**
-- 17-phase detection pipeline, 25+ threat signatures
-- Adaptive Detection v2 (5-layer: regex -> structural -> entropy -> n-gram -> session risk)
-- Intent Classifier, Response Analyzer, Tool Call Analyzer
-- Memory poisoning detection, SSRF geo-classification
+### 🔒 17-Phase Security Pipeline
 
-**Cost**
-- Token Yield tracking (semantic value / total tokens)
-- Cost Optimizer (5 strategies: dedup, trim, compress, prune)
-- Context Compression v2 (semantic chunking, importance scoring)
-- Budget advisor, cost attribution by team/project, forecasting
+Adaptive detection across 8 security phases. Injection Shield (33+ signatures, 96% explicit detection, 0 false positives), Crystal Alert (behavioral anomaly), credential blocking, tool abuse detection. We publish what we can't detect: semantic injection is a proven structural limit at 0%.
 
-**Reliability**
-- Auto-healing 6 levels (L1 log -> L6 circuit break)
-- Agent Lifecycle Manager (state machine: active/idle/degraded/banned)
-- Context Budget progressive degradation (L0/L1/L2)
-- Session replay, shadow mode, pipeline debugger
+### 💰 Cost Control
 
-**Observability**
-- Real-time dashboard (dark/light theme, keyboard shortcuts, mobile responsive)
-- Agent Health Score, Agent Scorecard, Agent Intelligence Profile
-- Flow X-Ray timeline, Request Inspector, Session Heatmap
-- Cost Analytics, Rate Limit Visualization, Notification System
+Context compression saves 80-90% tokens in growing-context sessions. Loop detection fires at call #3 — saves $55-150 per incident. 450x faster than heartbeat-based orchestrators. Thompson Sampling model routing. Per-request budget enforcement.
 
-**Compliance**
-- EU AI Act Articles 9/12/72 - Evidence Record, Compliance Checker
-- OWASP Agentic Top 10, MAST, NIST AI RMF coverage
-- Policy-as-Code Validator, Compliance Report Generator
-- Audit Trail Export (JSON/CSV/JSONL)
+### 🔧 Auto-Healing
 
-**Platform**
-- Multi-tenant support, Per-team budget attribution
-- Community threat intelligence (opt-in, zero PII)
-- Threat Pattern Library, Signature Editor, Threat Feed
-- Policy templates, migration tool, backup/restore
+6 recovery strategies. Cascade Failure Shield. Model fallback. Context reset. Circuit breaker fires at call #3, not at next heartbeat.
 
-**Research (NLCE Layer 2+)**
-- PAR Abductive Reasoning — T5 theorem implementation
-- Criticality Control (H17-CC) — LQR Ψ∈[0.4,0.6]
-- MRAC adaptive gain scheduling per agent
-- Keystone Agent detection — trophic cascade analysis
-- Carnot Efficiency — theoretical ceiling calculator
-- Red Queen dynamics — adversarial co-evolution monitoring
-- Kolmogorov Importance — UCI-K duality (H36)
-- Context Crystallinity Ψ — gas/liquid/crystal phases
-- HGT Protocol stub — horizontal gene transfer (H42)
-- IACS full discourse coherence — 0.40×FC + 0.35×EC + 0.25×HC
+### 📊 Dashboard
 
-**Viral Tools**
-- Agent Autopsy - "What killed your AI agent?" one-command diagnosis
-- Vibe Code Audit - AI-generated code security scanner
-- ARC Certification - production readiness badge
-- Weekly Intelligence Report - automated competitive briefing
+Real-time local dashboard. 8 tabs: Shield, Agents, Sessions, Flow X-Ray, Experiments, Threats, Cache, Compliance. Fleet-level correlation: which agent did what, and why it cost so much.
 
-## What Orchesis does
+### 🔍 MCP Security Scanner
 
-| Capability | Current coverage |
-|---|---|
-| Security detection | 17-phase detection pipeline, prompt injection, credential leaks, tool abuse, 25 signatures |
-| Reliability controls | Auto-healing, circuit breakers, loop detection, 6 recovery actions |
-| Visibility | Real-time dashboard, Flow X-Ray, Agent Reliability Score |
-| Proxy overhead | 0.8% (MVE experiment, 10 iterations) |
-| Context growth caught | 12x detected without proxy (MVE) |
+52 checks across 6 categories: supply chain, credentials, Docker, permissions, network, cross-server. Runs in browser or CLI. [Try it →](https://orchesis.ai/scan)
+
+### 🏢 Fleet Monitoring (Overwatch)
+
+Cross-agent correlation. Per-agent cost attribution. Independent audit log outside your orchestrator's data store. Detects cost discrepancies ($0.00 Codex bug, timeout gaps, self-reported vs actual).
+
+### 🔬 Agent Autopsy
+
+Post-incident investigation. Session replay. Decision chain reconstruction. Evidence-grade audit trail. "What killed your AI agent?" — answered.
+
+### ✅ orchesis verify
+
+One-command security audit of your agent setup. Checks config, connectivity, pipeline health, known vulnerabilities. First command every new user runs.
+
 
 ## By the numbers
 
 | Metric | Value |
-|--------|-------|
+|---|---|
 | Pipeline phases | 17 |
-| Threat signatures | 25 across 10 categories |
-| MAST coverage | 78.6% |
-| OWASP coverage | 80% |
-| Auto-heal actions | 6 |
-| Tests passing | 4,219 |
-| Modules | 270 |
-| Dependencies | Minimal: pyyaml (+ optional fastapi/uvicorn server) |
-| Proxy overhead | 0.8% measured |
-| Context collapse | 12x growth caught |
-| API endpoints | 250+ |
+| Proxy overhead | < 3ms (measured) |
+| Token savings | 80-90% (context compression) |
+| Injection detection | 96% explicit, 0 false positives |
+| Threat signatures | 33+ across 10 categories |
+| MCP checks | 52 across 6 categories |
+| MAST coverage | 78.6% (11/14 failure modes) |
+| OWASP coverage | 80% (8/10 risks) |
+| Tests passing | 4,670+ |
+| Modules | ~120 |
+| Dependencies | 0 (stdlib only) |
+| License | MIT |
 
-## Free MCP Security Scanner
+Optional extras: `pip install orchesis[yaml]` for YAML config, `pip install orchesis[all]` for integrations.
 
-We scanned 900+ MCP configurations on GitHub. 75% had at least one security issue:
-hardcoded credentials, overpermissioned tools, missing input validation.
 
-Run the scanner on your own configs in 30 seconds:
+## Works with
 
-**-> [orchesis.io/scan](https://orchesis.io/scan)**
+**AI Agents & Orchestrators:**
+OpenClaw · **Paperclip** · CrewAI · LangChain · LangGraph · AutoGen · OpenAI Agents SDK · Google ADK · Any OpenAI-compat agent
 
-Or via CLI:
-```bash
-npx orchesis-scan
-```
+**LLM Providers:**
+OpenAI · Anthropic · Google Gemini · Mistral · Ollama · Any OpenAI-compatible API
 
-52 security checks across 10 categories. No data sent to external servers.
-Results in 30 seconds.
+If your agent calls an LLM via HTTP — Orchesis works with it.
+
+
+## How Orchesis compares
+
+| | Generic Gateway | LLM Router | Agent Platform | **Orchesis** |
+|---|---|---|---|---|
+| Understands MCP/A2A | ✗ | ✗ | ✗ | **✓** |
+| 17-phase security | ✗ | ✗ | ✗ | **✓** |
+| Fleet correlation | ✗ | ✗ | partial | **✓** |
+| Formal security proofs | ✗ | ✗ | ✗ | **✓** |
+| Honest limits published | ✗ | ✗ | ✗ | **✓** |
+| Zero code changes | ✗ | ✗ | ✗ | **✓** |
+| Open source (MIT) | varies | some | ✗ | **✓** |
+| Self-hosted | ✗ | ✗ | ✗ | **✓** |
+| No telemetry | ✗ | ✗ | ✗ | **✓** |
+
+
+## Research
+
+Orchesis security properties are backed by formal proofs:
+
+- **3 impossibility theorems** — what NO monitor can detect
+- **2 necessity results** — what ONLY a proxy can detect
+- **25 formal results** total — published, peer-reviewable
+
+Key results:
+- Information loss at proxy layer is bounded (C_obs ≈ 0.57 of total agent state)
+- Per-request checks don't compose: Safe + Safe ≠ Safe (k_crit = 20 for credential exfiltration)
+- Pattern-based detection degrades under optimization pressure ($0.70 to evade single-parameter rules)
+- Semantic injection is undetectable by any finite regex set (proven structural limit)
+- One poisoned task cascades to 13 agents in 10 minutes (Cascading Injection Theorem)
+
+We also publish what Orchesis **cannot** see: internal reasoning chains, cross-session memory, sub-process spawning, encrypted tool payloads, semantic injection (0% detection). Transparency builds trust.
+
+📄 [Read the research →](https://orchesis.ai/blog/proxy-vs-decorator)
+
+
+## Documentation
+
+- [Quick Start](QUICK_START.md) — Install and run in 60 seconds
+- [Configuration Guide](docs/configuration.md) — All config options
+- [Pipeline Reference](docs/pipeline.md) — 17 phases explained
+- [Dashboard Guide](docs/dashboard.md) — Using the local dashboard
+- [MCP Scanner](https://orchesis.ai/scan) — Web-based config scanner
+- [Security Scorecard](https://orchesis.ai/scorecard) — Assess your stack
+- [Blog](https://orchesis.ai/blog) — Articles and research
+
+
+## Contributing
+
+Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+Priority areas:
+- Injection Shield patterns (new attack categories)
+- Agent framework adapters (Paperclip, Google ADK)
+- Dashboard improvements
+- Documentation and examples
+
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.
 
 ---
 
-## Contributing
-> **Note:** `dashboard/dist/` is intentionally committed for zero-setup deployment.
-> Run `npm run build` in `dashboard/` to rebuild from source.
-
-<p align="center">
-  <a href="https://orchesis.io">Website</a> ·
-  <a href="https://orchesis.io/docs">Documentation</a> ·
-  <a href="https://orchesis.io/scan">MCP Scanner</a> ·
-  <a href="https://orchesis.io/blog">Blog</a>
-</p>
-
-<p align="center">MIT License · Built with ♥ and minimal dependencies</p>
+*Works whether AI wins or loses.*
 

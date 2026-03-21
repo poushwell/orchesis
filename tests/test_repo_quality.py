@@ -52,23 +52,22 @@ def test_ci_tests_python_312_only() -> None:
 
 def test_readme_has_badges() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "docs/banner.svg" in content
     assert "img.shields.io/pypi/v/orchesis" in content
-    assert re.search(r"tests-\d+%20passing", content), "No test count badge found"
+    assert re.search(r"tests-[\d%2C]+", content), "No test count badge found"
 
 
 def test_readme_has_docker_section() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "## Installation" in content
+    assert "## Quickstart" in content
     assert "pip install orchesis" in content
-    assert "orchesis quickstart --preset openclaw" in content
+    assert "orchesis verify" in content
 
 
 def test_readme_has_project_status() -> None:
     content = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "## By the numbers" in content
     assert "Tests passing" in content
-    assert "## What Orchesis does" in content
+    assert "## What is Orchesis?" in content
 
 
 def test_docs_quickstart_has_new_command_blocks() -> None:

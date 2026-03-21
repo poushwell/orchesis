@@ -32,13 +32,19 @@ def test_all_doc_files_exist() -> None:
 
 def test_readme_has_required_sections() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
-    for section in (
-        "## Installation",
+    required_sections = [
+        "## What is Orchesis?",
+        "## Quickstart",
         "## How it works",
-        "## What Orchesis does",
+        "## Features",
         "## By the numbers",
-        "## Free MCP Security Scanner",
-    ):
+        "## Works with",
+        "## Research",
+        "## Documentation",
+        "## Contributing",
+        "## License",
+    ]
+    for section in required_sections:
         assert section in text
 
 
@@ -49,19 +55,22 @@ def test_readme_has_install_command() -> None:
 
 def test_readme_has_quick_start() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
-    assert "GET%20STARTED" in text
+    assert "## Quickstart" in text
+    assert "localhost:8080" in text
+    assert "orchesis verify" in text
+    assert "orchesis dashboard" in text
 
 
 def test_readme_has_badge_tests() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
     assert "img.shields.io/badge/tests-" in text
-    assert "%20passing-22c55e" in text
-    assert re.search(r"tests-\d+%20passing-22c55e", text) is not None
+    assert "brightgreen" in text
+    assert re.search(r"tests-[^)]*4%2C670%2B", text) is not None
 
 
 def test_readme_has_license_badge() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
-    assert "img.shields.io/badge/license-MIT-blue" in text
+    assert "img.shields.io/badge/License-MIT-green.svg" in text
 
 
 def test_quick_start_exists() -> None:
@@ -203,17 +212,17 @@ def test_all_cli_commands_have_help() -> None:
 
 def test_readme_metrics_are_updated() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
-    assert re.search(r"\| Tests passing \| [\d,]+ \|", text), "No test count row found"
-    assert re.search(r"\| Modules \| \d+ \|", text), "No modules row found"
+    assert re.search(r"\| Tests passing \| [\d,]+\+ \|", text), "No test count row found"
+    assert re.search(r"\| Modules \| ~?\d+ \|", text), "No modules row found"
 
 
 def test_readme_has_research_whats_inside_section() -> None:
     text = Path("README.md").read_text(encoding="utf-8")
-    assert "**Research (NLCE Layer 2+)**" in text
+    assert "## Research" in text
     for snippet in (
-        "PAR Abductive Reasoning — T5 theorem implementation",
-        "Criticality Control (H17-CC) — LQR Ψ∈[0.4,0.6]",
-        "HGT Protocol stub — horizontal gene transfer (H42)",
-        "IACS full discourse coherence — 0.40×FC + 0.35×EC + 0.25×HC",
+        "3 impossibility theorems",
+        "2 necessity results",
+        "25 formal results",
+        "Semantic injection is undetectable by any finite regex set",
     ):
         assert snippet in text

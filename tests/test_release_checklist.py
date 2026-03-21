@@ -65,17 +65,15 @@ def test_no_debug_code_in_src() -> None:
 
 # Documentation
 def test_readme_has_what_is_inside_section() -> None:
-    """README contains What's inside section."""
+    """README contains What is Orchesis section."""
     readme = (_project_root() / "README.md").read_text(encoding="utf-8")
-    assert "What's inside" in readme or "Whats inside" in readme
+    assert "What is Orchesis?" in readme
 
 
 def test_readme_test_count_current() -> None:
     """README has test badge text."""
     readme = (_project_root() / "README.md").read_text(encoding="utf-8")
-    lowered = readme.lower()
-    assert "tests" in lowered
-    assert "passing" in lowered or "pass" in lowered
+    assert re.search(r"tests-[\d%2C]+", readme), "No test count badge found"
 
 
 def test_all_cli_commands_in_quickstart() -> None:
