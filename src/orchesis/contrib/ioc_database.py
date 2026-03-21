@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from orchesis.contrib.paperclip_patterns import ALL_PAPERCLIP_PATTERNS
+
 
 INJECTION_SHIELD_VERSION = "1.1"
 
@@ -226,6 +228,21 @@ IOC_DATABASE: list[IoC] = [
     ),
 ]
 
+PAPERCLIP_IOC_ID = "PAPERCLIP-001"
+PAPERCLIP_INDICATORS = [pattern.regex for pattern in ALL_PAPERCLIP_PATTERNS]
+PAPERCLIP_IOC = IoC(
+    id=PAPERCLIP_IOC_ID,
+    name="Paperclip/OpenClaw Injection Abuse Patterns",
+    category="paperclip_injection",
+    source="Orchesis contrib, Mar 2026",
+    severity="high",
+    indicators=PAPERCLIP_INDICATORS,
+    description=(
+        "Paperclip-specific abuse patterns (14): budget spoofing, goal hijacking, tool abuse, "
+        "cascade exploitation, and plugin-based injection vectors."
+    ),
+)
+
 
 class IoCMatcher:
     """Match text/files against IoC database."""
@@ -235,10 +252,13 @@ class IoCMatcher:
         iocs: list[IoC] | None = None,
         custom_iocs: list[IoC] | None = None,
         enable_opt_in_v1_1: bool = False,
+        enable_paperclip_patterns: bool = False,
     ):
         self._iocs = list(iocs or IOC_DATABASE)
         if custom_iocs:
             self._iocs.extend(custom_iocs)
+        if enable_paperclip_patterns and not any(ioc.id == PAPERCLIP_IOC_ID for ioc in self._iocs):
+            self._iocs.append(PAPERCLIP_IOC)
         self._compiled: dict[str, list[tuple[re.Pattern[str], str]]] = {
             ioc.id: [(re.compile(pattern), pattern) for pattern in ioc.indicators]
             for ioc in self._iocs

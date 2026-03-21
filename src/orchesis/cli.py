@@ -3932,6 +3932,71 @@ def experiment_command(
     click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+@main.command("bootstrap-ci")
+@click.option(
+    "--data-file",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="JSON file with frequency data",
+)
+@click.option("--n-bootstrap", default=10000, type=int, help="Number of resamples")
+@click.option("--confidence", default=0.95, type=float, help="Confidence level")
+@click.option("--format", "fmt", default="text", type=click.Choice(["text", "json"]))
+def bootstrap_ci_cmd(
+    data_file: Path | None,
+    n_bootstrap: int,
+    confidence: float,
+    fmt: str,
+) -> None:
+    """Compute bootstrap CI for Zipf alpha estimate."""
+    from orchesis.stats.bootstrap_ci import BootstrapCI, DEFAULT_NLCE_TOOL_FREQUENCIES
+
+    if data_file is not None:
+        try:
+            data = json.loads(data_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as error:
+            raise click.ClickException(f"Failed to read data file: {error}") from error
+    else:
+        click.echo("Using built-in NLCE tool frequency data (N=41)")
+        data = list(DEFAULT_NLCE_TOOL_FREQUENCIES)
+
+    if not isinstance(data, list) or not data:
+        raise click.ClickException("Bootstrap CI requires a non-empty JSON list of frequencies.")
+
+    try:
+        frequencies = [int(value) for value in data]
+    except (TypeError, ValueError) as error:
+        raise click.ClickException("Frequency data must be a JSON list of integers.") from error
+
+    try:
+        result = BootstrapCI(frequencies).compute(
+            n_bootstrap=n_bootstrap,
+            confidence=confidence,
+        )
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+
+    if fmt == "json":
+        click.echo(
+            json.dumps(
+                {
+                    "estimate": result.estimate,
+                    "ci_lower": result.ci_lower,
+                    "ci_upper": result.ci_upper,
+                    "confidence": result.confidence,
+                    "se": result.se,
+                    "bias": result.bias,
+                    "n_data": result.n_data,
+                    "n_bootstrap": result.n_bootstrap,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    click.echo(result.summary())
+
+
 @main.command("nlce-export")
 @click.option("--output", "output_dir", default="paper", show_default=True, help="Output directory")
 @click.option(
@@ -5015,6 +5080,61 @@ def compliance_command(
         click.echo(f"Report written to {target}")
         return
     click.echo(content)
+
+
+@main.command("comply")
+@click.option("--format", "fmt", default="text", type=click.Choice(["text", "json"]))
+@click.option("--policy", type=click.Path(), default=None)
+def comply_command(fmt: str, policy: str | None) -> None:
+    """Run EU AI Act compliance check on fleet."""
+    from orchesis.compliance.fce import FleetComplianceEngine
+
+    pol: dict[str, Any] = {}
+    if isinstance(policy, str) and policy.strip():
+        pol = load_policy(policy)
+
+    logging_cfg = pol.get("logging", {}) if isinstance(pol.get("logging"), dict) else {}
+    monitoring_cfg = pol.get("monitoring", {}) if isinstance(pol.get("monitoring"), dict) else {}
+    security_cfg = pol.get("security", {}) if isinstance(pol.get("security"), dict) else {}
+    casura_cfg = pol.get("casura", {}) if isinstance(pol.get("casura"), dict) else {}
+    fleet_cfg = pol.get("fleet", {}) if isinstance(pol.get("fleet"), dict) else {}
+    compliance_cfg = pol.get("compliance", {}) if isinstance(pol.get("compliance"), dict) else {}
+
+    fleet_state = {
+        "logging_enabled": bool(logging_cfg.get("enabled", False)),
+        "monitoring_enabled": bool(monitoring_cfg.get("enabled", False)),
+        "security_scanning_enabled": bool(security_cfg.get("scanning", False)),
+        "incident_db_enabled": bool(casura_cfg.get("enabled", False)),
+        "agents": fleet_cfg.get("agents", []) if isinstance(fleet_cfg.get("agents"), list) else [],
+        "risk_assessment_path": compliance_cfg.get("risk_assessment_path"),
+    }
+    engine = FleetComplianceEngine(policy=pol, fleet_state=fleet_state)
+    report = engine.evaluate()
+
+    if fmt == "json":
+        click.echo(
+            json.dumps(
+                {
+                    "status": report.status.value,
+                    "checked": report.checked_rules,
+                    "passed": report.passed_rules,
+                    "violations": [
+                        {
+                            "rule_id": item.rule_id,
+                            "article": item.article,
+                            "severity": item.severity,
+                            "description": item.description,
+                            "remediation": item.remediation,
+                        }
+                        for item in report.violations
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return
+
+    click.echo(report.summary())
 
 
 def _render_single_compliance_text(report: Any) -> str:
