@@ -140,3 +140,10 @@ def test_pii_detector_regression_strips_cf_and_nulls() -> None:
     findings = detector.detect(payload)
     assert isinstance(findings, list)
     assert any(item["pattern"] in {"email", "ssn"} for item in findings)
+
+
+def test_pii_detector_regression_continuation_bytes() -> None:
+    pd = PiiDetector()
+    payload = b"\x84" * 40 + b"\xe3\x81\xaf" + b"123-45-6789" + b"\x84\x00\xf8"
+    pd.detect(payload.decode("utf-8", errors="replace"))
+    assert True

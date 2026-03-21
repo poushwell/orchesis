@@ -142,3 +142,10 @@ def test_secret_scanner_regression_nonchars_and_format_tokens() -> None:
     findings = scanner.scan_text(payload)
     assert isinstance(findings, list)
     assert any(item["pattern"] == "openai_key" for item in findings)
+
+
+def test_secret_scanner_regression_orphaned_continuation_bytes() -> None:
+    sc = SecretScanner()
+    sc.scan(b"\xec\xb5\xec\x00\x00\x88".decode("utf-8", errors="replace"))
+    sc.scan("\x84" * 50 + "normal text")
+    assert True

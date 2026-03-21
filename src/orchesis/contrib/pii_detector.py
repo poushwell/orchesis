@@ -147,6 +147,8 @@ def _sanitize_detect_input(text: Any) -> str:
     text = text.replace("\x00", "")
     # Remove replacement chars from broken UTF-8.
     text = text.replace("\ufffd", "")
+    text = text.encode("utf-16", errors="surrogatepass").decode("utf-16", errors="replace")
+    text = text.replace("\ufffd", "")
     return text
 
 

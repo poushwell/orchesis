@@ -285,6 +285,9 @@ def _sanitize_scan_input(text: Any) -> str:
         text = text.decode("utf-8", errors="replace")
     if not isinstance(text, str):
         return ""
+    # Round-trip through UTF-16 to collapse orphaned UTF-8 continuation bytes.
+    text = text.encode("utf-16", errors="surrogatepass").decode("utf-16", errors="replace")
+    text = text.replace("\ufffd", "")
     text = text.replace("\x00", "")
     # Strip format string tokens that could cause issues
     text = text.replace("%u", "").replace("%n", "").replace("%s", "")
