@@ -99,6 +99,7 @@ from orchesis.context_budget import ContextBudget
 from orchesis.context_window_optimizer import ContextWindowOptimizer
 from orchesis.context_compression_v2 import ContextCompressionV2
 from orchesis.threat_intel import ThreatIntelConfig, ThreatMatcher
+from orchesis.openclaw_presets import OPENCLAW_SAFE_POLICY, apply_openclaw_preset
 from orchesis.semantic_cache import SemanticCache, SemanticCacheConfig
 from orchesis.spend_rate import SpendRateDetector, SpendWindow
 from orchesis.request_prioritizer import RequestPrioritizer
@@ -1856,6 +1857,12 @@ class LLMHTTPProxy:
                 self._policy = load_policy(policy_path)
             except Exception:
                 self._policy = {}
+        self._openclaw_safe_policy = apply_openclaw_preset(self._policy)
+        safe_ti_cfg = OPENCLAW_SAFE_POLICY.get("threat_intel", {})
+        disabled = safe_ti_cfg.get("disabled_threats", []) if isinstance(safe_ti_cfg, dict) else []
+        self._openclaw_safe_skip: set[str] = {
+            str(item).strip().upper() for item in disabled if str(item).strip()
+        }
         proxy_engine_cfg = self._policy.get("proxy")
         self._proxy_engine_cfg = proxy_engine_cfg if isinstance(proxy_engine_cfg, dict) else {}
         self._max_workers = int(self._proxy_engine_cfg.get("max_workers", 200))
@@ -3949,6 +3956,8 @@ class LLMHTTPProxy:
                     headers_dict = dict(h)
                 elif hasattr(h, "keys"):
                     headers_dict = {k: h.get(k, "") for k in h.keys()}
+            framework = self._detect_agent_framework(headers_dict)
+            ctx.proc_result["agent_framework"] = framework
             matches = self._threat_matcher.scan_request(
                 messages=messages,
                 tools=tools,
@@ -3957,6 +3966,7 @@ class LLMHTTPProxy:
                 headers=headers_dict or None,
             )
             self._apply_threat_context_adjustments(messages, matches)
+            matches = self._apply_framework_threat_overrides(matches, framework=framework)
             if self._community is not None:
                 try:
                     community_sigs = self._community.get_community_signatures()
@@ -5755,6 +5765,79 @@ class LLMHTTPProxy:
         if isinstance(sid, str) and sid.strip():
             return sid.strip()
         return "unknown"
+
+    @staticmethod
+    def _normalize_header_map(headers: Any) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        if headers is None:
+            return normalized
+        try:
+            if isinstance(headers, dict):
+                iterator = headers.items()
+            elif hasattr(headers, "items"):
+                iterator = headers.items()
+            elif hasattr(headers, "keys"):
+                iterator = ((key, headers.get(key, "")) for key in headers.keys())
+            else:
+                iterator = []
+            for key, value in iterator:
+                lowered = str(key).strip().lower()
+                normalized[lowered] = str(value) if value is not None else ""
+        except Exception:
+            return {}
+        return normalized
+
+    def _detect_agent_framework(self, headers: Any) -> str:
+        """Detect agent framework from request headers."""
+        h = self._normalize_header_map(headers)
+        ua = str(h.get("user-agent", "")).lower()
+        if "openclaw" in ua or "openhands" in ua:
+            return "openclaw"
+        framework = str(h.get("x-orchesis-framework", "")).strip().lower()
+        if framework:
+            return framework
+        if h.get("x-openclaw-session-id") or h.get("x-openclaw-session"):
+            return "openclaw"
+        return "unknown"
+
+    def _apply_framework_threat_overrides(
+        self,
+        matches: list[Any],
+        *,
+        framework: str,
+    ) -> list[Any]:
+        if framework != "openclaw" or not matches:
+            return matches
+        threat_cfg = self._openclaw_safe_policy.get("threat_intel", {})
+        severity_actions = {}
+        default_action = "warn"
+        if isinstance(threat_cfg, dict):
+            severity_actions = threat_cfg.get("severity_actions", {})
+            default_action = str(threat_cfg.get("default_action", "warn")).strip().lower() or "warn"
+
+        filtered: list[Any] = []
+        for match in matches:
+            threat_id = str(getattr(match, "threat_id", "")).strip().upper()
+            if threat_id in self._openclaw_safe_skip:
+                continue
+            sig = self._threat_matcher.get_threat(threat_id) if self._threat_matcher is not None else None
+            excluded = getattr(sig, "frameworks_exclude", ()) if sig is not None else ()
+            excluded_lc = {str(item).strip().lower() for item in excluded}
+            if "openclaw" in excluded_lc:
+                continue
+
+            severity = str(getattr(match, "severity", "medium")).strip().lower()
+            preferred = (
+                str(severity_actions.get(severity, default_action))
+                if isinstance(severity_actions, dict)
+                else default_action
+            ).strip().lower()
+            if preferred == "block":
+                preferred = "warn"
+            if str(getattr(match, "action", "")).lower() == "block":
+                setattr(match, "action", preferred or "warn")
+            filtered.append(match)
+        return filtered
 
     def _record_session(
         self,

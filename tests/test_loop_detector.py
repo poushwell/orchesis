@@ -11,6 +11,7 @@ def _cfg(action_exact: str = "warn", action_fuzzy: str = "block") -> dict:
         "enabled": True,
         "exact": {"threshold": 5, "window_seconds": 120, "action": action_exact},
         "fuzzy": {"threshold": 8, "window_seconds": 300, "action": action_fuzzy},
+        "openclaw_memory_whitelist": True,
         "on_detect": {"notify": True, "log": True, "max_cost_saved": True},
     }
 
@@ -22,6 +23,13 @@ def _req(model: str = "gpt-4o", content: str = "hello", tools: list[dict] | None
         "tool_calls": tools or [],
         "content_text": content,
     }
+
+
+def _read_req(path: str, tool_name: str = "read") -> dict:
+    return _req(
+        content=f"reading {path}",
+        tools=[{"name": tool_name, "args": {"path": path}}],
+    )
 
 
 def test_exact_loop_threshold_allow_then_warn() -> None:
@@ -140,4 +148,102 @@ def test_heartbeat_loop_blocks() -> None:
     for _ in range(5):
         result = detector.check(msg)
     assert result.get("action") in {"block", "warn"}
+
+
+def test_openclaw_memory_read_whitelisted() -> None:
+    cfg = _cfg(action_exact="warn")
+    cfg["exact"]["threshold"] = 3
+    detector = LoopDetector(config=cfg)
+    for _ in range(3):
+        result = detector.check_request(_read_req("workspace/memory/2026-03-21.md"))
+        assert result.action == "allow"
+    assert detector.get_stats()["exact_detections"] == 0
+
+
+def test_openclaw_memory_md_whitelisted() -> None:
+    cfg = _cfg(action_exact="warn")
+    cfg["exact"]["threshold"] = 3
+    detector = LoopDetector(config=cfg)
+    for _ in range(3):
+        result = detector.check_request(_read_req("workspace/MEMORY.md", tool_name="read_file"))
+        assert result.action == "allow"
+    assert detector.get_stats()["total_loops_detected"] == 0
+
+
+def test_non_memory_read_not_whitelisted() -> None:
+    cfg = _cfg(action_exact="warn")
+    cfg["exact"]["threshold"] = 3
+    detector = LoopDetector(config=cfg)
+    for _ in range(2):
+        detector.check_request(_read_req("/etc/passwd"))
+    third = detector.check_request(_read_req("/etc/passwd"))
+    assert third.action == "warn"
+
+
+def test_whitelist_disabled() -> None:
+    cfg = _cfg(action_exact="warn")
+    cfg["exact"]["threshold"] = 3
+    cfg["openclaw_memory_whitelist"] = False
+    detector = LoopDetector(config=cfg)
+    for _ in range(2):
+        detector.check_request(_read_req("workspace/memory/2026-03-21.md"))
+    third = detector.check_request(_read_req("workspace/memory/2026-03-21.md"))
+    assert third.action == "warn"
+
+
+def test_whitelist_only_read_tool() -> None:
+    cfg = _cfg(action_exact="warn")
+    cfg["exact"]["threshold"] = 3
+    detector = LoopDetector(config=cfg)
+    for _ in range(2):
+        detector.check_request(_read_req("workspace/memory/2026-03-21.md", tool_name="execute"))
+    third = detector.check_request(_read_req("workspace/memory/2026-03-21.md", tool_name="execute"))
+    assert third.action == "warn"
+
+
+def test_memory_date_pattern() -> None:
+    detector = LoopDetector(config=_cfg())
+    assert detector._is_openclaw_memory_read("read", {"path": "workspace/memory/2026-03-20.md"})
+
+
+def test_memory_md_pattern() -> None:
+    detector = LoopDetector(config=_cfg())
+    assert detector._is_openclaw_memory_read("read_file", {"path": "workspace/MEMORY.md"})
+
+
+def test_non_memory_path() -> None:
+    detector = LoopDetector(config=_cfg())
+    assert not detector._is_openclaw_memory_read("read", {"path": "workspace/code/main.py"})
+
+
+def test_openclaw_session_no_false_loops() -> None:
+    cfg = _cfg(action_exact="warn")
+    cfg["exact"]["threshold"] = 3
+    detector = LoopDetector(config=cfg)
+    for _ in range(5):
+        out = detector.check_request(_read_req("workspace/memory/2026-03-21.md"))
+        assert out.action == "allow"
+
+    real = _req(content="real loop", tools=[{"name": "search", "args": {"query": "x"}}])
+    detector.check_request(real)
+    detector.check_request(real)
+    third = detector.check_request(real)
+
+    assert third.action == "warn"
+    assert detector.get_stats()["exact_detections"] >= 1
+
+
+def test_mixed_traffic() -> None:
+    cfg = _cfg(action_exact="warn")
+    cfg["exact"]["threshold"] = 3
+    detector = LoopDetector(config=cfg)
+    for _ in range(3):
+        detector.check_request(_read_req("workspace/memory/2026-03-21.md"))
+
+    for _ in range(2):
+        detector.check_request(_req(content="loop-me", tools=[{"name": "search", "args": {"query": "y"}}]))
+    third = detector.check_request(_req(content="loop-me", tools=[{"name": "search", "args": {"query": "y"}}]))
+
+    assert third.action == "warn"
+    assert detector.get_stats()["exact_detections"] == 1
 

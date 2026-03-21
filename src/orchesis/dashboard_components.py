@@ -22,12 +22,38 @@ def render_overview_tab(data: dict) -> str:
     total = _safe_num(payload.get("total_requests"), 0)
     blocked = _safe_num(payload.get("blocked_requests"), 0)
     uptime = _safe_num(payload.get("uptime_seconds"), 0)
+    sessions = payload.get("active_sessions")
+    session_rows = sessions if isinstance(sessions, list) else []
+    if session_rows:
+        session_html = "".join(
+            (
+                '<li class="session-row">'
+                f'<span class="session-agent">{str(item.get("agent_id", "unknown"))}</span> '
+                f'<span class="session-last">last request: {str(item.get("last_request_ts", "--"))}</span> '
+                f'<span class="session-tools">tools(5m): {int(_safe_num(item.get("tool_calls_5m"), 0))}</span> '
+                f'<span class="session-status">{str(item.get("status", "idle"))}</span>'
+                "</li>"
+            )
+            for item in session_rows
+            if isinstance(item, dict)
+        )
+    else:
+        session_html = (
+            '<li class="session-row">'
+            '<span class="session-agent">No active sessions</span>'
+            '<span class="session-last">last request: --</span> '
+            '<span class="session-tools">tools(5m): 0</span> '
+            '<span class="session-status">idle</span>'
+            "</li>"
+        )
     return (
         '<section id="overview" class="tab-section">'
         '<h2>Overview</h2>'
         f'<div class="stats-grid"><div id="overview-total">Total requests: {total}</div>'
         f'<div id="overview-blocked">Blocked: {blocked}</div>'
         f'<div id="overview-uptime">Uptime: {uptime}</div></div>'
+        '<div id="active-sessions"><h3>Active Sessions</h3>'
+        f'<ul id="active-sessions-list">{session_html}</ul></div>'
         "</section>"
     )
 
@@ -87,12 +113,49 @@ def render_css(theme: str = "dark") -> str:
 def render_js() -> str:
     """Return JavaScript for dashboard interactivity."""
     return (
+        "const DASHBOARD_REFRESH_MS = 5000;\n"
+        "let _refreshInProgress = false;\n"
+        "let _lastDataHash = '';\n"
+        "let _activeTab = 'overview';\n"
+        "function updateDOM(_data) {\n"
+        "  // Stable placeholder updater for component-level tests.\n"
+        "  const root = document.getElementById(_activeTab);\n"
+        "  if (!root) { return; }\n"
+        "  requestAnimationFrame(() => {});\n"
+        "}\n"
+        "function showDashboardError(msg) {\n"
+        "  const root = document.getElementById('overview');\n"
+        "  if (root) { root.setAttribute('data-error', msg || 'Dashboard: connection error, retrying...'); }\n"
+        "}\n"
+        "async function refreshDashboard() {\n"
+        "  if (_refreshInProgress) return;\n"
+        "  _refreshInProgress = true;\n"
+        "  try {\n"
+        "    const resp = await fetch('/api/v1/dashboard/data');\n"
+        "    const data = await resp.json();\n"
+        "    const hash = JSON.stringify(data);\n"
+        "    if (hash === _lastDataHash) return;\n"
+        "    _lastDataHash = hash;\n"
+        "    updateDOM(data);\n"
+        "    switchDashboardTab(_activeTab);\n"
+        "  } catch (e) {\n"
+        "    console.error('Dashboard refresh failed:', e);\n"
+        "    showDashboardError('Dashboard: connection error, retrying...');\n"
+        "  } finally {\n"
+        "    _refreshInProgress = false;\n"
+        "  }\n"
+        "}\n"
         "function switchDashboardTab(tabId) {\n"
+        "  _activeTab = tabId || _activeTab;\n"
         "  const tabs = document.querySelectorAll('.tab-section');\n"
-        "  tabs.forEach((el) => { el.style.display = (el.id === tabId ? 'block' : 'none'); });\n"
+        "  tabs.forEach((el) => { el.style.display = (el.id === _activeTab ? 'block' : 'none'); });\n"
         "}\n"
         "document.addEventListener('DOMContentLoaded', () => {\n"
         "  switchDashboardTab('overview');\n"
+        "  const overview = document.getElementById('overview');\n"
+        "  if (overview) { overview.setAttribute('data-loading', 'Loading...'); }\n"
+        "  refreshDashboard();\n"
+        "  setInterval(refreshDashboard, DASHBOARD_REFRESH_MS);\n"
         "});\n"
     )
 

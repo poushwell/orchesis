@@ -67,6 +67,7 @@ class ThreatSignature:
     mitre_ref: str = ""
     first_seen: str = ""
     confidence: float = 0.9
+    frameworks_exclude: tuple[str, ...] = ()
 
 
 @dataclass
@@ -212,6 +213,7 @@ BUILT_IN_THREATS: tuple[ThreatSignature, ...] = (
         ),
         owasp_ref="ASI-02",
         default_action=MatchAction.BLOCK,
+        frameworks_exclude=("openclaw",),
     ),
     ThreatSignature(
         threat_id="ORCH-TA-003",

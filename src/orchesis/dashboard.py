@@ -2076,11 +2076,11 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
   <div id="toast" class="toast"></div>
 
   <script>
-    const POLL_INTERVAL = 3000;
+    const POLL_INTERVAL = 5000;
     const POLL_INTERVALS = {
       normal: {
-        shield: 3000,
-        threats: 3000,
+        shield: 5000,
+        threats: 5000,
         cache: 5000,
         overwatch: 3000,
         cost: 10000,
@@ -2097,6 +2097,10 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     let perfMode = localStorage.getItem('orchesis-perf') === 'true';
     const loadedTabs = new Set(['shield']);
     let currentTab = "shield";
+    let _activeTab = "shield";
+    let _refreshInProgress = false;
+    let _lastDataHash = "";
+    let _dashboardErrorShown = false;
     let pollTimer = null;
     let selectedAgentProfileId = "";
     let lastOverview = null;
@@ -2667,6 +2671,20 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       renderPerfIndicator();
     }
 
+    function setStableHTML(el, html){
+      if(!el){ return; }
+      const next = String(html || "");
+      if (el.dataset && el.dataset.lastHtml === next) {
+        return;
+      }
+      requestAnimationFrame(()=>{
+        el.innerHTML = next;
+        if (el.dataset) {
+          el.dataset.lastHtml = next;
+        }
+      });
+    }
+
     function renderPerfIndicator(){
       const indicator = document.getElementById("perf-indicator");
       const conn = document.getElementById("conn-text");
@@ -2687,12 +2705,12 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       const mode = perfMode ? "performance" : "normal";
       const intervals = POLL_INTERVALS[mode] || {};
       const fallback = perfMode ? 30000 : POLL_INTERVAL;
-      return Number(intervals[tab] || fallback);
+      return Math.max(5000, Number(intervals[tab] || fallback));
     }
 
     function applyPollIntervals(){
       if(pollTimer){ clearInterval(pollTimer); }
-      pollTimer = setInterval(()=>{ pollCurrent(); }, pollIntervalForTab(currentTab));
+      pollTimer = setInterval(()=>{ refreshDashboard(); }, 5000);
       renderPerfIndicator();
     }
 
@@ -2900,31 +2918,30 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       updateAnimatedMetric("m-task-success", sr * 100, (v)=>Number(v || 0).toFixed(1) + "%");
 
       const eventsEl = document.getElementById("events");
-      eventsEl.innerHTML = "";
+      setStableHTML(eventsEl, "");
       const events = Array.isArray(data.recent_events) ? data.recent_events.slice(0, 10) : [];
       if(events.length === 0){
-        eventsEl.innerHTML = `<div class="empty">No recent events.</div>`;
+        setStableHTML(eventsEl, `<div class="empty">No recent events.</div>`);
       }else{
+        const eventRows = [];
         events.forEach((ev)=>{
           const sev = String(ev.severity || "info").toLowerCase();
           const type = String(ev.type || "event").toUpperCase();
-          const row = document.createElement("div");
-          row.className = "event event-item";
-          row.innerHTML = `<span class="subtle">${fmtTs(ev.timestamp)}</span><span class="sev ${sev}">${type}</span><span>${ev.description || ""}</span>`;
-          eventsEl.appendChild(row);
+          eventRows.push(`<div class="event event-item"><span class="subtle">${fmtTs(ev.timestamp)}</span><span class="sev ${sev}">${type}</span><span>${ev.description || ""}</span></div>`);
         });
+        setStableHTML(eventsEl, eventRows.join(""));
       }
 
       const cb = data.circuit_breakers || {};
       const cbEl = document.getElementById("cb-list");
       const names = Object.keys(cb);
       if(names.length === 0){
-        cbEl.innerHTML = `<div class="empty">No circuit breaker data.</div>`;
+        setStableHTML(cbEl, `<div class="empty">No circuit breaker data.</div>`);
       }else{
-        cbEl.innerHTML = names.map((name)=>{
+        setStableHTML(cbEl, names.map((name)=>{
           const st = String(cb[name].state || "closed").toLowerCase();
           return `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);"><span>${name}</span><span class="cb-pill ${st}">${st}</span><span class="subtle">failures: ${fmtNum(cb[name].failures||0)}</span></div>`;
-        }).join("");
+        }).join(""));
       }
 
       const pool = data.connection_pool || {};
@@ -2934,11 +2951,11 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       const poolHitRatio = (hits + misses) > 0 ? (hits / (hits + misses) * 100.0) : 0.0;
       const hosts = pool.pools || {};
       const hostRows = Object.keys(hosts).map((k)=> `${k}: ${hosts[k]}`).join(" | ");
-      poolEl.innerHTML = `
+      setStableHTML(poolEl, `
         <div>active: ${fmtNum(pool.active || 0)}, total: ${fmtNum(pool.total_connections || 0)}</div>
         <div>hits/misses: ${fmtNum(hits)}/${fmtNum(misses)} (${poolHitRatio.toFixed(1)}% hit)</div>
         <div class="subtle">${hostRows || "no hosts"}</div>
-      `;
+      `);
 
       const budget = data.budget || {};
       const limit = Number(budget.limit_usd || 0);
@@ -4684,8 +4701,49 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       return pollTab(currentTab);
     }
 
+    function showDashboardLoading(){
+      const eventsEl = document.getElementById("events");
+      if(eventsEl && !eventsEl.innerHTML.trim()){
+        eventsEl.textContent = "Loading...";
+      }
+    }
+
+    function showDashboardError(){
+      if(_dashboardErrorShown){ return; }
+      _dashboardErrorShown = true;
+      const eventsEl = document.getElementById("events");
+      if(eventsEl){
+        eventsEl.textContent = "Dashboard: connection error, retrying...";
+      }
+    }
+
+    async function refreshDashboard(){
+      if (_refreshInProgress) { return; }
+      _refreshInProgress = true;
+      try {
+        const snapshot = await fetchData("/api/dashboard/overview");
+        if(!snapshot){
+          showDashboardError();
+          return;
+        }
+        const hash = JSON.stringify(snapshot);
+        if(hash === _lastDataHash){
+          return;
+        }
+        _lastDataHash = hash;
+        _dashboardErrorShown = false;
+        await pollCurrent();
+      } catch (e) {
+        console.error("Dashboard refresh failed:", e);
+        showDashboardError();
+      } finally {
+        _refreshInProgress = false;
+      }
+    }
+
     function switchTab(tab){
       currentTab = tab;
+      _activeTab = tab;
       document.querySelectorAll(".tab-btn[data-tab]").forEach((btn)=>{
         const isActive = btn.dataset.tab === tab;
         btn.classList.toggle("active", isActive);
@@ -4900,9 +4958,10 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       applyHighContrast(localStorage.getItem("orchesis-hc") === "true");
       bindUI();
       switchTab("shield");
+      showDashboardLoading();
       renderNotifications();
       renderPerfIndicator();
-      await pollShield();
+      await refreshDashboard();
       await pollNotifications();
       applyPollIntervals();
       if(notifTimer){ clearInterval(notifTimer); }

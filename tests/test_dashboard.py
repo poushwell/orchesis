@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import threading
@@ -182,7 +183,7 @@ def test_poll_intervals_defined() -> None:
     assert "const POLL_INTERVALS = {" in html
     assert "normal: {" in html
     assert "performance: {" in html
-    assert "shield: 3000" in html
+    assert "shield: 5000" in html
     assert "shield: 30000" in html
 
 
@@ -777,6 +778,68 @@ def test_render_js() -> None:
     assert isinstance(js, str)
     assert js
     assert "function" in js or "addEventListener" in js
+
+
+def test_js_has_debounce() -> None:
+    js = render_js()
+    assert "_refreshInProgress" in js
+
+
+def test_js_has_interval() -> None:
+    js = render_js()
+    assert "setInterval" in js
+
+
+def test_js_interval_minimum_5s() -> None:
+    js = render_js()
+    const_match = re.search(r"DASHBOARD_REFRESH_MS\s*=\s*(\d+)", js)
+    assert const_match is not None
+    assert int(const_match.group(1)) >= 5000
+    assert "setInterval(refreshDashboard, DASHBOARD_REFRESH_MS)" in js
+
+
+def test_js_has_data_hash_check() -> None:
+    js = render_js()
+    assert "_lastDataHash" in js
+    assert "JSON.stringify" in js
+
+
+def test_js_has_tab_state() -> None:
+    js = render_js()
+    assert "_activeTab" in js
+    assert "switchDashboardTab" in js
+
+
+def test_js_has_error_handling() -> None:
+    js = render_js()
+    assert "catch" in js or "error" in js.lower()
+
+
+def test_js_has_loading_and_retry_messages() -> None:
+    js = render_js()
+    assert "Loading..." in js
+    assert "Dashboard: connection error, retrying..." in js
+
+
+def test_overview_has_active_sessions() -> None:
+    html = render_overview_tab(
+        {
+            "total_requests": 10,
+            "blocked_requests": 1,
+            "uptime_seconds": 100,
+            "active_sessions": [
+                {
+                    "agent_id": "agent-1",
+                    "last_request_ts": "2026-03-17T10:00:00Z",
+                    "tool_calls_5m": 4,
+                    "status": "active",
+                }
+            ],
+        }
+    )
+    assert "Active Sessions" in html
+    assert "agent-1" in html
+    assert "tools(5m): 4" in html
 
 
 def test_render_overview_tab() -> None:

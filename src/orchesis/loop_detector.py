@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
+
+OPENCLAW_MEMORY_PATTERNS = [
+    r"memory/\d{4}-\d{2}-\d{2}\.md$",
+    r"MEMORY\.md$",
+    r"memory/.*\.md$",
+]
+_OPENCLAW_MEMORY_RE = [re.compile(p) for p in OPENCLAW_MEMORY_PATTERNS]
 
 
 @dataclass
@@ -60,6 +68,7 @@ class LoopDetector:
         self._notify = bool(on_detect_cfg.get("notify", True))
         self._track_max_cost_saved = bool(on_detect_cfg.get("max_cost_saved", True))
         self._similarity_check = bool(similarity_check)
+        self._openclaw_memory_whitelist = bool(safe_cfg.get("openclaw_memory_whitelist", True))
 
         # New loop pattern storage
         self._exact_patterns: dict[str, list[float]] = defaultdict(list)
@@ -87,6 +96,61 @@ class LoopDetector:
             return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
         except Exception:
             return ""
+
+    @staticmethod
+    def _coerce_tool_name_args(tool_call: Any) -> tuple[str, dict[str, Any]]:
+        name = ""
+        args: dict[str, Any] = {}
+        if isinstance(tool_call, dict):
+            raw_name = tool_call.get("name") or tool_call.get("tool")
+            if isinstance(raw_name, str):
+                name = raw_name.strip().lower()
+            raw_args = tool_call.get("args", {})
+            if isinstance(raw_args, dict):
+                args = dict(raw_args)
+            elif isinstance(raw_args, str):
+                try:
+                    parsed = json.loads(raw_args)
+                    if isinstance(parsed, dict):
+                        args = parsed
+                except Exception:
+                    args = {}
+        else:
+            raw_name = getattr(tool_call, "name", "") or getattr(tool_call, "tool", "")
+            if isinstance(raw_name, str):
+                name = raw_name.strip().lower()
+            raw_args = getattr(tool_call, "args", {})
+            if isinstance(raw_args, dict):
+                args = dict(raw_args)
+            elif isinstance(raw_args, str):
+                try:
+                    parsed = json.loads(raw_args)
+                    if isinstance(parsed, dict):
+                        args = parsed
+                except Exception:
+                    args = {}
+        return name, args
+
+    def _is_openclaw_memory_read(self, tool_name: str, args: dict[str, Any]) -> bool:
+        """Check if this is an OpenClaw memory file read (whitelisted)."""
+        if tool_name not in ("read", "read_file", "file_read"):
+            return False
+        if not isinstance(args, dict):
+            return False
+        path = str(args.get("path", "") or args.get("file", "") or args.get("filename", "")).strip()
+        if not path:
+            return False
+        normalized = path.replace("\\", "/")
+        return any(pat.search(normalized) for pat in _OPENCLAW_MEMORY_RE)
+
+    def _all_tool_calls_are_openclaw_memory_reads(self, tool_calls: list[Any]) -> bool:
+        if not tool_calls:
+            return False
+        for item in tool_calls:
+            name, args = self._coerce_tool_name_args(item)
+            if not self._is_openclaw_memory_read(name, args):
+                return False
+        return True
 
     def _make_exact_hash(self, model: str, messages: list[dict[str, Any]]) -> str:
         blob = f"{model}:{self._json_dumps(messages)}"
@@ -130,6 +194,9 @@ class LoopDetector:
         content_text = str(parsed_request.get("content_text", ""))
         prompt_len = len(content_text)
         now = time.monotonic()
+
+        if self._openclaw_memory_whitelist and self._all_tool_calls_are_openclaw_memory_reads(safe_tool_calls):
+            return LoopDecision("allow", "", 1, 0.0, "none")
 
         exact_hash = self._make_exact_hash(model, safe_messages)
         fuzzy_hash = self._make_fuzzy_hash(model, safe_tool_calls, prompt_len)

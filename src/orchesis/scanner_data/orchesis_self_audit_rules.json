@@ -1,0 +1,118 @@
+{
+  "checks": [
+    {
+      "id": "orch_001",
+      "field": "proxy.upstream.openai",
+      "check": "must_be_https",
+      "severity": "HIGH",
+      "message": "OpenAI upstream should use HTTPS to avoid plaintext transport.",
+      "fix": "Set proxy.upstream.openai to an https:// URL."
+    },
+    {
+      "id": "orch_002",
+      "field": "proxy.upstream.anthropic",
+      "check": "must_be_https",
+      "severity": "HIGH",
+      "message": "Anthropic upstream should use HTTPS to avoid plaintext transport.",
+      "fix": "Set proxy.upstream.anthropic to an https:// URL."
+    },
+    {
+      "id": "orch_003",
+      "field": "loop_detection.enabled",
+      "check": "must_be_true",
+      "severity": "HIGH",
+      "message": "Loop detection is disabled - repeated request loops may go undetected.",
+      "fix": "Set loop_detection.enabled: true."
+    },
+    {
+      "id": "orch_004",
+      "field": "loop_detection.block_threshold",
+      "check": "should_be_lte_5",
+      "severity": "MEDIUM",
+      "message": "Loop block threshold above 5 may allow expensive loops before blocking.",
+      "fix": "Set loop_detection.block_threshold to 5 or lower."
+    },
+    {
+      "id": "orch_005",
+      "field": "budgets.daily",
+      "check": "must_be_set",
+      "severity": "HIGH",
+      "message": "No daily budget configured - agent spending is not bounded.",
+      "fix": "Set budgets.daily to a finite USD amount (for example 10.0)."
+    },
+    {
+      "id": "orch_006",
+      "field": "rules[].name",
+      "check": "must_include_rate_limit",
+      "severity": "HIGH",
+      "message": "No rate_limit rule found in policy rules.",
+      "fix": "Add a rate_limit rule with max_requests_per_minute."
+    },
+    {
+      "id": "orch_007",
+      "field": "rules[].name",
+      "check": "must_include_budget_limit",
+      "severity": "HIGH",
+      "message": "No budget_limit rule found in policy rules.",
+      "fix": "Add a budget_limit rule with max_cost_per_call and optional daily_budget."
+    },
+    {
+      "id": "orch_008",
+      "field": "recording.enabled",
+      "check": "should_be_true",
+      "severity": "MEDIUM",
+      "message": "Session recording is disabled - forensic replay is limited.",
+      "fix": "Set recording.enabled: true."
+    },
+    {
+      "id": "orch_009",
+      "field": "threat_intel.enabled",
+      "check": "must_be_true",
+      "severity": "HIGH",
+      "message": "Threat intelligence is disabled - known threat signatures are not applied.",
+      "fix": "Set threat_intel.enabled: true."
+    },
+    {
+      "id": "orch_010",
+      "field": "api.token",
+      "check": "min_length_12",
+      "severity": "HIGH",
+      "message": "API token is missing or too short.",
+      "fix": "Set api.token to a strong token with at least 12 characters."
+    },
+    {
+      "id": "orch_011",
+      "field": "default_trust_tier",
+      "check": "should_not_be_operator_or_principal_or_admin",
+      "severity": "HIGH",
+      "message": "Default trust tier is too permissive.",
+      "fix": "Set default_trust_tier to a lower tier (for example intern)."
+    },
+    {
+      "id": "orch_012",
+      "field": "alerts.enabled",
+      "check": "should_be_true",
+      "severity": "MEDIUM",
+      "message": "Alerting is disabled - operational incidents may be missed.",
+      "fix": "Set alerts.enabled: true and configure Telegram or webhook targets."
+    },
+    {
+      "id": "orch_013",
+      "field": "compliance.enabled",
+      "check": "should_be_true",
+      "severity": "MEDIUM",
+      "message": "Compliance checks are disabled.",
+      "fix": "Set compliance.enabled: true."
+    },
+    {
+      "id": "orch_014",
+      "field": "proxy.connection_pool.max_total",
+      "check": "must_be_positive",
+      "severity": "MEDIUM",
+      "message": "Proxy connection pool size must be greater than zero.",
+      "fix": "Set proxy.connection_pool.max_total to a positive integer (for example 50)."
+    }
+  ],
+  "last_updated": "2026-03-21",
+  "total_checks": 14
+}
