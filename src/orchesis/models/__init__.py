@@ -6,7 +6,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from orchesis.models.ecosystem import *
+from orchesis.models.ecosystem import (
+    Alert,
+    BenchmarkEntry,
+    Finding,
+    IncidentRecord,
+    ReliabilityReport,
+    SLOTarget,
+    Severity,
+)
 
 
 @dataclass

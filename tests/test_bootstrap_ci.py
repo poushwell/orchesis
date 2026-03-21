@@ -66,7 +66,9 @@ def test_bootstrap_ci_reproducible() -> None:
 
 
 def test_bootstrap_ci_wider_with_less_data() -> None:
-    statistic_fn = lambda values: sum(values) / len(values)
+    def statistic_fn(values):
+        return sum(values) / len(values)
+
     base = [0.0, 0.1, 0.2, 0.4, 0.8, 1.0, 0.3, 0.6, 0.9, 0.5]
     small = BootstrapCI(base, statistic_fn=statistic_fn, seed=42).compute(n_bootstrap=1000)
     large = BootstrapCI(base * 10, statistic_fn=statistic_fn, seed=42).compute(n_bootstrap=1000)

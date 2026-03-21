@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from orchesis.casura.api_v2 import Incident
+from orchesis.models import Decision
 from orchesis.models.ecosystem import (
     Alert,
     BenchmarkEntry,
@@ -124,10 +127,6 @@ def test_existing_tests_unbroken() -> None:
     from orchesis.casura.api_v2 import Incident as ExistingIncident
 
     assert ExistingIncident is Incident
-
-from datetime import datetime
-
-from orchesis.models import Decision
 
 
 def test_decision_defaults() -> None:
