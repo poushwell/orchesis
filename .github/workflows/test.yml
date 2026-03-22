@@ -35,9 +35,17 @@ jobs:
           import tomllib
           with open('pyproject.toml', 'rb') as f:
               data = tomllib.load(f)
-          deps = data.get('project', {}).get('dependencies', [])
-          assert 'pyyaml>=6.0' in deps, f'Missing required dependency in project.dependencies: {deps}'
-          print('✓ Runtime dependencies include pyyaml>=6.0')
+          project = data.get('project', {})
+          deps = project.get('dependencies', [])
+          assert isinstance(deps, list), 'project.dependencies must be a list'
+          # Core dependencies are intentionally empty; extras carry optional stacks.
+          optional = project.get('optional-dependencies', {})
+          yaml_extra = optional.get('yaml', [])
+          assert any('pyyaml' in str(item).lower() for item in yaml_extra), (
+              f'pyyaml must be listed in [project.optional-dependencies].yaml: {yaml_extra!r}'
+          )
+          print('OK: project.dependencies valid (empty core deps allowed)')
+          print('OK: pyyaml declared under optional-dependencies.yaml')
           "
 
       - name: Verify CLI works
