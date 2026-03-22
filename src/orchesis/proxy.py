@@ -1150,10 +1150,41 @@ def _extract_context(request: Request, body_json: dict[str, Any] | None) -> dict
     agent_header = request.headers.get("x-agent")
     if isinstance(agent_header, str) and agent_header.strip():
         context["agent"] = agent_header.strip()
-    session_header = request.headers.get("x-session")
+    session_header = _resolve_session_id(request.headers)
     if isinstance(session_header, str) and session_header.strip():
         context["session"] = session_header.strip()
     return context
+
+
+def _resolve_session_id(headers: Any) -> str:
+    """Resolve canonical request session scope from known headers."""
+    if headers is None:
+        return "default"
+
+    def _header(name: str) -> str:
+        value = ""
+        try:
+            value = headers.get(name, "")  # type: ignore[attr-defined]
+        except Exception:
+            value = ""
+        if not value:
+            try:
+                value = headers.get(name.lower(), "")  # type: ignore[attr-defined]
+            except Exception:
+                value = ""
+        return str(value).strip() if value is not None else ""
+
+    for header in (
+        "x-orchesis-session-id",
+        "x-openclaw-session-id",
+        "x-openclaw-session",
+        "x-session-id",
+        "x-session",
+    ):
+        sid = _header(header)
+        if sid:
+            return sid
+    return "default"
 
 
 def create_proxy_app(
@@ -1443,11 +1474,7 @@ def create_proxy_app(
 
         raw_body = await request.body()
         request_started = time.perf_counter()
-        session_id = (
-            request.headers.get("x-session")
-            or request.headers.get("x-orchesis-session-id")
-            or uuid.uuid4().hex
-        )
+        session_id = _resolve_session_id(request.headers)
         request_id = uuid.uuid4().hex
         body_json: dict[str, Any] | None = None
         if raw_body:
@@ -3235,16 +3262,11 @@ class LLMHTTPProxy:
         ctx.body = body
         ctx.parsed_req = parse_request(body, ctx.handler.path)
         ctx.original_model = ctx.parsed_req.model or str(body.get("model", ""))
-        parsed_session_id = (
-            ctx.handler.headers.get("x-openclaw-session")
-            or ctx.handler.headers.get("x-session-id")
-            or ctx.handler.headers.get("x-request-id")
-            or "unknown"
-        )
+        parsed_session_id = _resolve_session_id(ctx.handler.headers)
         if isinstance(parsed_session_id, str):
-            ctx.proc_result["session_id"] = parsed_session_id.strip() or "unknown"
+            ctx.proc_result["session_id"] = parsed_session_id.strip() or "default"
             if not ctx.session_id:
-                ctx.session_id = parsed_session_id.strip() or "unknown"
+                ctx.session_id = parsed_session_id.strip() or "default"
         return True
 
     def _compute_fast_path_skip_phases(self, ctx: _RequestContext) -> None:
@@ -3622,13 +3644,11 @@ class LLMHTTPProxy:
     @staticmethod
     def _resolve_loop_session_scope(ctx: _RequestContext) -> str:
         headers = ctx.handler.headers
-        stable_session = (
-            headers.get("x-openclaw-session")
-            or headers.get("x-session-id")
-            or headers.get("x-session")
-            or headers.get("x-orchesis-session-id")
-            or (ctx.session_id if isinstance(ctx.session_id, str) and ctx.session_id.strip() not in {"", "unknown"} else "")
-        )
+        stable_session = _resolve_session_id(headers)
+        if stable_session == "default" and isinstance(ctx.session_id, str):
+            candidate = ctx.session_id.strip()
+            if candidate and candidate != "unknown":
+                stable_session = candidate
         if isinstance(stable_session, str) and stable_session.strip():
             return stable_session.strip()
         stable_agent = (
@@ -5794,21 +5814,7 @@ class LLMHTTPProxy:
 
     @staticmethod
     def _resolve_session_id(headers: Any) -> str:
-        sid = (
-            headers.get("X-OpenClaw-Session")
-            or headers.get("x-openclaw-session")
-            or headers.get("X-Session-Id")
-            or headers.get("x-session-id")
-            or headers.get("X-Request-Id")
-            or headers.get("x-request-id")
-            or headers.get("X-Session")
-            or headers.get("x-session")
-        )
-        if not isinstance(sid, str) or not sid.strip():
-            sid = headers.get("X-Orchesis-Session-Id") or headers.get("x-orchesis-session-id")
-        if isinstance(sid, str) and sid.strip():
-            return sid.strip()
-        return "unknown"
+        return _resolve_session_id(headers)
 
     @staticmethod
     def _normalize_header_map(headers: Any) -> dict[str, str]:

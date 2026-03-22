@@ -2079,18 +2079,28 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     const POLL_INTERVAL = 5000;
     const POLL_INTERVALS = {
       normal: {
-        shield: 5000,
-        threats: 5000,
-        cache: 5000,
-        overwatch: 3000,
-        cost: 10000,
+        shield: 10000,
+        agents: 12000,
+        sessions: 12000,
+        threats: 12000,
+        flow: 30000,
+        cost: 30000,
+        cache: 30000,
+        overwatch: 30000,
+        experiments: 60000,
+        compliance: 30000,
       },
       performance: {
-        shield: 30000,
-        threats: 30000,
+        shield: 20000,
+        agents: 24000,
+        sessions: 24000,
+        threats: 24000,
+        flow: 60000,
+        cost: 60000,
         cache: 60000,
         overwatch: 60000,
-        cost: 120000,
+        experiments: 120000,
+        compliance: 60000,
       }
     };
     const RATE_LIMIT_REFRESH_MS = 10000;
@@ -2112,6 +2122,8 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     let notifLastTs = 0;
     let rateLimitSnapshot = null;
     let lastRateLimitFetchMs = 0;
+    let overviewCache = { value: null, fetchedAt: 0, ttlMs: 4000 };
+    let statsCache = { value: null, fetchedAt: 0, ttlMs: 4000 };
     const API_TOKEN = String((window && window.API_TOKEN) || localStorage.getItem("API_TOKEN") || "").trim();
     let searchTimer = null;
     const SHORTCUTS = {
@@ -2580,7 +2592,7 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       }
       if (key.toLowerCase() === "r" && key.length === 1) {
         e.preventDefault();
-        pollCurrent();
+        refreshDashboard();
         showToast("Refreshed");
         resetKeySequence();
         return;
@@ -2710,8 +2722,38 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
 
     function applyPollIntervals(){
       if(pollTimer){ clearInterval(pollTimer); }
-      pollTimer = setInterval(()=>{ refreshDashboard(); }, 5000);
+      const intervalMs = pollIntervalForTab(currentTab);
+      pollTimer = setInterval(()=>{ refreshDashboard(); }, intervalMs);
       renderPerfIndicator();
+    }
+
+    function refreshCacheTtl(){
+      const ttl = Math.max(1000, pollIntervalForTab(currentTab) - 1000);
+      overviewCache.ttlMs = ttl;
+      statsCache.ttlMs = ttl;
+    }
+
+    function cacheFresh(cache){
+      if(!cache || !cache.value){ return false; }
+      return (Date.now() - Number(cache.fetchedAt || 0)) < Number(cache.ttlMs || 0);
+    }
+
+    async function getOverviewSnapshot(force = false){
+      refreshCacheTtl();
+      if(!force && cacheFresh(overviewCache)){ return overviewCache.value; }
+      const snapshot = await fetchData("/api/dashboard/overview");
+      if(!snapshot){ return null; }
+      overviewCache = { value: snapshot, fetchedAt: Date.now(), ttlMs: overviewCache.ttlMs };
+      return snapshot;
+    }
+
+    async function getStatsSnapshot(force = false){
+      refreshCacheTtl();
+      if(!force && cacheFresh(statsCache)){ return statsCache.value; }
+      const stats = await fetchData("/stats");
+      if(!stats){ return null; }
+      statsCache = { value: stats, fetchedAt: Date.now(), ttlMs: statsCache.ttlMs };
+      return stats;
     }
 
     function togglePerfMode() {
@@ -4415,29 +4457,31 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     }
 
     async function pollOverwatch(){
-      const [snapshot, teams, graph] = await Promise.all([
-        fetchData("/api/v1/overwatch"),
-        fetchData("/api/v1/overwatch/teams"),
-        fetchData("/api/v1/agents/graph"),
-      ]);
+      const snapshot = await fetchData("/api/v1/overwatch");
+      const teams = await fetchData("/api/v1/overwatch/teams");
+      const graph = await fetchData("/api/v1/agents/graph");
+      if(!snapshot || !teams || !graph){
+        return;
+      }
       const payload = Object.assign({}, snapshot || {});
       payload.teams = (teams && Array.isArray(teams.teams)) ? teams.teams : [];
       payload.graph = (graph && typeof graph === "object") ? graph : { nodes: [], edges: [], central_agent: "", isolated_agents: [] };
       renderOverwatch(payload);
     }
 
-    async function pollShield(){
-      const [data, stats, savings, health, tokenYield, contextBudget, communityStatus, communityStats, heatmap] = await Promise.all([
-        fetchData("/api/dashboard/overview"),
-        fetchData("/stats"),
-        fetchData("/api/v1/savings"),
-        fetchData("/api/v1/agents/__global__/health"),
-        fetchData("/api/v1/token-yield/global"),
-        fetchData("/api/v1/context-budget/stats"),
-        fetchData("/api/v1/community/status"),
-        fetchData("/api/v1/community/stats"),
-        fetchData("/api/v1/heatmap?days=7"),
-      ]);
+    async function pollShield(shared){
+      const data = shared && shared.overview ? shared.overview : await getOverviewSnapshot();
+      const stats = shared && shared.stats ? shared.stats : await getStatsSnapshot();
+      const savings = await fetchData("/api/v1/savings");
+      const health = await fetchData("/api/v1/agents/__global__/health");
+      const tokenYield = await fetchData("/api/v1/token-yield/global");
+      const contextBudget = await fetchData("/api/v1/context-budget/stats");
+      const communityStatus = await fetchData("/api/v1/community/status");
+      const communityStats = await fetchData("/api/v1/community/stats");
+      const heatmap = await fetchData("/api/v1/heatmap?days=7");
+      if(!data || !stats || !savings || !health || !tokenYield || !contextBudget || !communityStatus || !communityStats || !heatmap){
+        return;
+      }
       const now = Date.now();
       if (!rateLimitSnapshot || (now - lastRateLimitFetchMs) >= RATE_LIMIT_REFRESH_MS) {
         const freshRateLimits = await fetchData("/api/v1/rate-limits/status");
@@ -4453,14 +4497,17 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
     }
     async function pollAgents(){
       const data = await fetchData("/api/dashboard/agents");
+      if(!data){ return; }
       renderAgents(data);
     }
     async function pollSessions(){
       const data = await fetchData("/api/sessions");
+      if(!data){ return; }
       renderSessions(data);
     }
     async function pollFlow(){
       const sessionsResp = await fetchData("/api/flow/sessions");
+      if(!sessionsResp){ return; }
       const sessions = (sessionsResp && Array.isArray(sessionsResp.sessions)) ? sessionsResp.sessions : [];
       const select = document.getElementById("flow-session-select");
       const current = select.value;
@@ -4468,30 +4515,34 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       if(current && sessions.some((s)=>s.id === current)){ select.value = current; }
       const sid = select.value || (sessions[0] ? sessions[0].id : "");
       const recent = await fetchData("/api/v1/requests/recent?limit=20");
+      if(!recent){ return; }
       requestInspectorItems = (recent && Array.isArray(recent.requests)) ? recent.requests : [];
       renderRequestInspectorList();
       if(!sid){ renderFlowAnalysis(null, null, null); return; }
       let timelinePromise = fetchData(`/api/v1/flow/timeline?session_id=${encodeURIComponent(sid)}&limit=40`);
-      const [analysis, graph] = await Promise.all([
-        fetchData(`/api/flow/analyze/${encodeURIComponent(sid)}`),
-        fetchData(`/api/flow/graph/${encodeURIComponent(sid)}`)
-      ]);
+      const analysis = await fetchData(`/api/flow/analyze/${encodeURIComponent(sid)}`);
+      const graph = await fetchData(`/api/flow/graph/${encodeURIComponent(sid)}`);
+      if(!analysis || !graph){
+        return;
+      }
       let timeline = await timelinePromise;
       if(!timeline){
         timeline = await fetchData(`/api/flow/timeline?session_id=${encodeURIComponent(sid)}&limit=40`);
       }
+      if(!timeline){ return; }
       renderFlowAnalysis(analysis, graph, timeline);
       if(!requestInspectorActiveId && requestInspectorItems.length > 0){
         loadRequestInspection(String(requestInspectorItems[0].request_id || ""));
       }
     }
-    async function pollCompliance(){
-      const [summary, coverage, findings, overview] = await Promise.all([
-        fetchData("/api/compliance/summary"),
-        fetchData("/api/compliance/coverage"),
-        fetchData("/api/compliance/findings?limit=10"),
-        fetchData("/api/dashboard/overview"),
-      ]);
+    async function pollCompliance(shared){
+      const summary = await fetchData("/api/compliance/summary");
+      const coverage = await fetchData("/api/compliance/coverage");
+      const findings = await fetchData("/api/compliance/findings?limit=10");
+      const overview = shared && shared.overview ? shared.overview : await getOverviewSnapshot();
+      if(!summary || !coverage || !findings || !overview){
+        return;
+      }
       renderCompliance(summary, coverage, findings, overview);
     }
 
@@ -4500,28 +4551,29 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       renderApprovals(data || {});
     }
 
-    async function pollExperiments(){
-      const [experiments, outcomes, correlations, stats, benchmarkCases, benchmarkResults] = await Promise.all([
-        fetchData("/api/experiments"),
-        fetchData("/api/tasks/outcomes"),
-        fetchData("/api/tasks/correlations"),
-        fetchData("/stats"),
-        fetchData("/api/v1/benchmark/cases"),
-        fetchData("/api/v1/benchmark/results"),
-      ]);
+    async function pollExperiments(shared){
+      const experiments = await fetchData("/api/experiments");
+      const outcomes = await fetchData("/api/tasks/outcomes");
+      const correlations = await fetchData("/api/tasks/correlations");
+      const stats = shared && shared.stats ? shared.stats : await getStatsSnapshot();
+      const benchmarkCases = await fetchData("/api/v1/benchmark/cases");
+      const benchmarkResults = await fetchData("/api/v1/benchmark/results");
+      if(!experiments || !outcomes || !correlations || !stats || !benchmarkCases || !benchmarkResults){
+        return;
+      }
       renderExperiments(experiments, outcomes, correlations, stats, benchmarkCases, benchmarkResults);
     }
 
     async function pollThreats(){
-      const [threats, stats] = await Promise.all([
-        fetchData("/api/threats"),
-        fetchData("/api/threats/stats"),
-      ]);
+      const threats = await fetchData("/api/threats");
+      const stats = await fetchData("/api/threats/stats");
+      if(!threats || !stats){ return; }
       renderThreats(threats, stats);
     }
 
-    async function pollCache(){
-      const stats = await fetchData("/stats");
+    async function pollCache(shared){
+      const stats = shared && shared.stats ? shared.stats : await getStatsSnapshot();
+      if(!stats){ return; }
       renderCache(stats);
     }
 
@@ -4680,25 +4732,25 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       });
     }
 
-    async function pollTab(tab){
-      if(tab === "shield") return pollShield();
+    async function pollTab(tab, shared){
+      if(tab === "shield") return pollShield(shared);
       if(tab === "agents") return pollAgents();
       if(tab === "sessions") return pollSessions();
       if(tab === "flow") return pollFlow();
-      if(tab === "experiments") return pollExperiments();
+      if(tab === "experiments") return pollExperiments(shared);
       if(tab === "threats") return pollThreats();
-      if(tab === "cache") return pollCache();
+      if(tab === "cache") return pollCache(shared);
       if(tab === "cost") return pollCost();
       if(tab === "research") return pollResearch();
-      if(tab === "compliance") return pollCompliance();
+      if(tab === "compliance") return pollCompliance(shared);
       if(tab === "overwatch") return pollOverwatch();
       if(tab === "channels") return pollChannels();
       if(tab === "ecosystem") return pollEcosystem();
       if(tab === "approvals") return pollApprovals();
     }
 
-    async function pollCurrent(){
-      return pollTab(currentTab);
+    async function pollCurrent(shared){
+      return pollTab(currentTab, shared);
     }
 
     function showDashboardLoading(){
@@ -4721,18 +4773,20 @@ def get_dashboard_html(demo_mode: bool = False) -> str:
       if (_refreshInProgress) { return; }
       _refreshInProgress = true;
       try {
-        const snapshot = await fetchData("/api/dashboard/overview");
-        if(!snapshot){
+        refreshCacheTtl();
+        const snapshot = await getOverviewSnapshot();
+        const stats = await getStatsSnapshot();
+        if(!snapshot || !stats){
           showDashboardError();
           return;
         }
-        const hash = JSON.stringify(snapshot);
+        const hash = JSON.stringify({ overview: snapshot, stats });
         if(hash === _lastDataHash){
           return;
         }
         _lastDataHash = hash;
         _dashboardErrorShown = false;
-        await pollCurrent();
+        await pollCurrent({ overview: snapshot, stats });
       } catch (e) {
         console.error("Dashboard refresh failed:", e);
         showDashboardError();

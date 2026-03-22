@@ -556,14 +556,20 @@ loop_detection:
         upstream_server.server_close()
 
 
-def _post_chat_completion(proxy_port: int, message: str, session_id: str = "loop-session") -> tuple[int, dict[str, str], dict]:
+def _post_chat_completion(
+    proxy_port: int,
+    message: str,
+    session_id: str = "loop-session",
+    *,
+    session_header: str = "X-Session-Id",
+) -> tuple[int, dict[str, str], dict]:
     req = UrlRequest(
         f"http://127.0.0.1:{proxy_port}/v1/chat/completions",
         data=json.dumps({"model": "gpt-4o", "messages": [{"role": "user", "content": message}]}).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer t",
-            "X-Session-Id": session_id,
+            session_header: session_id,
         },
         method="POST",
     )
@@ -725,6 +731,79 @@ loop_detection:
         assert status2 == 200 and "X-Orchesis-Loop-Warning" in headers2
         assert status3 == 200 and "X-Orchesis-Loop-Warning" not in headers3
         assert status4 == 200 and "X-Orchesis-Loop-Warning" not in headers4
+    finally:
+        proxy.stop()
+        upstream_server.shutdown()
+        upstream_server.server_close()
+
+
+def test_resolve_session_id_prefers_openclaw_session_id() -> None:
+    headers = {"x-openclaw-session-id": "sess-1"}
+    assert LLMHTTPProxy._resolve_session_id(headers) == "sess-1"  # noqa: SLF001
+
+
+def test_resolve_session_id_supports_openclaw_session_fallback() -> None:
+    headers = {"x-openclaw-session": "sess-2"}
+    assert LLMHTTPProxy._resolve_session_id(headers) == "sess-2"  # noqa: SLF001
+
+
+def test_resolve_session_id_defaults_when_missing_headers() -> None:
+    assert LLMHTTPProxy._resolve_session_id({}) == "default"  # noqa: SLF001
+
+
+def test_loop_detection_scopes_independently_per_session(tmp_path: Path) -> None:
+    policy = tmp_path / "policy-loop-session-scope.yaml"
+    policy.write_text(
+        """
+rules: []
+loop_detection:
+  enabled: true
+  warn_threshold: 3
+  block_threshold: 4
+  window_seconds: 300
+  content_loop:
+    enabled: true
+    warn_threshold: 3
+    max_identical: 4
+  exact:
+    threshold: 999
+  fuzzy:
+    threshold: 999
+""".strip(),
+        encoding="utf-8",
+    )
+    _MockUpstreamHandler.response_status = 200
+    _MockUpstreamHandler.response_body = {
+        "model": "gpt-4o-mini",
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+    }
+    upstream_server, _ = _start_http_server(_MockUpstreamHandler)
+    port = _pick_free_port()
+    proxy = LLMHTTPProxy(
+        policy_path=str(policy),
+        config=HTTPProxyConfig(
+            host="127.0.0.1",
+            port=port,
+            upstream={
+                "openai": f"http://127.0.0.1:{upstream_server.server_address[1]}",
+                "anthropic": f"http://127.0.0.1:{upstream_server.server_address[1]}",
+            },
+        ),
+    )
+    proxy.start(blocking=False)
+    try:
+        # Alternate between two OpenClaw sessions; counts must not bleed across sessions.
+        status1, _, _ = _post_chat_completion(port, "Read HEARTBEAT.md", "sess-a", session_header="X-OpenClaw-Session-Id")
+        status2, _, _ = _post_chat_completion(port, "Read HEARTBEAT.md", "sess-b", session_header="X-OpenClaw-Session-Id")
+        status3, _, _ = _post_chat_completion(port, "Read HEARTBEAT.md", "sess-a", session_header="X-OpenClaw-Session-Id")
+        status4, _, _ = _post_chat_completion(port, "Read HEARTBEAT.md", "sess-b", session_header="X-OpenClaw-Session-Id")
+        status5, _, _ = _post_chat_completion(port, "Read HEARTBEAT.md", "sess-a", session_header="X-OpenClaw-Session-Id")
+        assert status1 == 200
+        assert status2 == 200
+        assert status3 == 200
+        assert status4 == 200
+        assert status5 == 200
     finally:
         proxy.stop()
         upstream_server.shutdown()

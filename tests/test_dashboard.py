@@ -183,8 +183,15 @@ def test_poll_intervals_defined() -> None:
     assert "const POLL_INTERVALS = {" in html
     assert "normal: {" in html
     assert "performance: {" in html
-    assert "shield: 5000" in html
-    assert "shield: 30000" in html
+    assert "shield: 10000" in html
+    assert "agents: 12000" in html
+    assert "sessions: 12000" in html
+    assert "threats: 12000" in html
+    assert "flow: 30000" in html
+    assert "cost: 30000" in html
+    assert "overwatch: 30000" in html
+    assert "experiments: 60000" in html
+    assert "compliance: 30000" in html
 
 
 def test_lazy_tab_loading_logic() -> None:
