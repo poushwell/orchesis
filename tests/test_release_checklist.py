@@ -42,11 +42,14 @@ def test_all_modules_importable() -> None:
 
 
 def test_zero_external_dependencies() -> None:
-    """Only pyyaml in runtime deps, everything else stdlib."""
+    """Runtime deps stay minimal; pyyaml is optional via extra."""
     root = _project_root()
     pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     deps = [str(item).lower() for item in pyproject.get("project", {}).get("dependencies", [])]
-    assert any("pyyaml" in dep for dep in deps)
+    assert not any("pyyaml" in dep for dep in deps)
+    optional = pyproject.get("project", {}).get("optional-dependencies", {})
+    yaml_extra = [str(item).lower() for item in optional.get("yaml", [])]
+    assert any("pyyaml" in dep for dep in yaml_extra)
 
     forbidden = ["requests", "httpx", "numpy", "pandas", "sklearn"]
     for dep in deps:

@@ -16,7 +16,6 @@ from functools import lru_cache
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-import yaml
 from orchesis.config import _RATE_LIMIT_WINDOW_SECONDS, _TOOL_RATE_LIMIT_PATTERN
 from orchesis.cost_tracker import CostTracker, DEFAULT_TOOL_COSTS
 from orchesis.contrib.pii_detector import PiiDetector
@@ -173,7 +172,7 @@ def _policy_version_hash(policy: dict[str, Any] | None) -> str:
     cached = _POLICY_HASH_CACHE.get(cache_key)
     if cached is not None and cached[0] is policy:
         return cached[1]
-    dumped = yaml.dump(policy, sort_keys=True)
+    dumped = json.dumps(policy, sort_keys=True, default=str, separators=(",", ":"))
     digest = _policy_version_hash_cached(dumped)
     if len(_POLICY_HASH_CACHE) >= 32:
         _POLICY_HASH_CACHE.pop(next(iter(_POLICY_HASH_CACHE)))
