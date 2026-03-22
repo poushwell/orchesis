@@ -9,12 +9,16 @@ def test_zero_external_runtime_deps() -> None:
 
     data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     deps = [str(item).lower() for item in data.get("project", {}).get("dependencies", [])]
+    assert deps == [], "project.dependencies must be empty; use optional-dependencies extras"
     joined = " ".join(deps)
     assert "pyyaml" not in joined
     optional = data.get("project", {}).get("optional-dependencies", {})
     yaml_extra = [str(item).lower() for item in optional.get("yaml", [])]
     assert any("pyyaml" in dep for dep in yaml_extra)
-    for dep in ["requests", "numpy", "aiohttp"]:
+    server_extra = [str(item).lower() for item in optional.get("server", [])]
+    assert any("fastapi" in dep for dep in server_extra)
+    assert any("uvicorn" in dep for dep in server_extra)
+    for dep in ["requests", "numpy", "aiohttp", "fastapi", "uvicorn"]:
         assert dep not in joined
 
 

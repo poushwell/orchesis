@@ -42,16 +42,20 @@ def test_all_modules_importable() -> None:
 
 
 def test_zero_external_dependencies() -> None:
-    """Runtime deps stay minimal; pyyaml is optional via extra."""
+    """Core deps empty; pyyaml and server stack are optional via extras."""
     root = _project_root()
     pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     deps = [str(item).lower() for item in pyproject.get("project", {}).get("dependencies", [])]
+    assert deps == [], "project.dependencies must be empty; use optional-dependencies extras"
     assert not any("pyyaml" in dep for dep in deps)
     optional = pyproject.get("project", {}).get("optional-dependencies", {})
     yaml_extra = [str(item).lower() for item in optional.get("yaml", [])]
     assert any("pyyaml" in dep for dep in yaml_extra)
+    server_extra = [str(item).lower() for item in optional.get("server", [])]
+    assert any("fastapi" in dep for dep in server_extra)
+    assert any("uvicorn" in dep for dep in server_extra)
 
-    forbidden = ["requests", "httpx", "numpy", "pandas", "sklearn"]
+    forbidden = ["requests", "httpx", "numpy", "pandas", "sklearn", "fastapi", "uvicorn"]
     for dep in deps:
         for bad in forbidden:
             assert bad not in dep, f"Forbidden runtime dependency found: {dep}"

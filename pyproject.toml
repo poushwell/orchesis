@@ -39,10 +39,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-dependencies = [
-    "fastapi>=0.100.0",
-    "uvicorn>=0.20.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
 yaml = ["pyyaml>=6.0"]
