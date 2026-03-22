@@ -241,7 +241,7 @@ def test_session_id_missing_defaults(tmp_path: Path) -> None:
     proxy, upstream = _make_proxy(tmp_path, _policy())
     try:
         _, _, headers = _post(proxy, {"model": "gpt-4o", "messages": [{"role": "user", "content": "hello"}]})
-        assert headers.get("X-Orchesis-Session") == "unknown"
+        assert headers.get("X-Orchesis-Session") == "default"
     finally:
         proxy.stop()
         upstream.shutdown()
