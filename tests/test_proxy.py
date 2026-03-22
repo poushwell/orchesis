@@ -322,6 +322,29 @@ def test_proxy_scan_response_for_secrets() -> None:
     assert findings
 
 
+def test_proxy_emitted_secret_findings_redact_raw_match() -> None:
+    class _CapturingEventBus:
+        def __init__(self) -> None:
+            self.events: list[dict] = []
+
+        def emit(self, event: dict) -> None:
+            self.events.append(event)
+
+    bus = _CapturingEventBus()
+    proxy = OrchesisProxy(_FakeEngine(), ProxyConfig(upstream_url="http://localhost:3000"), event_bus=bus)
+    findings = proxy._scan_response("read_file", b"OPENAI_KEY=sk-abcdefghijklmnopqrstuvwxyz123")
+
+    assert findings
+    assert any("raw_match" in finding for finding in findings)
+    assert bus.events
+    event = bus.events[-1]
+    assert event.get("event") == "proxy_response_scan"
+    emitted_findings = event.get("findings")
+    assert isinstance(emitted_findings, list)
+    assert emitted_findings
+    assert all("raw_match" not in finding for finding in emitted_findings if isinstance(finding, dict))
+
+
 @pytest.mark.asyncio
 async def test_proxy_large_body_rejected() -> None:
     proxy = OrchesisProxy(_FakeEngine(), ProxyConfig(upstream_url="http://localhost:3000", max_body_size=16))
@@ -445,6 +468,119 @@ def test_llm_proxy_invalid_json_post_400() -> None:
             urlopen(req, timeout=2)
         assert error.value.code == 400
     finally:
+        proxy.stop()
+
+
+def test_llm_proxy_rejects_when_content_length_exceeds_max_body_size(tmp_path: Path) -> None:
+    policy = tmp_path / "policy-max-body.yaml"
+    policy.write_text(
+        """
+rules: []
+proxy:
+  max_body_size_bytes: 64
+""".strip(),
+        encoding="utf-8",
+    )
+    _MockUpstreamHandler.response_status = 200
+    _MockUpstreamHandler.response_body = {
+        "model": "gpt-4o-mini",
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+    }
+    upstream_server, _ = _start_http_server(_MockUpstreamHandler)
+    port = _pick_free_port()
+    proxy = LLMHTTPProxy(
+        policy_path=str(policy),
+        config=HTTPProxyConfig(
+            host="127.0.0.1",
+            port=port,
+            upstream={
+                "openai": f"http://127.0.0.1:{upstream_server.server_address[1]}",
+                "anthropic": f"http://127.0.0.1:{upstream_server.server_address[1]}",
+            },
+        ),
+    )
+    proxy.start(blocking=False)
+    try:
+        oversized = {"model": "gpt-4o", "messages": [{"role": "user", "content": "x" * 200}]}
+        req = UrlRequest(
+            f"http://127.0.0.1:{port}/v1/chat/completions",
+            data=json.dumps(oversized).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer t"},
+            method="POST",
+        )
+        with pytest.raises(HTTPError) as error:
+            urlopen(req, timeout=3)
+        assert error.value.code == 413
+    finally:
+        proxy.stop()
+        upstream_server.shutdown()
+        upstream_server.server_close()
+
+
+def test_llm_proxy_allows_when_content_length_within_max_body_size(tmp_path: Path) -> None:
+    policy = tmp_path / "policy-max-body-ok.yaml"
+    policy.write_text(
+        """
+rules: []
+proxy:
+  max_body_size_bytes: 4096
+""".strip(),
+        encoding="utf-8",
+    )
+    _MockUpstreamHandler.response_status = 200
+    _MockUpstreamHandler.response_body = {
+        "model": "gpt-4o-mini",
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+    }
+    upstream_server, _ = _start_http_server(_MockUpstreamHandler)
+    port = _pick_free_port()
+    proxy = LLMHTTPProxy(
+        policy_path=str(policy),
+        config=HTTPProxyConfig(
+            host="127.0.0.1",
+            port=port,
+            upstream={
+                "openai": f"http://127.0.0.1:{upstream_server.server_address[1]}",
+                "anthropic": f"http://127.0.0.1:{upstream_server.server_address[1]}",
+            },
+        ),
+    )
+    proxy.start(blocking=False)
+    try:
+        body = {"model": "gpt-4o", "messages": [{"role": "user", "content": "hello"}]}
+        req = UrlRequest(
+            f"http://127.0.0.1:{port}/v1/chat/completions",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer t"},
+            method="POST",
+        )
+        with urlopen(req, timeout=3) as resp:
+            assert int(resp.status) == 200
+    finally:
+        proxy.stop()
+        upstream_server.shutdown()
+        upstream_server.server_close()
+
+
+def test_llm_proxy_no_content_length_uses_default_behavior() -> None:
+    port = _pick_free_port()
+    proxy = LLMHTTPProxy(config=HTTPProxyConfig(host="127.0.0.1", port=port))
+    proxy.start(blocking=False)
+    sock = socket.create_connection(("127.0.0.1", port), timeout=3)
+    try:
+        raw = (
+            "POST /kill HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Content-Type: application/json\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("utf-8")
+        sock.sendall(raw)
+        data = sock.recv(4096)
+        assert b"200" in data
+    finally:
+        sock.close()
         proxy.stop()
 
 
@@ -911,6 +1047,61 @@ def test_llm_proxy_detects_openai_provider_by_headers() -> None:
     proxy = LLMHTTPProxy(config=HTTPProxyConfig())
     provider = proxy._detect_provider("anthropic", {"Authorization": "Bearer x"})
     assert provider == "openai"
+
+
+def test_get_upstream_blocks_loopback_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    proxy = LLMHTTPProxy(config=HTTPProxyConfig())
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda *args, **kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 443))],
+    )
+    upstream = proxy._get_upstream("openai", {"X-Orchesis-Upstream": "http://127.0.0.1:8000"})  # noqa: SLF001
+    assert upstream == "https://api.openai.com"
+
+
+def test_get_upstream_blocks_metadata_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+    proxy = LLMHTTPProxy(config=HTTPProxyConfig())
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda *args, **kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("169.254.169.254", 80))],
+    )
+    upstream = proxy._get_upstream("openai", {"X-Orchesis-Upstream": "http://169.254.169.254/latest"})  # noqa: SLF001
+    assert upstream == "https://api.openai.com"
+
+
+def test_get_upstream_allows_public_https(monkeypatch: pytest.MonkeyPatch) -> None:
+    proxy = LLMHTTPProxy(config=HTTPProxyConfig())
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda *args, **kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("104.18.33.45", 443))],
+    )
+    upstream = proxy._get_upstream("openai", {"X-Orchesis-Upstream": "https://api.openai.com"})  # noqa: SLF001
+    assert upstream == "https://api.openai.com"
+
+
+def test_get_upstream_allows_private_when_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = tmp_path / "policy-ssrf-allow-private.yaml"
+    policy.write_text(
+        """
+rules: []
+proxy:
+  ssrf_allow_private: true
+""".strip(),
+        encoding="utf-8",
+    )
+    proxy = LLMHTTPProxy(policy_path=str(policy), config=HTTPProxyConfig())
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda *args, **kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 8000))],
+    )
+    upstream = proxy._get_upstream("openai", {"X-Orchesis-Upstream": "http://127.0.0.1:8000"})  # noqa: SLF001
+    assert upstream == "http://127.0.0.1:8000"
+
+
+def test_get_upstream_blocks_non_http_scheme() -> None:
+    proxy = LLMHTTPProxy(config=HTTPProxyConfig())
+    upstream = proxy._get_upstream("openai", {"X-Orchesis-Upstream": "ftp://api.openai.com"})  # noqa: SLF001
+    assert upstream == "https://api.openai.com"
 
 
 def test_llm_proxy_applies_model_routing(tmp_path: Path) -> None:

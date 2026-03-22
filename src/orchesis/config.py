@@ -284,6 +284,8 @@ def _normalize_proxy_config(policy: dict[str, Any]) -> None:
     if not isinstance(proxy_cfg, dict):
         policy["proxy"] = {
             "max_workers": 200,
+            "max_body_size_bytes": 10_485_760,
+            "ssrf_allow_private": False,
             "connection_pool": {
                 "max_per_host": 10,
                 "max_total": 50,
@@ -324,6 +326,8 @@ def _normalize_proxy_config(policy: dict[str, Any]) -> None:
     elif cors is not None:
         proxy_cfg["cors"] = bool(cors)
 
+    proxy_cfg["ssrf_allow_private"] = bool(proxy_cfg.get("ssrf_allow_private", False))
+
     upstream = proxy_cfg.get("upstream")
     if isinstance(upstream, dict):
         normalized_upstream: dict[str, str] = {}
@@ -339,6 +343,10 @@ def _normalize_proxy_config(policy: dict[str, Any]) -> None:
     if not _is_number(max_workers) or int(max_workers) <= 0:
         raise PolicyError("proxy.max_workers must be > 0")
     proxy_cfg["max_workers"] = int(max_workers)
+    max_body_size_bytes = proxy_cfg.get("max_body_size_bytes", 10_485_760)
+    if not _is_number(max_body_size_bytes) or int(max_body_size_bytes) <= 0:
+        raise PolicyError("proxy.max_body_size_bytes must be > 0")
+    proxy_cfg["max_body_size_bytes"] = int(max_body_size_bytes)
 
     pool_cfg_raw = proxy_cfg.get("connection_pool")
     pool_cfg = pool_cfg_raw if isinstance(pool_cfg_raw, dict) else {}

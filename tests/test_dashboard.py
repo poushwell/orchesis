@@ -849,6 +849,25 @@ def test_overview_has_active_sessions() -> None:
     assert "tools(5m): 4" in html
 
 
+def test_overview_escapes_dynamic_values() -> None:
+    html = render_overview_tab(
+        {
+            "active_sessions": [
+                {
+                    "agent_id": "<script>alert(1)</script>",
+                    "last_request_ts": "<script>ts</script>",
+                    "tool_calls_5m": 1,
+                    "status": "<script>active</script>",
+                }
+            ]
+        }
+    )
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "&lt;script&gt;ts&lt;/script&gt;" in html
+    assert "&lt;script&gt;active&lt;/script&gt;" in html
+    assert "<script>alert(1)</script>" not in html
+
+
 def test_render_overview_tab() -> None:
     html = render_overview_tab({"total_requests": 10, "blocked_requests": 2})
     assert isinstance(html, str)

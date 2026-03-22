@@ -7,9 +7,11 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import hashlib
+import ipaddress
 import json
 import logging
 import os
+import socket
 import threading
 import time
 import uuid
@@ -212,6 +214,10 @@ class PooledThreadHTTPServer(HTTPServer):
 
 
 _SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
+
+def _redact_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{k: v for k, v in finding.items() if k != "raw_match"} for finding in findings]
 
 
 @dataclass
@@ -532,7 +538,7 @@ class OrchesisProxy:
                             "reason": "credential_leak_in_request",
                             "path": path,
                             "method": method,
-                            "findings": request_findings[:10],
+                            "findings": _redact_findings(request_findings[:10]),
                         }
                     )
                     return
@@ -669,8 +675,8 @@ class OrchesisProxy:
                             "tool": tool_call[0],
                             "path": path,
                             "method": method,
-                            "secret_findings": secrets[:10],
-                            "pii_findings": pii[:10],
+                            "secret_findings": _redact_findings(secrets[:10]),
+                            "pii_findings": _redact_findings(pii[:10]),
                         }
                     )
 
@@ -881,7 +887,7 @@ class OrchesisProxy:
                     {
                         "event": "proxy_response_scan",
                         "tool": tool_name,
-                        "findings": findings[:10],
+                        "findings": _redact_findings(findings[:10]),
                         "count": len(findings),
                     }
                 )
@@ -906,7 +912,7 @@ class OrchesisProxy:
                         "event": "proxy_request_scan",
                         "tool": tool_name,
                         "count": len(findings),
-                        "findings": findings[:10],
+                        "findings": _redact_findings(findings[:10]),
                     }
                 )
         except Exception:
@@ -936,8 +942,8 @@ class OrchesisProxy:
                         "tool": tool_name,
                         "secret_count": len(secret_findings),
                         "pii_count": len(pii_findings),
-                        "secret_findings": secret_findings[:10],
-                        "pii_findings": pii_findings[:10],
+                        "secret_findings": _redact_findings(secret_findings[:10]),
+                        "pii_findings": _redact_findings(pii_findings[:10]),
                     }
                 )
         except Exception:
@@ -1910,9 +1916,14 @@ class LLMHTTPProxy:
         }
         proxy_engine_cfg = self._policy.get("proxy")
         self._proxy_engine_cfg = proxy_engine_cfg if isinstance(proxy_engine_cfg, dict) else {}
+        self._ssrf_allow_private = bool(self._proxy_engine_cfg.get("ssrf_allow_private", False))
         self._max_workers = int(self._proxy_engine_cfg.get("max_workers", 200))
         if self._max_workers <= 0:
             self._max_workers = 200
+        max_body_size_raw = self._proxy_engine_cfg.get("max_body_size_bytes", 10_485_760)
+        self._max_body_size_bytes = int(max_body_size_raw) if isinstance(max_body_size_raw, int | float) else 10_485_760
+        if self._max_body_size_bytes <= 0:
+            self._max_body_size_bytes = 10_485_760
         pool_cfg_raw = self._proxy_engine_cfg.get("connection_pool", {})
         pool_cfg = pool_cfg_raw if isinstance(pool_cfg_raw, dict) else {}
         self._connection_pool = ConnectionPool(
@@ -3255,7 +3266,13 @@ class LLMHTTPProxy:
             raise
 
     def _phase_parse(self, ctx: _RequestContext) -> bool:
-        length = int(ctx.handler.headers.get("Content-Length", "0") or "0")
+        try:
+            length = int(ctx.handler.headers.get("Content-Length", "0") or "0")
+        except Exception:
+            self._send_json(ctx.handler, 400, {"error": "Invalid Content-Length header"})
+            return False
+        if self._reject_if_body_too_large(ctx.handler, length):
+            return False
         raw_body = ctx.handler.rfile.read(max(0, length))
         try:
             body = json.loads(raw_body.decode("utf-8"))
@@ -5530,6 +5547,8 @@ class LLMHTTPProxy:
                 return
             if self._experiment_manager is not None and request_path == "/api/experiments":
                 body = self._read_json_body(handler)
+                if bool(getattr(handler, "_orchesis_body_too_large", False)):
+                    return
                 if isinstance(body, dict) and body.get("name") and body.get("variants"):
                     try:
                         exp = self._experiment_manager.create_experiment(**body)
@@ -5788,6 +5807,8 @@ class LLMHTTPProxy:
 
     def _handle_kill(self, handler: BaseHTTPRequestHandler) -> None:
         payload = self._read_json_body(handler)
+        if bool(getattr(handler, "_orchesis_body_too_large", False)):
+            return
         reason = "manual emergency shutdown"
         if isinstance(payload, dict):
             raw_reason = payload.get("reason")
@@ -5823,6 +5844,8 @@ class LLMHTTPProxy:
 
     def _handle_resume(self, handler: BaseHTTPRequestHandler) -> None:
         payload = self._read_json_body(handler)
+        if bool(getattr(handler, "_orchesis_body_too_large", False)):
+            return
         token = ""
         if isinstance(payload, dict):
             raw_token = payload.get("token")
@@ -5849,9 +5872,13 @@ class LLMHTTPProxy:
         self._inc("kill_switch_activations")
 
     def _read_json_body(self, handler: BaseHTTPRequestHandler) -> dict[str, Any] | None:
+        setattr(handler, "_orchesis_body_too_large", False)
         try:
             length = int(handler.headers.get("Content-Length", "0") or "0")
         except Exception:
+            return None
+        if self._reject_if_body_too_large(handler, length):
+            setattr(handler, "_orchesis_body_too_large", True)
             return None
         if length <= 0:
             return None
@@ -5863,6 +5890,22 @@ class LLMHTTPProxy:
         except Exception:
             return None
         return None
+
+    def _reject_if_body_too_large(self, handler: BaseHTTPRequestHandler, content_length: int) -> bool:
+        if int(content_length) <= int(self._max_body_size_bytes):
+            return False
+        self._send_json(
+            handler,
+            413,
+            {
+                "error": {
+                    "type": "request_entity_too_large",
+                    "message": "Request body exceeds configured max_body_size_bytes",
+                    "max_body_size_bytes": int(self._max_body_size_bytes),
+                }
+            },
+        )
+        return True
 
     def _should_kill_for_cost(self, budget_status: dict[str, Any]) -> bool:
         multiplier_raw = self._kill_auto_cfg.get("cost_multiplier", 5)
@@ -6063,10 +6106,40 @@ class LLMHTTPProxy:
         handler.send_header("Content-Length", str(body_len))
 
     def _get_upstream(self, provider: str, headers: Any) -> str:
-        custom = headers.get("X-Orchesis-Upstream")
+        custom = headers.get("X-Orchesis-Upstream") or headers.get("x-orchesis-upstream")
         if isinstance(custom, str) and custom.strip():
-            return custom.strip().rstrip("/")
+            candidate = custom.strip()
+            if self._is_safe_upstream_override(candidate):
+                return candidate.rstrip("/")
+            _HTTP_PROXY_LOGGER.warning("SSRF blocked: %s", candidate)
         return self._config.upstream.get(provider, self._config.upstream.get("openai", "https://api.openai.com"))
+
+    def _is_safe_upstream_override(self, url: str) -> bool:
+        parsed = urlsplit(str(url).strip())
+        if parsed.scheme not in {"http", "https"}:
+            return False
+        host = parsed.hostname
+        if not isinstance(host, str) or not host.strip():
+            return False
+        if self._ssrf_allow_private:
+            return True
+        try:
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            resolved = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except Exception:
+            return False
+        if not resolved:
+            return False
+        for entry in resolved:
+            sockaddr = entry[4]
+            ip_raw = sockaddr[0] if isinstance(sockaddr, tuple) and sockaddr else ""
+            try:
+                ip_obj = ipaddress.ip_address(str(ip_raw))
+            except ValueError:
+                return False
+            if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
+                return False
+        return True
 
     @staticmethod
     def _detect_provider(parsed_provider: str, headers: Any) -> str:

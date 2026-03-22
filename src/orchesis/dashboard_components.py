@@ -5,6 +5,7 @@ Each function returns an HTML string for a specific dashboard section.
 
 from __future__ import annotations
 
+import html
 from typing import Any
 
 
@@ -14,6 +15,10 @@ def _safe_num(value: Any, default: int | float = 0) -> int | float:
     if isinstance(value, int | float):
         return value
     return default
+
+
+def _esc(value: Any) -> str:
+    return html.escape(str(value), quote=True)
 
 
 def render_overview_tab(data: dict) -> str:
@@ -28,10 +33,10 @@ def render_overview_tab(data: dict) -> str:
         session_html = "".join(
             (
                 '<li class="session-row">'
-                f'<span class="session-agent">{str(item.get("agent_id", "unknown"))}</span> '
-                f'<span class="session-last">last request: {str(item.get("last_request_ts", "--"))}</span> '
+                f'<span class="session-agent">{_esc(item.get("agent_id", "unknown"))}</span> '
+                f'<span class="session-last">last request: {_esc(item.get("last_request_ts", "--"))}</span> '
                 f'<span class="session-tools">tools(5m): {int(_safe_num(item.get("tool_calls_5m"), 0))}</span> '
-                f'<span class="session-status">{str(item.get("status", "idle"))}</span>'
+                f'<span class="session-status">{_esc(item.get("status", "idle"))}</span>'
                 "</li>"
             )
             for item in session_rows
@@ -49,9 +54,9 @@ def render_overview_tab(data: dict) -> str:
     return (
         '<section id="overview" class="tab-section">'
         '<h2>Overview</h2>'
-        f'<div class="stats-grid"><div id="overview-total">Total requests: {total}</div>'
-        f'<div id="overview-blocked">Blocked: {blocked}</div>'
-        f'<div id="overview-uptime">Uptime: {uptime}</div></div>'
+        f'<div class="stats-grid"><div id="overview-total">Total requests: {_esc(total)}</div>'
+        f'<div id="overview-blocked">Blocked: {_esc(blocked)}</div>'
+        f'<div id="overview-uptime">Uptime: {_esc(uptime)}</div></div>'
         '<div id="active-sessions"><h3>Active Sessions</h3>'
         f'<ul id="active-sessions-list">{session_html}</ul></div>'
         "</section>"
@@ -66,7 +71,7 @@ def render_security_tab(data: dict) -> str:
     return (
         '<section id="security" class="tab-section">'
         "<h2>Security</h2>"
-        f'<div id="security-summary">Security findings: {count}</div>'
+        f'<div id="security-summary">Security findings: {_esc(count)}</div>'
         '<div id="security-content" class="subtle">Security content</div>'
         "</section>"
     )
@@ -78,9 +83,9 @@ def render_ecosystem_tab(data: dict) -> str:
     return (
         '<section id="ecosystem" class="tab-section">'
         "<h2>Ecosystem</h2>"
-        f'<div id="eco-casura">CASURA: {payload.get("casura", "n/a")}</div>'
-        f'<div id="eco-aabb">AABB: {payload.get("aabb", "n/a")}</div>'
-        f'<div id="eco-are">ARE: {payload.get("are", "n/a")}</div>'
+        f'<div id="eco-casura">CASURA: {_esc(payload.get("casura", "n/a"))}</div>'
+        f'<div id="eco-aabb">AABB: {_esc(payload.get("aabb", "n/a"))}</div>'
+        f'<div id="eco-are">ARE: {_esc(payload.get("are", "n/a"))}</div>'
         "</section>"
     )
 
@@ -92,7 +97,7 @@ def render_fleet_tab(data: dict) -> str:
     return (
         '<section id="fleet" class="tab-section">'
         "<h2>Fleet</h2>"
-        f'<div id="fleet-active">Active agents: {active_agents}</div>'
+        f'<div id="fleet-active">Active agents: {_esc(active_agents)}</div>'
         '<div id="fleet-content" class="subtle">Fleet management</div>'
         "</section>"
     )
@@ -106,7 +111,7 @@ def render_css(theme: str = "dark") -> str:
         ":root[data-theme=\"light\"] { background: #ffffff; color: #111111; }\n"
         ".stats-grid { display: grid; gap: 8px; grid-template-columns: repeat(3, 1fr); }\n"
         ".tab-section { border: 1px solid #27272a; border-radius: 8px; padding: 12px; }\n"
-        f"/* active-theme: {selected} */"
+        f"/* active-theme: {_esc(selected)} */"
     )
 
 
