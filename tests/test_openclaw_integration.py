@@ -122,6 +122,10 @@ budgets:
 """
 
 
+def _policy_with_max_identical(max_identical: int) -> str:
+    return _policy().replace("max_identical: 3", f"max_identical: {int(max_identical)}")
+
+
 def _post(proxy: LLMHTTPProxy, body: dict, headers: dict[str, str] | None = None) -> tuple[int, dict, dict]:
     req = UrlRequest(
         f"http://127.0.0.1:{proxy._config.port}/v1/chat/completions",
@@ -408,6 +412,80 @@ def test_normal_schedule_message_not_heartbeat(tmp_path: Path) -> None:
         )
         assert _OpenClawUpstreamHandler.last_body is not None
         assert _OpenClawUpstreamHandler.last_body.get("model") == "gpt-4o"
+    finally:
+        proxy.stop()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_openclaw_start_repeated_not_blocked(tmp_path: Path) -> None:
+    proxy, upstream = _make_proxy(tmp_path, _policy_with_max_identical(5))
+    try:
+        for _ in range(5):
+            status, _, _ = _post(
+                proxy,
+                {"model": "gpt-4o", "messages": [{"role": "user", "content": "/start"}]},
+            )
+            assert status == 200
+    finally:
+        proxy.stop()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_normal_identical_posts_still_blocked(tmp_path: Path) -> None:
+    proxy, upstream = _make_proxy(tmp_path, _policy_with_max_identical(5))
+    try:
+        statuses: list[int] = []
+        for _ in range(5):
+            status, _, _ = _post(
+                proxy,
+                {"model": "gpt-4o", "messages": [{"role": "user", "content": "normal repeated content"}]},
+            )
+            statuses.append(status)
+        assert statuses[-1] == 429
+    finally:
+        proxy.stop()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_openclaw_new_then_three_identical_not_blocked(tmp_path: Path) -> None:
+    proxy, upstream = _make_proxy(tmp_path, _policy_with_max_identical(5))
+    try:
+        first, _, _ = _post(
+            proxy,
+            {"model": "gpt-4o", "messages": [{"role": "user", "content": "/new"}]},
+        )
+        assert first == 200
+        for _ in range(3):
+            status, _, _ = _post(
+                proxy,
+                {"model": "gpt-4o", "messages": [{"role": "user", "content": "normal repeated content"}]},
+            )
+            assert status == 200
+    finally:
+        proxy.stop()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_openclaw_start_then_five_normal_blocks_on_sixth(tmp_path: Path) -> None:
+    proxy, upstream = _make_proxy(tmp_path, _policy_with_max_identical(5))
+    try:
+        first, _, _ = _post(
+            proxy,
+            {"model": "gpt-4o", "messages": [{"role": "user", "content": "/start"}]},
+        )
+        assert first == 200
+        statuses: list[int] = []
+        for _ in range(5):
+            status, _, _ = _post(
+                proxy,
+                {"model": "gpt-4o", "messages": [{"role": "user", "content": "normal repeated content"}]},
+            )
+            statuses.append(status)
+        assert statuses[-1] == 429
     finally:
         proxy.stop()
         upstream.shutdown()

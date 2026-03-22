@@ -1945,6 +1945,12 @@ class LLMHTTPProxy:
         loop_cfg = self._policy.get("loop_detection")
         self._loop_cfg = loop_cfg if isinstance(loop_cfg, dict) else {}
         self._downgrade_model = str(self._loop_cfg.get("downgrade_model", "claude-haiku-4"))
+        reset_cmds_raw = self._loop_cfg.get("openclaw_reset_commands", ["/start", "/new", "/reset"])
+        self._openclaw_reset_commands: tuple[str, ...] = tuple(
+            cmd.strip().lower()
+            for cmd in reset_cmds_raw
+            if isinstance(cmd, str) and cmd.strip()
+        ) or ("/start", "/new", "/reset")
         self._loop_detector = None
         if bool(self._loop_cfg.get("enabled", False)):
             self._loop_detector = LoopDetector(config=self._loop_cfg)
@@ -3511,7 +3517,8 @@ class LLMHTTPProxy:
         return True
 
     def _phase_loop_detection(self, ctx: _RequestContext) -> bool:
-        if self._loop_detector is None:
+        openclaw_reset_detected = self._is_openclaw_reset_request(ctx.body)
+        if self._loop_detector is None or openclaw_reset_detected:
             loop_decision = None
         else:
             loop_decision = self._loop_detector.check_request(
@@ -3582,6 +3589,14 @@ class LLMHTTPProxy:
             last_user_message = self._extract_last_user_message(ctx.body)
             if isinstance(last_user_message, str) and len(last_user_message) > 0:
                 session_scope = self._resolve_loop_session_scope(ctx)
+                if openclaw_reset_detected:
+                    self._clear_content_loop_session_history(session_scope)
+                    ctx.content_loop_count = 0
+                    _HTTP_PROXY_LOGGER.debug(
+                        "OpenClaw reset detected, clearing loop history for session %s",
+                        session_scope,
+                    )
+                    return True
                 result = self._content_loop_detector.check(last_user_message, session_scope)
                 ctx.content_loop_count = int(result.get("count", 0))
                 if result.get("action") == "block":
@@ -3624,6 +3639,63 @@ class LLMHTTPProxy:
                     ctx.loop_warning_header = f"count={int(result.get('count', 0))}"
                     ctx.was_loop_detected = True
         return True
+
+    def _is_openclaw_reset_request(self, body: dict[str, Any]) -> bool:
+        if not isinstance(body, dict):
+            return False
+        messages = body.get("messages", [])
+        if not isinstance(messages, list) or len(messages) == 0:
+            return False
+        if len(messages) > 2:
+            return False
+        reset_commands = {cmd.lower() for cmd in self._openclaw_reset_commands if isinstance(cmd, str)}
+        last_user = self._extract_last_user_message(body) or ""
+        lowered_user = last_user.lower()
+        has_reset_command = any(
+            (f" {cmd} " in f" {lowered_user} ")
+            or lowered_user.startswith(cmd + " ")
+            or lowered_user == cmd
+            for cmd in reset_commands
+        )
+        init_markers = (
+            "session initialization",
+            "session init",
+            "initialize session",
+            "initializing session",
+            "new session",
+            "starting session",
+        )
+        has_session_init_system = False
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            if str(msg.get("role", "")).strip().lower() != "system":
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                lowered = content.lower()
+                if any(marker in lowered for marker in init_markers):
+                    has_session_init_system = True
+                    break
+        return bool(has_reset_command or has_session_init_system)
+
+    def _clear_content_loop_session_history(self, session_scope: str) -> None:
+        detector = self._content_loop_detector
+        if detector is None:
+            return
+        safe_scope = str(session_scope or "default")
+        prefix = f"{safe_scope}:"
+        with detector._lock:  # type: ignore[attr-defined]
+            for table_name in ("_history", "_cooldowns", "_cooldown_level"):
+                table = getattr(detector, table_name, None)
+                if not isinstance(table, dict):
+                    continue
+                stale_keys = [key for key in table if str(key).startswith(prefix)]
+                for key in stale_keys:
+                    table.pop(key, None)
+            last_hash = getattr(detector, "_last_hash_by_session", None)
+            if isinstance(last_hash, dict):
+                last_hash.pop(safe_scope, None)
 
     @staticmethod
     def _extract_last_user_message(body: dict[str, Any]) -> str | None:

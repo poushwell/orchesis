@@ -235,6 +235,19 @@ def _normalize_cost_controls(policy: dict[str, Any]) -> None:
     loop_detection["block_threshold"] = int(block_threshold) if isinstance(block_threshold, int | float) else 10
     loop_detection["window_seconds"] = float(window_seconds) if isinstance(window_seconds, int | float) else 300.0
     loop_detection["similarity_check"] = bool(loop_detection.get("similarity_check", True))
+    raw_reset_commands = loop_detection.get("openclaw_reset_commands", ["/start", "/new", "/reset"])
+    normalized_reset_commands: list[str] = []
+    if isinstance(raw_reset_commands, list):
+        for item in raw_reset_commands:
+            if not isinstance(item, str):
+                continue
+            cmd = item.strip().lower()
+            if not cmd:
+                continue
+            normalized_reset_commands.append(cmd)
+    if not normalized_reset_commands:
+        normalized_reset_commands = ["/start", "/new", "/reset"]
+    loop_detection["openclaw_reset_commands"] = normalized_reset_commands
 
     model_routing = policy.get("model_routing")
     if not isinstance(model_routing, dict):
@@ -542,6 +555,7 @@ def _normalize_loop_detection(policy: dict[str, Any]) -> None:
             "block_threshold": 8,
             "window_seconds": 300.0,
             "similarity_check": True,
+            "openclaw_reset_commands": ["/start", "/new", "/reset"],
         }
         return
     if not isinstance(raw, dict):
@@ -599,6 +613,18 @@ def _normalize_loop_detection(policy: dict[str, Any]) -> None:
     raw["block_threshold"] = int(raw["fuzzy"]["threshold"])
     raw["window_seconds"] = float(max(raw["exact"]["window_seconds"], raw["fuzzy"]["window_seconds"]))
     raw["similarity_check"] = bool(raw.get("similarity_check", True))
+    reset_commands_raw = raw.get("openclaw_reset_commands", ["/start", "/new", "/reset"])
+    reset_commands: list[str] = []
+    if isinstance(reset_commands_raw, list):
+        for item in reset_commands_raw:
+            if not isinstance(item, str):
+                continue
+            command = item.strip().lower()
+            if command:
+                reset_commands.append(command)
+    if not reset_commands:
+        reset_commands = ["/start", "/new", "/reset"]
+    raw["openclaw_reset_commands"] = reset_commands
     content_loop_raw = raw.get("content_loop")
     content_loop = content_loop_raw if isinstance(content_loop_raw, dict) else {}
     content_loop["enabled"] = bool(content_loop.get("enabled", raw["enabled"]))
