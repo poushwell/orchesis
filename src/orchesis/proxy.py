@@ -278,7 +278,7 @@ def _init_components(policy: dict[str, Any], *, policy_path: str = "policy.yaml"
     threat_cfg = policy.get("threat_intel")
     if isinstance(threat_cfg, dict) and bool(threat_cfg.get("enabled", False)):
         default_severity = {
-            "critical": "block",
+            "critical": "warn",
             "high": "warn",
             "medium": "log",
             "low": "log",
@@ -3998,7 +3998,7 @@ class LLMHTTPProxy:
                     headers_dict = dict(h)
                 elif hasattr(h, "keys"):
                     headers_dict = {k: h.get(k, "") for k in h.keys()}
-            framework = self._detect_agent_framework(headers_dict)
+            framework = self._detect_agent_framework(headers_dict, ctx.body if isinstance(ctx.body, dict) else None)
             ctx.proc_result["agent_framework"] = framework
             matches = self._threat_matcher.scan_request(
                 messages=messages,
@@ -4089,7 +4089,8 @@ class LLMHTTPProxy:
                 float(detection_v2.confidence),
             )
         for match in matches:
-            if match.action == "block":
+            action = str(getattr(match, "action", "")).strip().lower()
+            if action in {"block", "deny"}:
                 self._inc("blocked")
                 self._send_json(
                     ctx.handler,
@@ -5830,7 +5831,7 @@ class LLMHTTPProxy:
             return {}
         return normalized
 
-    def _detect_agent_framework(self, headers: Any) -> str:
+    def _detect_agent_framework(self, headers: Any, body: dict[str, Any] | None = None) -> str:
         """Detect agent framework from request headers."""
         h = self._normalize_header_map(headers)
         ua = str(h.get("user-agent", "")).lower()
@@ -5841,6 +5842,43 @@ class LLMHTTPProxy:
             return framework
         if h.get("x-openclaw-session-id") or h.get("x-openclaw-session"):
             return "openclaw"
+        if isinstance(body, dict):
+            messages = body.get("messages", [])
+            if isinstance(messages, list):
+                for msg in messages[-3:]:
+                    if not isinstance(msg, dict):
+                        continue
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        lowered = content.lower()
+                        if any(
+                            marker in lowered
+                            for marker in ("openclaw", "openhands", "/workspace/", "cwd:", "agents.md")
+                        ):
+                            return "openclaw"
+            tools = body.get("tools", [])
+            if isinstance(tools, list):
+                tool_names: list[str] = []
+                for tool in tools:
+                    if not isinstance(tool, dict):
+                        continue
+                    direct_name = tool.get("name")
+                    if isinstance(direct_name, str) and direct_name.strip():
+                        tool_names.append(direct_name.strip())
+                    fn = tool.get("function")
+                    if isinstance(fn, dict):
+                        fn_name = fn.get("name")
+                        if isinstance(fn_name, str) and fn_name.strip():
+                            tool_names.append(fn_name.strip())
+                openclaw_tools = {
+                    "read_file",
+                    "write_file",
+                    "execute_bash",
+                    "browser_action",
+                    "run_ipython_cell",
+                }
+                if len({name.lower() for name in tool_names}.intersection(openclaw_tools)) >= 2:
+                    return "openclaw"
         return "unknown"
 
     def _apply_framework_threat_overrides(

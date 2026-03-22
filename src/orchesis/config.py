@@ -1,6 +1,7 @@
 """Policy loading and validation."""
 
 import hashlib
+import json
 import logging
 import os
 import posixpath
@@ -12,7 +13,6 @@ from urllib.parse import unquote
 from pathlib import Path
 from typing import Any, Callable
 
-import yaml
 from orchesis.behavioral import DEFAULT_DIMENSIONS
 from orchesis.identity import AgentIdentity, AgentRegistry, TrustTier
 from orchesis.input_guard import sanitize_text
@@ -26,6 +26,18 @@ _CAPABILITY_CONSTRAINT_KEYS = {"paths", "domains", "commands"}
 
 class PolicyError(ValueError):
     """Raised when policy structure/content is invalid."""
+
+
+def _load_yaml(text: str) -> Any:
+    """Load YAML config. Requires pyyaml to be installed."""
+    try:
+        import yaml
+    except ImportError:
+        raise ImportError(
+            "YAML config requires pyyaml. "
+            "Install with: pip install orchesis[yaml]"
+        ) from None
+    return yaml.safe_load(text)
 
 
 def _normalize_tool_name(value: Any) -> str:
@@ -1182,26 +1194,51 @@ def _apply_policy_preset(loaded: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_policy(path: str | Path) -> dict[str, Any]:
-    """Load policy from YAML file path."""
+    """Load policy from JSON/YAML file path."""
     policy_path = Path(path)
     try:
-        content = policy_path.read_bytes().decode("utf-8", errors="replace")
+        raw_bytes = policy_path.read_bytes()
     except (OSError, IOError) as error:
         raise PolicyError(f"Cannot read policy file: {policy_path}") from error
 
+    content = raw_bytes.decode("utf-8", errors="replace")
+    had_malformed_bytes = ("\ufffd" in content) or ("\x00" in content)
+    content = content.encode("utf-16", errors="surrogatepass").decode("utf-16", errors="replace")
+    content = content.replace("\ufffd", "")
     content = content.replace("\x00", "")
+    # Remove non-printable control chars except newline/tab/carriage return.
+    content = "".join(c for c in content if c in "\n\r\t" or (ord(c) >= 32 and ord(c) != 127))
     sanitized = sanitize_text(content)
     content = sanitized if sanitized is not None else content
 
+    if isinstance(content, bytes):
+        content = content.decode("utf-8", errors="replace")
+    # Strip invalid bytes before parsing.
+    content = "".join(c for c in content if ord(c) < 0xFFFE)
+
+    suffix = policy_path.suffix.lower()
     try:
-        if isinstance(content, bytes):
-            content = content.decode("utf-8", errors="replace")
-        # Strip invalid bytes before YAML parsing.
-        content = "".join(c for c in content if ord(c) < 0xFFFE)
-        loaded = yaml.safe_load(content)
+        if suffix == ".json":
+            loaded = json.loads(content)
+        elif suffix in (".yaml", ".yml"):
+            loaded = _load_yaml(content)
+        else:
+            try:
+                loaded = json.loads(content)
+            except json.JSONDecodeError:
+                loaded = _load_yaml(content)
+    except ImportError:
+        raise
     except Exception:
         loaded = {}
 
+    if loaded is None:
+        loaded = {}
+    if not isinstance(loaded, dict):
+        if had_malformed_bytes:
+            loaded = {}
+        else:
+            raise PolicyError("Policy top-level YAML object must be a mapping.")
     if not isinstance(loaded, dict):
         raise PolicyError("Policy top-level YAML object must be a mapping.")
     loaded = _apply_policy_preset(loaded)

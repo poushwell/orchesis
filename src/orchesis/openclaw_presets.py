@@ -45,6 +45,7 @@ OPENCLAW_SAFE_POLICY: dict[str, Any] = {
             "high": "warn",
             "medium": "log",
             "low": "log",
+            "info": "log",
         },
     },
     "loop_detection": {
@@ -93,6 +94,7 @@ def get_openclaw_preset() -> dict[str, Any]:
                 "high": "warn",
                 "medium": "log",
                 "low": "log",
+                "info": "log",
             },
         },
         "adaptive_detection": {

@@ -284,7 +284,7 @@ def _sanitize_scan_input(text: Any) -> str:
     if isinstance(text, bytes):
         text = text.decode("utf-8", errors="replace")
     if not isinstance(text, str):
-        return ""
+        text = str(text)
     # Round-trip through UTF-16 to collapse orphaned UTF-8 continuation bytes.
     text = text.encode("utf-16", errors="surrogatepass").decode("utf-16", errors="replace")
     text = text.replace("\ufffd", "")
@@ -332,7 +332,7 @@ class SecretScanner:
                 )
         return sorted(findings, key=lambda item: int(item.get("position", 0)))
 
-    def scan(self, text: str) -> list[dict[str, Any]]:
+    def scan(self, text: Any) -> list[dict[str, Any]]:
         """Compatibility scan entrypoint hardened for fuzzed inputs."""
         text = _sanitize_scan_input(text)
         if not isinstance(text, str):
@@ -347,7 +347,7 @@ class SecretScanner:
         except (re.error, UnicodeDecodeError, OverflowError):
             return []
 
-    def scan_text(self, text: str) -> list[dict[str, Any]]:
+    def scan_text(self, text: Any) -> list[dict[str, Any]]:
         text = _sanitize_scan_input(text)
         if not isinstance(text, str):
             return []
@@ -419,7 +419,7 @@ class SecretScanner:
             finding["tool"] = tool_name
         return findings
 
-    def has_secrets(self, text: str) -> bool:
+    def has_secrets(self, text: Any) -> bool:
         return len(self.scan_text(text)) > 0
 
     @staticmethod

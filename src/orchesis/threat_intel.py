@@ -44,6 +44,9 @@ class MatchAction(Enum):
     QUARANTINE = "quarantine"
 
 
+DEFAULT_THREAT_ACTION = "warn"
+
+
 @dataclass(frozen=True)
 class ThreatSignature:
     """A single threat pattern in the knowledge base."""
@@ -104,7 +107,7 @@ class ThreatMatch:
 
 def _severity_actions_default() -> dict[str, str]:
     return {
-        "critical": "block",
+        "critical": DEFAULT_THREAT_ACTION,
         "high": "warn",
         "medium": "log",
         "low": "log",
@@ -117,7 +120,7 @@ class ThreatIntelConfig:
     """Configuration for threat intelligence."""
 
     enabled: bool = True
-    default_action: str = "warn"
+    default_action: str = DEFAULT_THREAT_ACTION
     severity_actions: dict[str, str] = field(default_factory=_severity_actions_default)
     custom_signatures: list[dict[str, Any]] = field(default_factory=list)
     disabled_threats: list[str] = field(default_factory=list)
@@ -195,7 +198,7 @@ BUILT_IN_THREATS: tuple[ThreatSignature, ...] = (
             r"(?i)(?:api[_-]?key|secret[_-]?key|password)\s*[=:]",
         ),
         owasp_ref="ASI-02",
-        default_action=MatchAction.BLOCK,
+        default_action=MatchAction.WARN,
     ),
     ThreatSignature(
         threat_id="ORCH-TA-002",
@@ -212,7 +215,7 @@ BUILT_IN_THREATS: tuple[ThreatSignature, ...] = (
             r"`(?:rm|curl|wget|nc|bash|sh|python|perl|ruby)\b[^`]*`",
         ),
         owasp_ref="ASI-02",
-        default_action=MatchAction.BLOCK,
+        default_action=MatchAction.WARN,
         frameworks_exclude=("openclaw",),
     ),
     ThreatSignature(
@@ -226,7 +229,7 @@ BUILT_IN_THREATS: tuple[ThreatSignature, ...] = (
         references=("OWASP ASI-03",),
         tool_patterns=(r"(?i)^(exec|execute|run_command|shell|bash|eval|sudo)$",),
         owasp_ref="ASI-03",
-        default_action=MatchAction.BLOCK,
+        default_action=MatchAction.WARN,
     ),
     ThreatSignature(
         threat_id="ORCH-TA-004",
@@ -241,7 +244,7 @@ BUILT_IN_THREATS: tuple[ThreatSignature, ...] = (
             r"(?i)\b(?:DROP\s+TABLE|TRUNCATE\s+TABLE|DELETE\s+FROM\s+\w+\s*$)",
         ),
         owasp_ref="ASI-02",
-        default_action=MatchAction.BLOCK,
+        default_action=MatchAction.WARN,
     ),
     ThreatSignature(
         threat_id="ORCH-DE-001",

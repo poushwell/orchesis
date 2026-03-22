@@ -138,17 +138,19 @@ def _sanitize_detect_input(text: Any) -> str:
     if isinstance(text, bytes):
         text = text.decode("utf-8", errors="replace")
     if not isinstance(text, str):
-        return ""
+        text = str(text)
+    text = text.encode("utf-16", errors="surrogatepass").decode("utf-16", errors="replace")
+    text = text.replace("\ufffd", "")
+    text = text.replace("\x00", "")
     # Remove BIDI override and other formatting characters.
     text = "".join(
         c for c in text if unicodedata.category(c) != "Cf" or c in (" ", "\t", "\n")
     )
-    # Remove null bytes.
+    # Remove replacement chars from broken UTF-8 and null bytes after normalization.
+    text = text.replace("\ufffd", "")
     text = text.replace("\x00", "")
-    # Remove replacement chars from broken UTF-8.
-    text = text.replace("\ufffd", "")
-    text = text.encode("utf-16", errors="surrogatepass").decode("utf-16", errors="replace")
-    text = text.replace("\ufffd", "")
+    if len(text) > 100000:
+        text = text[:100000]
     return text
 
 
@@ -191,7 +193,7 @@ class PiiDetector:
                 )
         return findings
 
-    def detect(self, text: str) -> list[dict[str, Any]]:
+    def detect(self, text: Any) -> list[dict[str, Any]]:
         """Compatibility detect entrypoint hardened for fuzzed inputs."""
         text = _sanitize_detect_input(text)
         if not isinstance(text, str):
@@ -208,7 +210,7 @@ class PiiDetector:
         except (re.error, UnicodeDecodeError, OverflowError):
             return []
 
-    def scan_text(self, text: str) -> list[dict[str, Any]]:
+    def scan_text(self, text: Any) -> list[dict[str, Any]]:
         text = _sanitize_detect_input(text)
         if not isinstance(text, str):
             return []
@@ -268,7 +270,7 @@ class PiiDetector:
                 findings.append(enriched)
         return findings
 
-    def classify_data(self, text: str) -> str:
+    def classify_data(self, text: Any) -> str:
         findings = self.scan_text(text)
         if any(item["severity"] == "critical" for item in findings):
             return "restricted"
@@ -278,7 +280,10 @@ class PiiDetector:
             return "internal"
         return "public"
 
-    def redact_text(self, text: str) -> str:
+    def redact_text(self, text: Any) -> str:
+        text = _sanitize_detect_input(text)
+        if not isinstance(text, str):
+            return ""
         matches: list[tuple[int, int, str]] = []
         for pattern_name, (compiled, severity, _) in self._patterns.items():
             if pattern_name in self._ignored:
