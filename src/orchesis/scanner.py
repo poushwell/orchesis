@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,12 @@ REMEDIATION_GUIDE = {
     "dangerous_tools": "Restrict tool list to minimum required. Remove shell_execute, exec, file_write.",
     "deprecated_package": "Replace deprecated package with a maintained alternative.",
     "registry_verification": "Verify npm/PyPI publisher, scope, and package integrity before installing.",
+    "prompt_injection": "Sanitize tool descriptions; treat them as untrusted. Review third-party tool packs.",
+    "insufficient_logging": "Enable structured audit logging for MCP tool calls and auth failures.",
+    "shadow_server": "Prefer managed MCP endpoints with change control; avoid ad-hoc local scripts and stray ports.",
+    "context_oversharing": "Scope credentials and directory allowlists per server; remove wildcards from permissions.",
+    "command_injection_risk": "Remove shell metacharacters from args; invoke binaries directly without sh -c.",
+    "token_management": "Use short-lived tokens per server, unique credentials, and a secrets manager.",
 }
 
 VULNERABLE_PACKAGES = {
@@ -203,6 +210,49 @@ SENSITIVE_ARG_PATHS = [
     r"/proc/\d+",
 ]
 BROAD_PATHS = ["/", "~", "$HOME", "/home", "/users", "C:\\", "C:/"]
+
+INJECTION_MARKERS = [
+    "ignore previous",
+    "ignore above",
+    "disregard",
+    "forget instructions",
+    "you are now",
+    "act as",
+    "new instructions:",
+    "system:",
+    "admin:",
+    "override:",
+    "<system>",
+    "```system",
+    "important:",
+    "note to ai:",
+    "ignore all",
+    "do not follow",
+    "bypass",
+    "jailbreak",
+]
+
+STANDARD_MCP_URL_PORTS = frozenset({80, 443, 3000, 8080, 8081})
+
+RAW_SHELL_COMMANDS = frozenset(
+    {"sh", "bash", "cmd", "powershell", "pwsh", "cmd.exe", "powershell.exe"}
+)
+
+def _cross_service_env_name_hints(env_key: str) -> tuple[str, ...] | None:
+    k = env_key.upper().strip()
+    if k in {"DATABASE_URL", "DB_CONNECTION"}:
+        return ("db", "sql", "postgres", "mysql", "mongo", "data", "database")
+    if k == "REDIS_URL":
+        return ("redis", "cache")
+    if "AWS_ACCESS_KEY" in k:
+        return ("aws", "amazon", "s3", "ec2")
+    if "AWS_SECRET" in k:
+        return ("aws", "amazon", "s3", "ec2")
+    if "GITHUB_TOKEN" in k:
+        return ("github", "git", "gh")
+    if k == "OPENAI_API_KEY":
+        return ("openai", "gpt", "chatgpt", "llm")
+    return None
 
 
 @dataclass
@@ -556,6 +606,7 @@ class McpConfigScanner:
             )
 
         servers = self._iter_servers(payload)
+        shared_cred_index: dict[str, set[str]] = defaultdict(set)
         for name, server in servers:
             prefix = f"$.mcpServers.{name}"
             host = str(server.get("host", "")).strip()
@@ -728,7 +779,14 @@ class McpConfigScanner:
             self._check_typosquatting(name, server, findings)
             self._check_deprecated_packages(name, server, findings)
             self._check_registry_verification(name, server, findings)
+            self._check_prompt_injection_surface(name, server, findings)
+            self._check_logging_config(name, server, findings)
+            self._check_shadow_servers(name, server, findings)
+            self._check_context_oversharing(name, server, findings)
+            self._check_command_injection_risk(name, server, findings)
+            self._check_token_management(name, server, findings, shared_cred_index)
 
+        self._check_token_management(None, None, findings, shared_cred_index)
         self._check_cross_server(servers, findings)
         server_scores = self._compute_server_scores(servers, findings)
         critical_count = sum(1 for item in findings if item.severity == "critical")
@@ -1507,6 +1565,373 @@ class McpConfigScanner:
                     )
                 )
                 break
+
+    @staticmethod
+    def _mcp_text_has_injection_marker(text: str) -> bool:
+        if not text:
+            return False
+        low = text.lower()
+        return any(marker in low for marker in INJECTION_MARKERS)
+
+    @staticmethod
+    def _arg_has_shell_metacharacter(text: str) -> bool:
+        if not text:
+            return False
+        if "&&" in text or "||" in text:
+            return True
+        if "|" in text or ";" in text:
+            return True
+        if "$(" in text or "`" in text:
+            return True
+        if ">>" in text:
+            return True
+        i = 0
+        while True:
+            j = text.find(">", i)
+            if j == -1:
+                break
+            left = text[j - 1] if j > 0 else ""
+            right = text[j + 1] if j + 1 < len(text) else ""
+            if left not in "<=-|" and right != "=":
+                return True
+            i = j + 1
+        return False
+
+    @staticmethod
+    def _server_has_logging_signals(server: dict[str, Any]) -> bool:
+        for key in server:
+            lk = str(key).lower()
+            if lk in {"log", "logging", "log_level", "debug", "verbose"}:
+                return True
+        env = server.get("env")
+        if isinstance(env, dict):
+            for key in env:
+                ku = str(key).upper()
+                if ku in {"LOG_FILE", "LOG_LEVEL"}:
+                    return True
+                if str(key).lower() == "log_level":
+                    return True
+        return False
+
+    @staticmethod
+    def _server_debug_logging_enabled(server: dict[str, Any]) -> bool:
+        ll = server.get("log_level")
+        if isinstance(ll, str) and ll.strip().lower() in {"debug", "verbose", "trace"}:
+            return True
+        env = server.get("env")
+        if not isinstance(env, dict):
+            return False
+        for key, value in env.items():
+            if not isinstance(value, str):
+                continue
+            ku = str(key).upper()
+            if ku == "LOG_LEVEL" or str(key).lower() == "log_level":
+                if value.strip().lower() in {"debug", "verbose", "trace"}:
+                    return True
+        return False
+
+    @staticmethod
+    def _config_value_contains_wildcard_star(value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip() == "*"
+        if isinstance(value, list):
+            return any(McpConfigScanner._config_value_contains_wildcard_star(item) for item in value)
+        if isinstance(value, dict):
+            return any(McpConfigScanner._config_value_contains_wildcard_star(v) for v in value.values())
+        return False
+
+    def _check_prompt_injection_surface(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        prefix = f"$.mcpServers.{name}"
+        for block_key in ("tools", "tool_definitions"):
+            block = server.get(block_key)
+            if not isinstance(block, list):
+                continue
+            for idx, tool in enumerate(block):
+                if not isinstance(tool, dict):
+                    continue
+                desc = tool.get("description")
+                if not isinstance(desc, str) or not desc:
+                    continue
+                loc = f"{prefix}.{block_key}[{idx}].description"
+                if len(desc) > 500:
+                    findings.append(
+                        ScanFinding(
+                            severity="medium",
+                            category="prompt_injection",
+                            description="Suspiciously long tool description",
+                            location=loc,
+                            evidence=f"{len(desc)} chars",
+                        )
+                    )
+                if self._mcp_text_has_injection_marker(desc):
+                    findings.append(
+                        ScanFinding(
+                            severity="high",
+                            category="prompt_injection",
+                            description="Tool description contains possible prompt-injection / instruction override text",
+                            location=loc,
+                            evidence=desc[:200],
+                        )
+                    )
+        env = server.get("env")
+        if isinstance(env, dict):
+            for ekey, evalue in env.items():
+                if isinstance(evalue, str) and self._mcp_text_has_injection_marker(evalue):
+                    findings.append(
+                        ScanFinding(
+                            severity="high",
+                            category="prompt_injection",
+                            description="Env value contains possible prompt-injection / instruction override text",
+                            location=f"{prefix}.env.{ekey}",
+                            evidence=str(ekey),
+                        )
+                    )
+
+    def _check_logging_config(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        prefix = f"$.mcpServers.{name}"
+        if self._server_debug_logging_enabled(server):
+            findings.append(
+                ScanFinding(
+                    severity="medium",
+                    category="insufficient_logging",
+                    description="Debug logging may expose sensitive data in production",
+                    location=prefix,
+                    evidence="log_level/debug/verbose/trace",
+                )
+            )
+        if not self._server_has_logging_signals(server):
+            findings.append(
+                ScanFinding(
+                    severity="medium",
+                    category="insufficient_logging",
+                    description="No logging configured — incidents invisible",
+                    location=prefix,
+                    evidence="no log/logging/log_level/debug keys or LOG_* env",
+                )
+            )
+
+    def _check_shadow_servers(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        prefix = f"$.mcpServers.{name}"
+        command = str(server.get("command", "") or "").strip()
+        if command:
+            norm = command.replace("\\", "/").lower()
+            risky_path = (
+                command.startswith("./")
+                or command.startswith("../")
+                or "/home/" in norm
+                or "/tmp/" in norm
+                or "c:/users" in norm
+                or (command.startswith("/") and not command.startswith("//"))
+            )
+            if risky_path:
+                findings.append(
+                    ScanFinding(
+                        severity="high",
+                        category="shadow_server",
+                        description="Local script as MCP server — unauditable, no update path",
+                        location=f"{prefix}.command",
+                        evidence=command[:200],
+                    )
+                )
+        url = str(server.get("url", "") or "").strip()
+        if not url:
+            return
+        parsed = urlparse(url)
+        if not parsed.scheme or parsed.scheme not in {"http", "https", "ws", "wss"}:
+            return
+        port = parsed.port
+        if port is None:
+            port = 443 if parsed.scheme in {"https", "wss"} else 80
+        host = (parsed.hostname or "").lower()
+        if port not in STANDARD_MCP_URL_PORTS:
+            findings.append(
+                ScanFinding(
+                    severity="info",
+                    category="shadow_server",
+                    description="Non-standard port — may indicate shadow/dev server",
+                    location=f"{prefix}.url",
+                    evidence=f"{url} (port {port})",
+                )
+            )
+        if port is not None and port > 10000 and host in {"127.0.0.1", "localhost"}:
+            findings.append(
+                ScanFinding(
+                    severity="medium",
+                    category="shadow_server",
+                    description="High-port localhost — likely development/temporary",
+                    location=f"{prefix}.url",
+                    evidence=url,
+                )
+            )
+
+    def _check_context_oversharing(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        prefix = f"$.mcpServers.{name}"
+        name_lower = name.lower()
+        env = server.get("env")
+        if isinstance(env, dict):
+            for ekey, evalue in env.items():
+                if not isinstance(evalue, str) or not evalue.strip():
+                    continue
+                hints = _cross_service_env_name_hints(str(ekey))
+                if hints is None:
+                    continue
+                if not any(h in name_lower for h in hints):
+                    findings.append(
+                        ScanFinding(
+                            severity="high",
+                            category="context_oversharing",
+                            description="Cross-service credential sharing — blast radius risk",
+                            location=f"{prefix}.env.{ekey}",
+                            evidence=str(ekey),
+                        )
+                    )
+        scope_like_keys = frozenset(
+            {"permissions", "scope", "scopes", "allowedscopes", "allowed_scopes"}
+        )
+        stack: list[tuple[Any, int]] = [(server, 0)]
+        while stack:
+            current, depth = stack.pop()
+            if depth > 6 or not isinstance(current, dict):
+                continue
+            for key, value in current.items():
+                kl = str(key).lower()
+                if kl in scope_like_keys and self._config_value_contains_wildcard_star(value):
+                    findings.append(
+                        ScanFinding(
+                            severity="critical",
+                            category="context_oversharing",
+                            description="Wildcard permissions — unrestricted access",
+                            location=f"{prefix}.{key}",
+                            evidence="*",
+                        )
+                    )
+                if isinstance(value, dict):
+                    stack.append((value, depth + 1))
+                elif isinstance(value, list) and kl == "tools" and self._config_value_contains_wildcard_star(value):
+                    findings.append(
+                        ScanFinding(
+                            severity="critical",
+                            category="context_oversharing",
+                            description="Wildcard permissions — unrestricted access",
+                            location=f"{prefix}.{key}",
+                            evidence="*",
+                        )
+                    )
+        for sk, raw in server.items():
+            lk = str(sk).lower()
+            if lk not in {"alloweddirectories", "allowed_paths", "allowedpaths"}:
+                continue
+            paths = raw if isinstance(raw, list) else [raw]
+            for p in paths:
+                ps = str(p).strip()
+                if not ps:
+                    continue
+                ps_low = ps.lower()
+                if ps in {"/", "~", "C:\\", "C:/"} or ps.startswith("~/") or ps_low in {"c:\\", "c:/"}:
+                    findings.append(
+                        ScanFinding(
+                            severity="high",
+                            category="context_oversharing",
+                            description="Overly broad directory access",
+                            location=f"{prefix}.{sk}",
+                            evidence=ps[:200],
+                        )
+                    )
+                    break
+
+    def _check_command_injection_risk(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        prefix = f"$.mcpServers.{name}"
+        args = self._extract_args(server)
+        for arg in args:
+            av = str(arg)
+            if self._arg_has_shell_metacharacter(av):
+                findings.append(
+                    ScanFinding(
+                        severity="critical",
+                        category="command_injection_risk",
+                        description="Shell metacharacters in args — command injection risk",
+                        location=f"{prefix}.args",
+                        evidence=av[:200],
+                    )
+                )
+                break
+        command = str(server.get("command", "") or "").strip()
+        if command:
+            first = command.split()[0]
+            base = Path(first.replace("\\", "/")).name.lower()
+            if base in RAW_SHELL_COMMANDS:
+                findings.append(
+                    ScanFinding(
+                        severity="critical",
+                        category="command_injection_risk",
+                        description="Raw shell as MCP server — arbitrary command execution",
+                        location=f"{prefix}.command",
+                        evidence=command[:200],
+                    )
+                )
+        env = server.get("env")
+        if isinstance(env, dict):
+            for ekey, evalue in env.items():
+                if isinstance(evalue, str) and self._arg_has_shell_metacharacter(evalue):
+                    findings.append(
+                        ScanFinding(
+                            severity="high",
+                            category="command_injection_risk",
+                            description="Shell metacharacters in env values",
+                            location=f"{prefix}.env.{ekey}",
+                            evidence=str(ekey),
+                        )
+                    )
+                    break
+
+    def _check_token_management(
+        self,
+        name: str | None,
+        server: dict[str, Any] | None,
+        findings: list[ScanFinding],
+        shared_cred_index: dict[str, set[str]],
+    ) -> None:
+        if server is None or name is None:
+            for value, names in shared_cred_index.items():
+                if len(names) < 2:
+                    continue
+                findings.append(
+                    ScanFinding(
+                        severity="high",
+                        category="token_management",
+                        description="Shared credential across servers — compromising one compromises all",
+                        location="$.mcpServers",
+                        evidence=(
+                            f"{len(names)} servers; value_prefix={value[:24]}..."
+                            if len(value) > 24
+                            else str(value)
+                        ),
+                    )
+                )
+            return
+        prefix = f"$.mcpServers.{name}"
+        env = server.get("env")
+        if not isinstance(env, dict):
+            return
+        for ekey, evalue in env.items():
+            if not isinstance(evalue, str):
+                continue
+            el = str(ekey).lower()
+            if not any(part in el for part in ("token", "key", "secret")):
+                continue
+            evs = evalue.strip()
+            if len(evs) > 100:
+                findings.append(
+                    ScanFinding(
+                        severity="info",
+                        category="token_management",
+                        description="Long-lived credential — consider short-lived tokens",
+                        location=f"{prefix}.env.{ekey}",
+                        evidence=str(ekey),
+                    )
+                )
+            if len(evs) >= 16:
+                shared_cred_index[evs].add(name)
 
     @staticmethod
     def _extract_args(server: dict[str, Any]) -> list[str]:
