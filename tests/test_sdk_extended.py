@@ -60,10 +60,10 @@ def test_get_ecosystem_summary_method() -> None:
 
 
 def test_repr_includes_url() -> None:
-    client = OrchesisClient(api_url="http://localhost:8090")
+    client = OrchesisClient(api_url="http://localhost:8080")
     with patch.object(client, "is_connected", return_value=False):
         rep = repr(client)
-    assert "OrchesisClient(url=http://localhost:8090" in rep
+    assert "OrchesisClient(url=http://localhost:8080" in rep
 
 
 def test_all_methods_handle_error() -> None:

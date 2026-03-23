@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import datetime as dt
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
+from unittest.mock import patch
 
 from orchesis.cost_tracker import CostTracker, DEFAULT_TOOL_COSTS, MODEL_COSTS
 
@@ -192,4 +194,34 @@ def test_hourly_costs_for_custom_day() -> None:
     tracker.record_call("read_file")
     today = date.today().isoformat()
     assert isinstance(tracker.get_hourly_costs(today), dict)
+
+
+def test_cost_tracker_trims_calls_at_max() -> None:
+    tracker = CostTracker(max_call_history=30)
+    for _ in range(45):
+        tracker.record_call("read_file")
+    with tracker._lock:
+        assert len(tracker._calls) <= 30
+
+
+def test_cost_tracker_prunes_old_days() -> None:
+    days = [dt.date(2031, 4, i) for i in range(1, 9)]
+    day_iter = iter(days)
+
+    class _PatchedDate:
+        @staticmethod
+        def today() -> dt.date:
+            return next(day_iter)
+
+        @staticmethod
+        def fromtimestamp(ts: float, tz: dt.tzinfo | None = None) -> dt.date:
+            return dt.date.fromtimestamp(ts, tz)
+
+    with patch("orchesis.cost_tracker.date", _PatchedDate):
+        tracker = CostTracker(max_days=3)
+        for _ in range(6):
+            tracker.record_call("read_file")
+    with tracker._lock:
+        assert len(tracker._daily_total) <= 3
+        assert len(tracker._tool_daily) <= 3
 

@@ -73,7 +73,7 @@ class OrchesisClient:
 
     def __init__(
         self,
-        base_url: str = "http://localhost:8090",
+        base_url: str = "http://localhost:8080",
         timeout: float = 5.0,
         api_key: str = "",
         headers: dict[str, str] | None = None,

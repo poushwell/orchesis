@@ -1,5 +1,6 @@
 """FastAPI proxy layer using Orchesis rule engine."""
 
+import atexit
 import asyncio
 import concurrent.futures
 from collections import deque
@@ -11,6 +12,7 @@ import ipaddress
 import json
 import logging
 import os
+import random
 import socket
 import threading
 import time
@@ -44,7 +46,13 @@ from orchesis.credential_injector import CredentialInjector
 from orchesis.credential_vault import CredentialNotFoundError, build_vault_from_policy
 from orchesis.contrib.pii_detector import PiiDetector
 from orchesis.contrib.secret_scanner import SecretScanner
-from orchesis.config import PolicyWatcher, load_policy, validate_policy
+from orchesis.config import (
+    PolicyWatcher,
+    _redact_config,
+    load_policy,
+    validate_policy,
+    validate_startup_policy,
+)
 from orchesis.engine import evaluate
 from orchesis.events import EventBus
 from orchesis.forensics import Incident
@@ -112,12 +120,31 @@ from orchesis.core.evidence_ledger import EvidenceLedger
 
 _HTTP_PROXY_LOGGER = logging.getLogger("orchesis.http_proxy")
 _evidence_ledger = EvidenceLedger()
+atexit.register(_evidence_ledger.close)
+
+
+def compute_upstream_retry_delay(
+    failed_attempt_index: int,
+    *,
+    base_delay: float = 0.1,
+    max_delay: float = 2.0,
+    random_unit: float | None = None,
+) -> float:
+    """Delay before the next upstream retry after a failure (full jitter on [0.5, 1.0] × capped exponential).
+
+    ``failed_attempt_index`` is the 0-based index of the attempt that just failed (0 after first failure).
+    """
+    if failed_attempt_index < 0:
+        return 0.0
+    delay = min(float(base_delay) * (2**failed_attempt_index), float(max_delay))
+    u = float(random_unit) if random_unit is not None else random.random()
+    return delay * (0.5 + u * 0.5)
 
 
 @dataclass
 class ProxyConfig:
     listen_host: str = "127.0.0.1"
-    listen_port: int = 8100
+    listen_port: int = 8080
     upstream_url: str | None = None
     intercept_mode: str = "tool_call"
     timeout_seconds: float = 30.0
@@ -1807,7 +1834,7 @@ class HTTPProxyConfig:
     """Configuration for stdlib HTTP LLM proxy."""
 
     host: str = "127.0.0.1"
-    port: int = 8100
+    port: int = 8080
     timeout: float = 300.0
     cors: bool = True
     upstream: dict[str, str] = field(
@@ -1887,10 +1914,26 @@ class LLMHTTPProxy:
         self._policy_path = policy_path
         self._policy: dict[str, Any] = {}
         if isinstance(policy_path, str) and policy_path.strip():
-            try:
-                self._policy = load_policy(policy_path)
-            except Exception:
-                self._policy = {}
+            self._policy = load_policy(policy_path)
+
+        critical, startup_warnings = validate_startup_policy(
+            self._policy,
+            listen_port=self._config.port,
+            runtime_upstream=dict(self._config.upstream) if self._config.upstream else None,
+        )
+        for msg in startup_warnings:
+            _HTTP_PROXY_LOGGER.warning("%s", msg)
+        if critical:
+            for msg in critical:
+                _HTTP_PROXY_LOGGER.critical("%s", msg)
+            raise RuntimeError("; ".join(critical))
+
+        if _HTTP_PROXY_LOGGER.isEnabledFor(logging.DEBUG):
+            snap = json.dumps(_redact_config(self._policy), ensure_ascii=False, default=str)
+            if len(snap) > 8000:
+                snap = snap[:8000] + "…"
+            _HTTP_PROXY_LOGGER.debug("policy snapshot (redacted): %s", snap)
+
         self._fast_path = None
         self._fast_path_mandatory_phases = {
             "parse",
@@ -1936,6 +1979,14 @@ class LLMHTTPProxy:
                 max_retries=int(pool_cfg.get("max_retries", 2)),
             )
         )
+        base_retry = pool_cfg.get("upstream_retry_base_delay_seconds", 0.1)
+        max_retry = pool_cfg.get("upstream_retry_max_delay_seconds", 2.0)
+        self._upstream_retry_base_delay = float(base_retry) if isinstance(base_retry, int | float) else 0.1
+        self._upstream_retry_max_delay = float(max_retry) if isinstance(max_retry, int | float) else 2.0
+        if self._upstream_retry_base_delay < 0:
+            self._upstream_retry_base_delay = 0.0
+        if self._upstream_retry_max_delay < self._upstream_retry_base_delay:
+            self._upstream_retry_max_delay = self._upstream_retry_base_delay
         streaming_cfg_raw = self._proxy_engine_cfg.get("streaming", {})
         streaming_cfg = streaming_cfg_raw if isinstance(streaming_cfg_raw, dict) else {}
         self._streaming_enabled = bool(streaming_cfg.get("enabled", True))
@@ -2464,6 +2515,7 @@ class LLMHTTPProxy:
         )
         self._state_tracker.flush()
         self._connection_pool.close_all()
+        _evidence_ledger.flush()
         if self._recorder is not None:
             self._recorder.close_all()
         if self._otlp_exporter is not None:
@@ -4908,6 +4960,13 @@ class LLMHTTPProxy:
                         {"error": {"type": "upstream_error", "message": f"Failed to connect to upstream: {error}"}},
                     )
                     return False
+                sleep_s = compute_upstream_retry_delay(
+                    attempt,
+                    base_delay=self._upstream_retry_base_delay,
+                    max_delay=self._upstream_retry_max_delay,
+                )
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
         return False
 
     def _phase_post_upstream(self, ctx: _RequestContext) -> bool:

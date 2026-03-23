@@ -4,10 +4,20 @@ from __future__ import annotations
 
 import importlib
 import re
-import tomllib
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    import tomli as tomllib  # type: ignore[no-redef,import-untyped]
+
+import click
+from click.testing import CliRunner
+
 from orchesis import __version__
+from orchesis.cli import main
+from orchesis.proxy import HTTPProxyConfig, ProxyConfig
+from orchesis.sdk import OrchesisClient
 
 
 def _project_root() -> Path:
@@ -127,3 +137,44 @@ def test_fuzz_crash_regression_tests_exist() -> None:
     assert (root / "tests" / "test_secret_scanner.py").exists()
     assert (root / "tests" / "test_pii_detector.py").exists()
     assert (root / "tests" / "test_config.py").exists()
+
+
+def test_pyproject_has_all_extra() -> None:
+    root = _project_root()
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    optional = pyproject.get("project", {}).get("optional-dependencies", {})
+    assert "all" in optional
+    joined = " ".join(str(d).lower() for d in optional["all"])
+    assert "pyyaml" in joined
+    assert "httpx" in joined
+    assert "fastapi" in joined
+    assert "uvicorn" in joined
+
+
+def test_proxy_config_default_port_8080() -> None:
+    assert ProxyConfig().listen_port == 8080
+    assert HTTPProxyConfig().port == 8080
+
+
+def test_orchesis_client_default_port_8080() -> None:
+    client = OrchesisClient()
+    assert client.api_url == "http://localhost:8080"
+
+
+def test_python_version_requires_3_10() -> None:
+    root = _project_root()
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    req = str(pyproject.get("project", {}).get("requires-python", "")).replace(" ", "")
+    assert ">=3.10" in req
+
+
+def test_dashboard_cli_command_exists() -> None:
+    runner = CliRunner()
+    result = runner.invoke(main, ["dashboard", "--no-browser"])
+    assert result.exit_code == 0
+    assert "Dashboard URL:" in result.output
+    assert "8081" in result.output
+    ctx = click.Context(main)
+    cmd = main.get_command(ctx, "dashboard")
+    assert cmd is not None
+    assert cmd.name == "dashboard"

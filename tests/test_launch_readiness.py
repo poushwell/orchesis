@@ -4,8 +4,12 @@ from __future__ import annotations
 
 
 def test_zero_external_runtime_deps() -> None:
-    import tomllib
     from pathlib import Path
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python < 3.11
+        import tomli as tomllib  # type: ignore[no-redef,import-untyped]
 
     data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     deps = [str(item).lower() for item in data.get("project", {}).get("dependencies", [])]

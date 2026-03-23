@@ -285,15 +285,20 @@ class ContentLoopDetector:
         max_identical: int = 5,
         cooldown_seconds: int = 300,
         hash_prefix_len: int = 256,
+        *,
+        session_hash_ttl: float = 1800.0,
+        max_sessions: int = 10_000,
     ) -> None:
         self._window_seconds = max(1, int(window_seconds))
         self._max_identical = max(1, int(max_identical))
         self._cooldown_seconds = max(1, int(cooldown_seconds))
         self._hash_prefix_len = max(1, int(hash_prefix_len))
+        self._session_hash_ttl = max(1.0, float(session_hash_ttl))
+        self._max_sessions = max(1, int(max_sessions))
         self._history: dict[str, list[float]] = {}
         self._cooldowns: dict[str, float] = {}
         self._cooldown_level: dict[str, int] = {}
-        self._last_hash_by_session: dict[str, str] = {}
+        self._last_hash_by_session: dict[str, tuple[str, float]] = {}
         self._lock = threading.Lock()
         self._stats = {"detected": 0, "blocked": 0, "total_checked": 0}
 
@@ -326,6 +331,19 @@ class ContentLoopDetector:
         for key in expired_cd:
             self._cooldowns.pop(key, None)
 
+    def _prune_last_hash_sessions_locked(self, now: float) -> None:
+        ttl = self._session_hash_ttl
+        stale_sids = [
+            sid for sid, (_h, ts) in self._last_hash_by_session.items() if (now - ts) > ttl
+        ]
+        for sid in stale_sids:
+            self._last_hash_by_session.pop(sid, None)
+        if len(self._last_hash_by_session) > self._max_sessions:
+            ordered = sorted(self._last_hash_by_session.items(), key=lambda kv: kv[1][1])
+            overflow = len(self._last_hash_by_session) - self._max_sessions
+            for sid, _ in ordered[:overflow]:
+                self._last_hash_by_session.pop(sid, None)
+
     def check(self, content: str, session_id: str = "") -> dict[str, Any]:
         now = time.monotonic()
         text = str(content or "")
@@ -335,14 +353,25 @@ class ContentLoopDetector:
         with self._lock:
             self._stats["total_checked"] += 1
             self._prune_locked(now)
-            prev_hash = self._last_hash_by_session.get(safe_session)
+            self._prune_last_hash_sessions_locked(now)
+            prev_hash: str | None = None
+            entry = self._last_hash_by_session.get(safe_session)
+            if entry is not None:
+                h_prev, ts_prev = entry
+                if (now - ts_prev) <= self._session_hash_ttl:
+                    prev_hash = h_prev
+                else:
+                    self._last_hash_by_session.pop(safe_session, None)
             if isinstance(prev_hash, str) and prev_hash and prev_hash != content_hash:
                 prefix = f"{safe_session}:"
                 for table in (self._history, self._cooldowns, self._cooldown_level):
                     stale = [item_key for item_key in table if str(item_key).startswith(prefix)]
                     for stale_key in stale:
                         table.pop(stale_key, None)
-            self._last_hash_by_session[safe_session] = content_hash
+            self._last_hash_by_session[safe_session] = (content_hash, now)
+            while len(self._last_hash_by_session) > self._max_sessions:
+                ordered = sorted(self._last_hash_by_session.items(), key=lambda kv: kv[1][1])
+                self._last_hash_by_session.pop(ordered[0][0], None)
             cooldown_until = float(self._cooldowns.get(key, 0.0))
             current_count = len(self._history.get(key, []))
             if cooldown_until > now:

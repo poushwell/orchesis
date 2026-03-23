@@ -3,7 +3,16 @@ from pathlib import Path
 import pytest
 
 from orchesis import config as config_module
-from orchesis.config import PolicyError, PolicyWatcher, load_policy, validate_policy
+from orchesis.config import (
+    ConfigError,
+    DEFAULT_RESUME_TOKEN,
+    PolicyError,
+    PolicyWatcher,
+    _redact_config,
+    load_policy,
+    validate_policy,
+    validate_startup_policy,
+)
 
 
 def _write_yaml(tmp_path: Path, name: str, content: str) -> Path:
@@ -45,8 +54,8 @@ def test_load_policy_raises_on_non_mapping_root(tmp_path: Path) -> None:
 
 def test_load_policy_raises_policy_error_for_fuzzed_non_mapping_yaml(tmp_path: Path) -> None:
     policy_path = _write_yaml(tmp_path, "fuzzed.yaml", "[0b_\n#2\n")
-    policy = load_policy(policy_path)
-    assert isinstance(policy, dict)
+    with pytest.raises(ConfigError, match="Policy parse failed"):
+        load_policy(policy_path)
 
 
 def test_load_policy_raises_policy_error_for_valid_non_mapping_yaml(tmp_path: Path) -> None:
@@ -65,16 +74,105 @@ def test_policy_loader_handles_binary_yaml(tmp_path: Path) -> None:
 def test_load_policy_regression_invalid_bytes_returns_empty_mapping(tmp_path: Path) -> None:
     policy_path = tmp_path / "invalid-bytes.yaml"
     policy_path.write_bytes(b"{\xff")
-    policy = load_policy(policy_path)
-    assert isinstance(policy, dict)
+    with pytest.raises(ConfigError, match="Policy parse failed"):
+        load_policy(policy_path)
 
 
 def test_load_policy_regression_safe_load_guard_on_nonchars(tmp_path: Path) -> None:
     policy_path = tmp_path / "nonchar-bytes.yaml"
     # Includes UTF-8 for U+FFFF (noncharacter) + malformed YAML.
     policy_path.write_bytes(b"{\xef\xbf\xbf")
-    policy = load_policy(policy_path)
-    assert isinstance(policy, dict)
+    with pytest.raises(ConfigError, match="Policy parse failed"):
+        load_policy(policy_path)
+
+
+def test_load_policy_fails_on_invalid_yaml(tmp_path: Path) -> None:
+    policy_path = _write_yaml(tmp_path, "broken.yaml", "this: is: not: valid: yaml: [[")
+    with pytest.raises(ConfigError, match="Policy parse failed"):
+        load_policy(policy_path)
+
+
+def test_load_policy_empty_result_warns(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    empty_path = tmp_path / "empty.yaml"
+    empty_path.write_text("", encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        load_policy(empty_path)
+    assert any("Empty policy loaded" in rec.message for rec in caplog.records)
+
+    caplog.clear()
+    brace_path = _write_yaml(tmp_path, "bare.yaml", "{}")
+    with caplog.at_level(logging.WARNING):
+        load_policy(brace_path)
+    assert any("Empty policy loaded" in rec.message for rec in caplog.records)
+
+
+def test_default_resume_token_warns() -> None:
+    policy = {
+        "kill_switch": {"enabled": True, "resume_token": DEFAULT_RESUME_TOKEN, "auto_triggers": {}},
+        "proxy": {"upstream": {"openai": "https://api.openai.com"}},
+    }
+    _, warns = validate_startup_policy(
+        policy, listen_port=8100, runtime_upstream={"openai": "https://api.openai.com"}
+    )
+    assert any("Default resume token" in w for w in warns)
+
+
+def test_short_resume_token_warns() -> None:
+    policy = {
+        "kill_switch": {"enabled": True, "resume_token": "short", "auto_triggers": {}},
+        "proxy": {"upstream": {"openai": "https://api.openai.com"}},
+    }
+    _, warns = validate_startup_policy(
+        policy, listen_port=8100, runtime_upstream={"openai": "https://api.openai.com"}
+    )
+    assert any("16 characters" in w for w in warns)
+
+
+def test_custom_resume_token_no_warning() -> None:
+    long_token = "a" * 20
+    policy = {
+        "kill_switch": {"enabled": True, "resume_token": long_token, "auto_triggers": {}},
+        "proxy": {"upstream": {"openai": "https://api.openai.com"}},
+    }
+    _, warns = validate_startup_policy(
+        policy, listen_port=8100, runtime_upstream={"openai": "https://api.openai.com"}
+    )
+    assert not any("resume token" in w.lower() for w in warns)
+
+
+def test_validate_policy_missing_target_blocks() -> None:
+    critical, _ = validate_startup_policy({}, listen_port=8100, runtime_upstream={})
+    assert critical
+    assert "http" in critical[0].lower()
+
+
+def test_validate_policy_invalid_port_warns() -> None:
+    _, warns = validate_startup_policy(
+        {"proxy": {"port": 999_999, "upstream": {"openai": "https://api.openai.com"}}},
+        listen_port=None,
+        runtime_upstream={"openai": "https://api.openai.com"},
+    )
+    assert any("65535" in w for w in warns)
+
+
+def test_redact_config_hides_secrets() -> None:
+    sample = {
+        "kill_switch": {"resume_token": "super-secret-token", "enabled": False},
+        "alerts": {
+            "telegram": {"bot_token": "123456:abc", "chat_id": "1"},
+            "webhook": {"url": "https://x", "headers": {"Authorization": "Bearer xyz"}},
+        },
+        "api_key": "sk-abcdefghijklmnopqrstuvwxyz0123456789abcd",
+        "nested": {"normal": "ok"},
+    }
+    red = _redact_config(sample)
+    assert red["kill_switch"]["resume_token"] == "***"
+    assert red["alerts"]["telegram"]["bot_token"] == "***"
+    assert red["alerts"]["webhook"]["headers"]["Authorization"] == "***"
+    assert red["api_key"] == "***"
+    assert red["nested"]["normal"] == "ok"
 
 
 def test_validate_policy_accepts_valid_policy() -> None:

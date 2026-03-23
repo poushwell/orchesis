@@ -206,7 +206,7 @@ One-command security audit of your agent setup. Checks config, connectivity, pip
 | MAST coverage | 78.6% (11/14 failure modes) |
 | OWASP coverage | 80% (8/10 risks) |
 | Tests passing | 4,813+ |
-| Modules | ~310 |
+| Modules | ~309 |
 | Dependencies | 0 (stdlib only) |
 
 ---

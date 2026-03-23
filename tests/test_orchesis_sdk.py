@@ -25,7 +25,7 @@ def _mock_json_response(payload: dict):
 
 def _http_error(code: int = 500) -> urllib.error.HTTPError:
     return urllib.error.HTTPError(
-        "http://localhost:8090/health",
+        "http://localhost:8080/health",
         code,
         "Error",
         {},
@@ -35,7 +35,7 @@ def _http_error(code: int = 500) -> urllib.error.HTTPError:
 
 def test_client_initializes() -> None:
     client = OrchesisClient(token="tkn")
-    assert client.api_url == "http://localhost:8090"
+    assert client.api_url == "http://localhost:8080"
     assert client.token == "tkn"
 
 
@@ -50,7 +50,7 @@ def test_health_check_method() -> None:
 def test_request_builds_correctly() -> None:
     with patch("urllib.request.urlopen") as mock:
         mock.return_value = _mock_json_response({"ok": True})
-        client = OrchesisClient(api_url="http://localhost:8090")
+        client = OrchesisClient(api_url="http://localhost:8080")
         _ = client.evaluate({"tool": "read_file"})
         req = mock.call_args[0][0]
     assert req.full_url.endswith("/api/v1/evaluate")

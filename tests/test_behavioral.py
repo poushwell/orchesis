@@ -560,3 +560,22 @@ def test_proxy_behavioral_disabled_by_default(tmp_path: Path) -> None:
         proxy.stop()
         upstream.shutdown()
         upstream.server_close()
+
+
+def test_behavioral_evicts_oldest_agents() -> None:
+    det = BehavioralDetector({"enabled": True, "learning_window": 500}, max_agents=4)
+    for i in range(6):
+        det.check_request(f"agent-{i}", {"messages": [], "tools": []})
+        time.sleep(0.002)
+    with det._lock:
+        assert len(det._agents) <= 4
+
+
+def test_behavioral_cleanup_stale() -> None:
+    det = BehavioralDetector({"enabled": True, "learning_window": 500}, max_agents=100)
+    det.check_request("stale-one", {"messages": [], "tools": []})
+    time.sleep(0.06)
+    removed = det.cleanup_stale_agents(max_age_seconds=0.02)
+    assert removed >= 1
+    with det._lock:
+        assert "stale-one" not in det._agents

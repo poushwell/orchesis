@@ -11,6 +11,10 @@ import time
 from typing import Any
 
 
+class ConnectionPoolExhausted(Exception):
+    """Raised when acquire() times out while the pool is at capacity."""
+
+
 @dataclass
 class PoolConfig:
     max_connections_per_host: int = 10
@@ -83,6 +87,7 @@ class ConnectionPool:
             "errors": 0,
             "active": 0,
             "waits": 0,
+            "pool_overflow_count": 0,
         }
 
     def acquire(self, host: str, port: int = 443, use_ssl: bool = True) -> PooledConnection:
@@ -119,6 +124,14 @@ class ConnectionPool:
                 now = time.monotonic()
                 remaining = deadline - now
                 if remaining <= 0:
+                    at_host_cap = len(pool) >= self._config.max_connections_per_host
+                    at_total_cap = self._total_connections >= self._config.max_total_connections
+                    if at_host_cap or at_total_cap:
+                        self._stats["pool_overflow_count"] = int(self._stats["pool_overflow_count"]) + 1
+                        raise ConnectionPoolExhausted(
+                            f"connection pool exhausted for {host_key}:{int(port)} "
+                            f"(per_host_cap={at_host_cap}, total_cap={at_total_cap})"
+                        )
                     created = PooledConnection(
                         host=host_key,
                         port=port,

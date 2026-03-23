@@ -24,6 +24,7 @@ from orchesis.proxy import (
     ProxyConfig,
     ProxyStats,
     build_app_from_env,
+    compute_upstream_retry_delay,
     create_proxy_app,
 )
 
@@ -1248,3 +1249,23 @@ def test_cascade_cache_hit_still_runs_loop_detection() -> None:
         assert handler.headers_sent.get("X-Orchesis-Loop-Warning") == "loop warn"
     finally:
         proxy.stop()
+
+
+def test_retry_backoff_delays_increase() -> None:
+    d0 = compute_upstream_retry_delay(0, base_delay=0.1, max_delay=100.0, random_unit=1.0)
+    d1 = compute_upstream_retry_delay(1, base_delay=0.1, max_delay=100.0, random_unit=1.0)
+    assert d1 > d0
+
+
+def test_retry_backoff_has_jitter() -> None:
+    d_lo = compute_upstream_retry_delay(0, base_delay=1.0, max_delay=100.0, random_unit=0.0)
+    d_hi = compute_upstream_retry_delay(0, base_delay=1.0, max_delay=100.0, random_unit=1.0)
+    assert d_lo == pytest.approx(0.5)
+    assert d_hi == pytest.approx(1.0)
+
+
+def test_retry_respects_max_delay() -> None:
+    d = compute_upstream_retry_delay(10, base_delay=1.0, max_delay=2.0, random_unit=1.0)
+    assert d == pytest.approx(2.0)
+    d_low = compute_upstream_retry_delay(10, base_delay=1.0, max_delay=2.0, random_unit=0.0)
+    assert d_low == pytest.approx(1.0)

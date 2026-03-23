@@ -87,7 +87,7 @@ def test_sdk_client_no_crash() -> None:
     from orchesis.sdk import OrchesisClient
 
     client = OrchesisClient(token="test")
-    assert client.api_url == "http://localhost:8090"
+    assert client.api_url == "http://localhost:8080"
     assert client.is_connected() is False
 
 

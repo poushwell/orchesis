@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from typing import Any
@@ -46,14 +46,25 @@ class ToolCallCost:
 class CostTracker:
     """Tracks costs per tool, per task, and per day with thread safety."""
 
-    def __init__(self, tool_costs: dict[str, float] | None = None, model_costs: dict[str, dict[str, float]] | None = None):
+    def __init__(
+        self,
+        tool_costs: dict[str, float] | None = None,
+        model_costs: dict[str, dict[str, float]] | None = None,
+        *,
+        max_call_history: int = 10_000,
+        max_tasks: int = 5000,
+        max_days: int = 365,
+    ):
         self._lock = threading.Lock()
         self._tool_costs = {**DEFAULT_TOOL_COSTS, **(tool_costs or {})}
         self._model_costs = {**MODEL_COSTS, **(model_costs or {})}
+        self._max_call_history = max(1, int(max_call_history))
+        self._max_tasks = max(1, int(max_tasks))
+        self._max_days = max(1, int(max_days))
         self._calls: list[ToolCallCost] = []
         self._daily_total: dict[str, float] = defaultdict(float)
         self._tool_daily: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
-        self._task_total: dict[str, float] = defaultdict(float)
+        self._task_total: OrderedDict[str, float] = OrderedDict()
         self._cascade_savings_daily: dict[str, float] = defaultdict(float)
         self._loop_savings_daily: dict[str, float] = defaultdict(float)
 
@@ -86,10 +97,28 @@ class CostTracker:
         today = date.today().isoformat()
         with self._lock:
             self._calls.append(call)
+            if len(self._calls) > self._max_call_history:
+                drop = max(1, int(len(self._calls) * 0.2))
+                self._calls = self._calls[drop:]
             self._daily_total[today] += cost
             self._tool_daily[today][tool_name] += cost
+            if len(self._daily_total) > self._max_days:
+                sorted_days = sorted(self._daily_total.keys())
+                for old_day in sorted_days[: len(sorted_days) - self._max_days]:
+                    self._daily_total.pop(old_day, None)
+                    self._tool_daily.pop(old_day, None)
+                    self._cascade_savings_daily.pop(old_day, None)
+                    self._loop_savings_daily.pop(old_day, None)
             if task_id:
-                self._task_total[task_id] += cost
+                prev = float(self._task_total.pop(task_id, 0.0))
+                self._task_total[task_id] = prev + cost
+                self._task_total.move_to_end(task_id)
+                while len(self._task_total) > self._max_tasks:
+                    drop_tasks = max(1, int(len(self._task_total) * 0.2))
+                    for _ in range(drop_tasks):
+                        if not self._task_total:
+                            break
+                        self._task_total.popitem(last=False)
         return call
 
     def get_daily_total(self, day: str | None = None) -> float:

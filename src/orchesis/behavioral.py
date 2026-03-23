@@ -135,6 +135,10 @@ class BehavioralFingerprint:
         with self._lock:
             return self.total_requests < self._learning_window
 
+    def last_seen_monotonic(self) -> float:
+        with self._lock:
+            return float(self.last_seen)
+
     @staticmethod
     def _estimate_prompt_tokens(messages: Any) -> int:
         try:
@@ -189,6 +193,7 @@ class BehavioralFingerprint:
     def record_response_only(self, is_error: bool, completion_tokens: int = 0) -> None:
         """Update response-only dimensions without mutating request baselines."""
         with self._lock:
+            self.last_seen = time.monotonic()
             self._error_window.append(1 if is_error else 0)
             self.error_rate.update(sum(self._error_window) / max(1, len(self._error_window)))
             if completion_tokens > 0:
@@ -256,7 +261,12 @@ class BehavioralDetector:
 
     _ACTION_SEVERITY = {"allow": 0, "log": 1, "warn": 2, "block": 3}
 
-    def __init__(self, config: BehavioralConfig | dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        config: BehavioralConfig | dict[str, Any] | None = None,
+        *,
+        max_agents: int = 1000,
+    ) -> None:
         if isinstance(config, BehavioralConfig):
             cfg = config
         else:
@@ -281,6 +291,7 @@ class BehavioralDetector:
             )
         self._config = cfg
         self._lock = threading.Lock()
+        self._max_agents = max(1, int(max_agents))
         self._agents: dict[str, BehavioralFingerprint] = {}
         self._total_anomalies_detected = 0
         self._anomalies_by_dimension: Counter[str] = Counter()
@@ -298,7 +309,17 @@ class BehavioralDetector:
                     error_window_size=self._config.error_window_size,
                 )
                 self._agents[agent_id] = profile
-            return profile
+            while len(self._agents) > self._max_agents:
+                others = [(aid, fp) for aid, fp in self._agents.items() if aid != agent_id]
+                if not others:
+                    break
+                others.sort(key=lambda kv: kv[1].last_seen_monotonic())
+                drop_n = max(1, int(len(self._agents) * 0.2))
+                for aid, _ in others[:drop_n]:
+                    self._agents.pop(aid, None)
+                if len(self._agents) <= self._max_agents:
+                    break
+            return self._agents[agent_id]
 
     def check_request(self, agent_id: str, request_data: dict[str, Any]) -> BehavioralDecision:
         profile = self._get_or_create(agent_id)
@@ -401,3 +422,17 @@ class BehavioralDetector:
             if agent_id is None:
                 self._total_anomalies_detected = 0
                 self._anomalies_by_dimension.clear()
+
+    def cleanup_stale_agents(self, max_age_seconds: float = 3600.0) -> int:
+        """Remove agents idle longer than max_age_seconds (monotonic clock). Returns count removed."""
+        now = time.monotonic()
+        max_age = max(0.0, float(max_age_seconds))
+        with self._lock:
+            stale_ids = [
+                aid
+                for aid, fp in list(self._agents.items())
+                if now - fp.last_seen_monotonic() > max_age
+            ]
+            for aid in stale_ids:
+                self._agents.pop(aid, None)
+            return len(stale_ids)

@@ -77,6 +77,23 @@ def test_content_hash_prefix_length() -> None:
     assert one["content_hash"] == two["content_hash"]
 
 
+def test_loop_detector_session_hash_ttl_prune() -> None:
+    detector = ContentLoopDetector(session_hash_ttl=0.05, max_identical=10)
+    detector.check("one", session_id="s1")
+    time.sleep(0.08)
+    detector.check("two", session_id="s1")
+    with detector._lock:
+        assert "s1" in detector._last_hash_by_session
+
+
+def test_loop_detector_max_sessions_cap() -> None:
+    detector = ContentLoopDetector(max_sessions=3, session_hash_ttl=3600, max_identical=10)
+    for i in range(5):
+        detector.check(f"content-{i}", session_id=f"sid-{i}")
+    with detector._lock:
+        assert len(detector._last_hash_by_session) <= 3
+
+
 def test_content_hash_unicode() -> None:
     detector = ContentLoopDetector(max_identical=2)
     detector.check("Привет HEARTBEAT")

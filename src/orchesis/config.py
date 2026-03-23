@@ -9,7 +9,7 @@ import re
 import time
 import unicodedata
 from copy import deepcopy
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,6 +26,27 @@ _CAPABILITY_CONSTRAINT_KEYS = {"paths", "domains", "commands"}
 
 class PolicyError(ValueError):
     """Raised when policy structure/content is invalid."""
+
+
+class ConfigError(PolicyError):
+    """Raised when policy file cannot be parsed (YAML/JSON)."""
+
+
+DEFAULT_RESUME_TOKEN = "orchesis-resume-2024"
+
+_SENSITIVE_KEY_FRAGMENT = re.compile(
+    r"(token|secret|password|api_key|apikey|authorization|credential|bearer)",
+    re.IGNORECASE,
+)
+_VALUE_SECRET_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"sk-[a-zA-Z0-9]{20,}"),
+    re.compile(r"ghp_[a-zA-Z0-9]{36,}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"xox[bsp]-[a-zA-Z0-9-]+"),
+    re.compile(r"glpat-[a-zA-Z0-9_-]{20,}"),
+    re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}"),
+]
 
 
 def _load_yaml(text: str) -> Any:
@@ -293,6 +314,8 @@ def _normalize_proxy_config(policy: dict[str, Any]) -> None:
                 "connection_timeout": 30,
                 "retry_on_connection_error": True,
                 "max_retries": 2,
+                "upstream_retry_base_delay_seconds": 0.1,
+                "upstream_retry_max_delay_seconds": 2.0,
             },
             "streaming": {
                 "enabled": True,
@@ -390,17 +413,17 @@ def _normalize_proxy_config(policy: dict[str, Any]) -> None:
 def _normalize_kill_switch(policy: dict[str, Any]) -> None:
     raw = policy.get("kill_switch")
     if raw is None:
-        policy["kill_switch"] = {"enabled": False, "auto_triggers": {}, "resume_token": "orchesis-resume-2024"}
+        policy["kill_switch"] = {"enabled": False, "auto_triggers": {}, "resume_token": DEFAULT_RESUME_TOKEN}
         return
     if not isinstance(raw, dict):
         raise PolicyError("kill_switch must be a mapping")
 
     raw["enabled"] = bool(raw.get("enabled", False))
-    resume_token = raw.get("resume_token", "orchesis-resume-2024")
+    resume_token = raw.get("resume_token", DEFAULT_RESUME_TOKEN)
     if isinstance(resume_token, str) and resume_token.strip():
         raw["resume_token"] = resume_token.strip()
     else:
-        raw["resume_token"] = "orchesis-resume-2024"
+        raw["resume_token"] = DEFAULT_RESUME_TOKEN
 
     auto = raw.get("auto_triggers")
     if auto is None:
@@ -1236,7 +1259,6 @@ def load_policy(path: str | Path) -> dict[str, Any]:
         raise PolicyError(f"Cannot read policy file: {policy_path}") from error
 
     content = raw_bytes.decode("utf-8", errors="replace")
-    had_malformed_bytes = ("\ufffd" in content) or ("\x00" in content)
     content = content.encode("utf-16", errors="surrogatepass").decode("utf-16", errors="replace")
     content = content.replace("\ufffd", "")
     content = content.replace("\x00", "")
@@ -1263,16 +1285,16 @@ def load_policy(path: str | Path) -> dict[str, Any]:
                 loaded = _load_yaml(content)
     except ImportError:
         raise
-    except Exception:
-        loaded = {}
+    except json.JSONDecodeError as err:
+        raise ConfigError(f"Policy JSON parse failed ({policy_path}): {err}") from err
+    except Exception as err:
+        raise ConfigError(f"Policy parse failed ({policy_path}): {err}") from err
 
+    if loaded is None or loaded == {}:
+        _LOGGER.warning("Empty policy loaded — using strict defaults")
     if loaded is None:
         loaded = {}
-    if not isinstance(loaded, dict):
-        if had_malformed_bytes:
-            loaded = {}
-        else:
-            raise PolicyError("Policy top-level YAML object must be a mapping.")
+
     if not isinstance(loaded, dict):
         raise PolicyError("Policy top-level YAML object must be a mapping.")
     loaded = _apply_policy_preset(loaded)
@@ -1299,6 +1321,109 @@ def load_policy(path: str | Path) -> dict[str, Any]:
     _normalize_otel_export(loaded)
     _normalize_capabilities(loaded)
     return loaded
+
+
+def _redact_scalar(value: Any) -> Any:
+    if isinstance(value, str) and any(pattern.search(value) for pattern in _VALUE_SECRET_PATTERNS):
+        return "***"
+    return value
+
+
+def _redact_config(value: Any) -> Any:
+    """Return a deep structure safe for logging (secrets replaced with '***')."""
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, inner in value.items():
+            ks = str(key)
+            kl = ks.lower()
+            if kl in {"resume_token", "bot_token"} or _SENSITIVE_KEY_FRAGMENT.search(ks):
+                out[key] = "***"
+            elif kl == "headers" and isinstance(inner, dict):
+                out[key] = {
+                    hk: "***" if isinstance(hv, str) else _redact_config(hv) for hk, hv in inner.items()
+                }
+            else:
+                out[key] = _redact_config(inner)
+        return out
+    if isinstance(value, list):
+        return [_redact_config(item) for item in value]
+    return _redact_scalar(value)
+
+
+def _is_valid_proxy_url(url: str) -> bool:
+    candidate = url.strip()
+    if not candidate:
+        return False
+    parts = urlsplit(candidate)
+    return parts.scheme in ("http", "https") and bool(parts.netloc)
+
+
+def validate_startup_policy(
+    policy: dict[str, Any],
+    *,
+    listen_port: int | None = None,
+    runtime_upstream: dict[str, str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Return (critical_errors, warnings) for proxy startup. Critical errors should block startup."""
+    critical: list[str] = []
+    warnings: list[str] = []
+    urls: list[str] = []
+    proxy_cfg = policy.get("proxy") if isinstance(policy.get("proxy"), dict) else {}
+    target = proxy_cfg.get("target")
+    if isinstance(target, str) and target.strip():
+        urls.append(target.strip())
+    upstream = proxy_cfg.get("upstream")
+    if isinstance(upstream, dict):
+        for v in upstream.values():
+            if isinstance(v, str) and v.strip():
+                urls.append(v.strip())
+    if isinstance(runtime_upstream, dict):
+        for v in runtime_upstream.values():
+            if isinstance(v, str) and v.strip():
+                urls.append(v.strip())
+    if not any(_is_valid_proxy_url(u) for u in urls):
+        critical.append(
+            "No valid proxy target/upstream URL (http/https); set proxy.target or proxy.upstream in policy, "
+            "or configure HTTPProxyConfig upstream URLs before starting the proxy."
+        )
+
+    port_raw = proxy_cfg.get("listen_port", proxy_cfg.get("port"))
+    port_effective = port_raw if isinstance(port_raw, int | float) else listen_port
+    if port_effective is not None:
+        try:
+            pnum = int(port_effective)
+        except (TypeError, ValueError):
+            pnum = 0
+        if pnum < 1 or pnum > 65535:
+            warnings.append(f"proxy listen port {port_effective!r} is not in range 1-65535")
+
+    kill = policy.get("kill_switch") if isinstance(policy.get("kill_switch"), dict) else {}
+    if bool(kill.get("enabled", False)):
+        token = str(kill.get("resume_token", DEFAULT_RESUME_TOKEN))
+        if token == DEFAULT_RESUME_TOKEN:
+            warnings.append("Default resume token in use — set a strong token in policy for production")
+        elif len(token) < 16:
+            warnings.append(
+                "kill_switch.resume_token is shorter than 16 characters while kill_switch is enabled"
+            )
+
+    loop = policy.get("loop_detection") if isinstance(policy.get("loop_detection"), dict) else {}
+    if bool(loop.get("enabled", False)):
+        exact = loop.get("exact") if isinstance(loop.get("exact"), dict) else {}
+        fuzzy = loop.get("fuzzy") if isinstance(loop.get("fuzzy"), dict) else {}
+        for name, section in (("exact", exact), ("fuzzy", fuzzy)):
+            th = section.get("threshold")
+            if isinstance(th, int | float) and int(th) < 2:
+                warnings.append(
+                    f"loop_detection.{name}.threshold should be >= 2 when loop_detection is enabled (got {th})"
+                )
+
+    budgets = policy.get("budgets") if isinstance(policy.get("budgets"), dict) else {}
+    daily = budgets.get("daily")
+    if daily is not None and isinstance(daily, int | float) and float(daily) <= 0:
+        warnings.append("budgets.daily must be > 0 when set")
+
+    return critical, warnings
 
 
 def _parse_trust_tier(value: Any, default: TrustTier = TrustTier.INTERN) -> TrustTier:

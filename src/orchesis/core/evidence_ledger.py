@@ -4,17 +4,47 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 
 class EvidenceLedger:
-    """Store audit evidence entries as a tamper-evident hash chain."""
+    """Store audit evidence entries as a tamper-evident hash chain.
 
-    def __init__(self, path: str | Path = ".orchesis/evidence_ledger.jsonl") -> None:
+    Records are buffered in memory and flushed to disk in batches to avoid
+    synchronous file I/O on the request hot path.
+    """
+
+    def __init__(
+        self,
+        path: str | Path = ".orchesis/evidence_ledger.jsonl",
+        *,
+        max_buffer_size: int = 100,
+        flush_interval: float = 5.0,
+    ) -> None:
         self._path = Path(path)
+        self._max_buffer_size = max(1, int(max_buffer_size))
+        self._flush_interval = float(flush_interval)
         self._last_hash = self._load_last_hash()
+        self._buffer: list[dict[str, Any]] = []
+        self._buffer_lock = threading.Lock()
+        self._flush_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._flush_thread: threading.Thread | None = None
+        self._closed = False
+        if self._flush_interval > 0:
+            self._flush_thread = threading.Thread(
+                target=self._flush_loop,
+                name="orchesis-evidence-ledger",
+                daemon=True,
+            )
+            self._flush_thread.start()
+
+    def _flush_loop(self) -> None:
+        while not self._stop_event.wait(timeout=self._flush_interval):
+            self._flush()
 
     @staticmethod
     def _hash_payload(event: dict[str, Any], timestamp: float, prev_hash: str) -> str:
@@ -48,27 +78,70 @@ class EvidenceLedger:
             return ""
         return last_valid_hash
 
+    def _flush(self) -> None:
+        with self._flush_lock:
+            with self._buffer_lock:
+                if not self._buffer:
+                    return
+                batch = list(self._buffer)
+                self._buffer.clear()
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            prev_hash = self._last_hash
+            lines: list[str] = []
+            for event in batch:
+                timestamp = float(time.time())
+                hash_value = self._hash_payload(event, timestamp, prev_hash)
+                entry = {
+                    "event": event,
+                    "timestamp": timestamp,
+                    "prev_hash": prev_hash,
+                    "hash": hash_value,
+                }
+                lines.append(json.dumps(entry, ensure_ascii=False) + "\n")
+                prev_hash = hash_value
+            with self._path.open("a", encoding="utf-8") as handle:
+                handle.writelines(lines)
+            self._last_hash = prev_hash
+
+    def flush(self) -> None:
+        """Write all buffered entries to disk without stopping the background thread."""
+        if self._closed:
+            return
+        self._flush()
+
     def record(self, event: dict[str, Any]) -> str:
-        """Append one event to the ledger and return its hash."""
+        """Append one event to the buffer; flush when full. Returns \"\" when buffered."""
+        if self._closed:
+            return ""
         if not isinstance(event, dict):
             raise TypeError("event must be a dict")
-        timestamp = float(time.time())
-        prev_hash = self._last_hash
-        hash_value = self._hash_payload(event, timestamp, prev_hash)
-        entry = {
-            "event": event,
-            "timestamp": timestamp,
-            "prev_hash": prev_hash,
-            "hash": hash_value,
-        }
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        self._last_hash = hash_value
-        return hash_value
+        should_flush = False
+        with self._buffer_lock:
+            self._buffer.append(dict(event))
+            should_flush = len(self._buffer) >= self._max_buffer_size
+        if should_flush:
+            self._flush()
+        return ""
+
+    def close(self) -> None:
+        """Stop background flush and write any buffered entries."""
+        if self._closed:
+            return
+        self._closed = True
+        self._stop_event.set()
+        if self._flush_thread is not None and self._flush_thread.is_alive():
+            self._flush_thread.join(timeout=30.0)
+        self._flush()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def verify_chain(self) -> bool:
         """Verify hash chain integrity for all ledger entries."""
+        self._flush()
         if not self._path.exists():
             return True
 

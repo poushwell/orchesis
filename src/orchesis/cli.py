@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import threading
+import webbrowser
 import time
 import tracemalloc
 from concurrent.futures import ThreadPoolExecutor
@@ -1713,6 +1714,36 @@ def status_command(json_output: bool, watch_mode: bool) -> None:
         click.echo(json.dumps(snap, ensure_ascii=False, indent=2))
         raise SystemExit(0)
     _render_text(snap)
+    raise SystemExit(0)
+
+
+@main.command("dashboard")
+@click.option(
+    "--port",
+    type=int,
+    default=8081,
+    show_default=True,
+    help="Dashboard HTTP port when ORCHESIS_DASHBOARD_URL is not set.",
+)
+@click.option(
+    "--proxy-dashboard/--no-proxy-dashboard",
+    default=False,
+    help="Open the proxy-hosted UI at http://127.0.0.1:8080/dashboard instead.",
+)
+@click.option("--no-browser", is_flag=True, help="Print the URL only; do not open a browser.")
+def dashboard_command(port: int, proxy_dashboard: bool, no_browser: bool) -> None:
+    """Open the Orchesis dashboard (default standalone port matches README: 8081)."""
+    env_url = os.getenv("ORCHESIS_DASHBOARD_URL", "").strip()
+    if env_url:
+        url = env_url
+    elif proxy_dashboard:
+        url = "http://127.0.0.1:8080/dashboard"
+    else:
+        url = f"http://127.0.0.1:{max(1, int(port))}/"
+    click.echo(f"Dashboard URL: {url}")
+    click.echo("Tip: with `orchesis proxy` / LLM proxy on :8080, use --proxy-dashboard for the embedded UI.")
+    if not no_browser:
+        webbrowser.open(url)
     raise SystemExit(0)
 
 
