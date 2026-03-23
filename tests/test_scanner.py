@@ -190,3 +190,149 @@ def test_scan_mcp_discovery(tmp_path: Path, monkeypatch) -> None:
         result = runner.invoke(main, ["scan", "--mcp"])
     assert result.exit_code == 0
     assert "Discovered MCP configs:" in result.output
+
+
+def _mcp_base_server(extra: dict) -> dict:
+    return {"token": "test-token", **extra}
+
+
+def test_cve_detects_vulnerable_mcp_remote(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "pkg": _mcp_base_server(
+                        {"command": "npx", "args": ["-y", "mcp-remote"]}
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    cves = [f for f in report.findings if f.category == "supply_chain_cve"]
+    assert any("CVE-2025-6514" in f.description for f in cves)
+
+
+def test_cve_detects_no_fix_available(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "g": _mcp_base_server(
+                        {"command": "npx", "args": ["-y", "gemini-mcp-tool"]}
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    crit = [f for f in report.findings if f.category == "supply_chain_cve" and f.severity == "critical"]
+    assert any("no fix" in f.description.lower() for f in crit)
+
+
+def test_cve_allows_patched_version(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "ok": _mcp_base_server(
+                        {"command": "npx", "args": ["-y", "mcp-remote@0.1.16"]}
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    assert not any("CVE-2025-6514" in f.description for f in report.findings)
+
+
+def test_typosquatting_catches_close_name(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "t": _mcp_base_server(
+                        {"command": "npx", "args": ["-y", "mcp-remte"]}
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    typo = [f for f in report.findings if f.category == "typosquatting"]
+    assert typo
+    assert any("typosquatting" in f.description.lower() for f in typo)
+
+
+def test_typosquatting_allows_exact_match(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "e": _mcp_base_server(
+                        {"command": "npx", "args": ["-y", "mcp-remote@0.1.16"]}
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    typo = [f for f in report.findings if f.category == "typosquatting"]
+    assert not typo
+
+
+def test_deprecated_package_warning(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "d": _mcp_base_server(
+                        {
+                            "command": "npx",
+                            "args": ["-y", "mcp-server-sqlite-npx"],
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    dep = [f for f in report.findings if f.category == "deprecated_package"]
+    assert any(f.severity == "medium" and "mcp-server-sqlite-npx" in f.description for f in dep)
+
+
+def test_registry_unverified_scope(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "r": _mcp_base_server(
+                        {
+                            "command": "npx",
+                            "args": ["-y", "@evil/mcp-server"],
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    reg = [f for f in report.findings if f.category == "registry_verification"]
+    assert any(
+        f.severity == "info" and "@evil" in f.description and "Unverified npm scope" in f.description
+        for f in reg
+    )

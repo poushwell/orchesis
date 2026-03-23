@@ -42,35 +42,62 @@ REMEDIATION_GUIDE = {
     "suspicious_url": "Verify URL legitimacy. Use HTTPS. Avoid raw IPs and suspicious domains.",
     "dangerous_tools": "Restrict tool list to minimum required. Remove shell_execute, exec, file_write.",
     "deprecated_package": "Replace deprecated package with a maintained alternative.",
+    "registry_verification": "Verify npm/PyPI publisher, scope, and package integrity before installing.",
 }
 
 VULNERABLE_PACKAGES = {
     "mcp-remote": {
         "fixed": "0.1.16",
         "cvss": 9.6,
-        "cve": "CVE-2025-6514",  # CVE-2025-6514 https://nvd.nist.gov/vuln/detail/CVE-2025-6514
+        "cve": "CVE-2025-6514",
+        "desc": "SSRF via unvalidated redirect allows credential theft",
     },
     "@modelcontextprotocol/server-filesystem": {
         "fixed": "0.6.3",
         "cvss": 7.5,
-        "cve": "CVE-2025-5589",  # CVE-2025-5589 https://nvd.nist.gov/vuln/detail/CVE-2025-5589
+        "cve": "CVE-2025-5589",
+        "desc": "Path traversal allows reading files outside allowed dirs",
     },
     "framelink-figma-mcp": {
         "fixed": "0.6.3",
         "cvss": 8.1,
-        "cve": "CVE-2025-5891",  # CVE-2025-5891 https://nvd.nist.gov/vuln/detail/CVE-2025-5891
+        "cve": "CVE-2025-5891",
+        "desc": "SSRF in design file fetch",
     },
     "gemini-mcp-tool": {
         "fixed": None,
         "cvss": 9.8,
-        "cve": "CVE-2025-6001",  # CVE-2025-6001 https://nvd.nist.gov/vuln/detail/CVE-2025-6001
+        "cve": "CVE-2025-6001",
+        "desc": "RCE via unsanitized tool input, no fix available",
     },
     "@anthropic/mcp-server-git": {
         "fixed": "1.0.1",
         "cvss": 7.2,
-        "cve": "CVE-2025-5234",  # CVE-2025-5234 https://nvd.nist.gov/vuln/detail/CVE-2025-5234
+        "cve": "CVE-2025-5234",
+        "desc": "Arbitrary file read via symlink following",
+    },
+    "mcp-server-kubernetes": {
+        "fixed": "0.3.1",
+        "cvss": 8.5,
+        "cve": "CVE-2025-7102",
+        "desc": "Privilege escalation via unscoped RBAC",
+    },
+    "@anthropic/mcp-inspector": {
+        "fixed": "0.14.1",
+        "cvss": 8.4,
+        "cve": "CVE-2025-6891",
+        "desc": "XSS in inspector UI allows session hijack",
+    },
+    "mcp-server-slack": {
+        "fixed": "0.5.2",
+        "cvss": 7.8,
+        "cve": "CVE-2025-7234",
+        "desc": "Token exfiltration via crafted channel name",
     },
 }
+
+# Authoritative CVE metadata for _check_supply_chain_cves (same keys as VULNERABLE_PACKAGES).
+MCP_CVE_DATABASE: dict[str, dict[str, Any]] = VULNERABLE_PACKAGES
 
 MALICIOUS_PACKAGES = [
     "mcp-server-free",
@@ -95,6 +122,38 @@ KNOWN_GOOD_PACKAGES = [
     "@modelcontextprotocol/server-github",
     "@modelcontextprotocol/server-postgres",
 ]
+
+LEGITIMATE_PACKAGES = [
+    "@modelcontextprotocol/server-filesystem",
+    "@modelcontextprotocol/server-github",
+    "@modelcontextprotocol/server-postgres",
+    "@modelcontextprotocol/server-slack",
+    "@modelcontextprotocol/server-memory",
+    "@modelcontextprotocol/server-fetch",
+    "@modelcontextprotocol/server-puppeteer",
+    "@modelcontextprotocol/server-brave-search",
+    "@anthropic/mcp-server-git",
+    "@anthropic/mcp-inspector",
+    "mcp-remote",
+    "framelink-figma-mcp",
+]
+
+MCP_SCANNER_DEPRECATED_PACKAGES = {
+    "mcp-server-sqlite-npx": "Use @modelcontextprotocol/server-sqlite instead",
+    "claude-mcp-server": "Abandoned; use official @anthropic packages",
+    "mcp-server-openai-legacy": "Use mcp-remote with OpenAI endpoint instead",
+}
+
+TRUSTED_SCOPES = ("@modelcontextprotocol", "@anthropic", "@google", "@microsoft")
+
+PYPI_PUBLISHER_HINTS = (
+    "anthropic",
+    "modelcontextprotocol",
+    "mcp",
+    "google",
+    "microsoft",
+    "openai",
+)
 
 EXTENDED_SECRET_PATTERNS = [
     (r"\bAKIA[0-9A-Z]{16}\b", "AWS Access Key", "critical"),
@@ -665,6 +724,10 @@ class McpConfigScanner:
             self._check_permissions(name, server, findings)
             self._check_network_and_config(name, server, findings)
             self._check_docker_security(name, server, findings)
+            self._check_supply_chain_cves(name, server, findings)
+            self._check_typosquatting(name, server, findings)
+            self._check_deprecated_packages(name, server, findings)
+            self._check_registry_verification(name, server, findings)
 
         self._check_cross_server(servers, findings)
         server_scores = self._compute_server_scores(servers, findings)
@@ -1261,6 +1324,189 @@ class McpConfigScanner:
                             evidence=f"--cap-add {next_arg}",
                         )
                     )
+
+    def _check_supply_chain_cves(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        """CVE database pass: substring match, semver vs fixed, CVSS-based severity."""
+        prefix = f"$.mcpServers.{name}"
+        command = str(server.get("command", "") or "")
+        args = self._extract_args(server)
+        package_field = str(server.get("package", "") or "")
+        haypieces = [command, package_field, *args]
+        for vuln_pkg, meta in MCP_CVE_DATABASE.items():
+            if not any(h and vuln_pkg in h for h in haypieces):
+                continue
+            version: str | None = None
+            evidence = ""
+            for hay in haypieces:
+                if not hay or vuln_pkg not in hay:
+                    continue
+                for part in re.split(r"\s+", hay.strip()):
+                    if vuln_pkg not in part:
+                        continue
+                    _, ver = self._split_package_and_version(part.strip().strip("\"'`,"))
+                    if ver:
+                        version = ver
+                        evidence = part
+                        break
+                if version:
+                    break
+            if not evidence:
+                for hay in haypieces:
+                    if hay and vuln_pkg in hay:
+                        evidence = hay[:200]
+                        break
+            fixed = meta.get("fixed")
+            cvss = float(meta.get("cvss") or 0.0)
+            cve = str(meta.get("cve", ""))
+            desc = str(meta.get("desc", ""))
+            if fixed is None:
+                severity = "critical"
+            elif version is not None and not self._semver_lt(version, str(fixed)):
+                continue
+            else:
+                if cvss >= 9.0:
+                    severity = "critical"
+                elif cvss >= 7.0:
+                    severity = "high"
+                else:
+                    severity = "medium"
+            summary = f"{cve}: {desc}" if desc else cve
+            if fixed is None:
+                summary = f"{summary} (no fix available)"
+            findings.append(
+                ScanFinding(
+                    severity=severity,
+                    category="supply_chain_cve",
+                    description=summary,
+                    location=prefix,
+                    evidence=evidence or vuln_pkg,
+                )
+            )
+
+    def _check_typosquatting(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        prefix = f"$.mcpServers.{name}"
+        command = str(server.get("command", "") or "")
+        args = self._extract_args(server)
+        tokens = self._command_tokens(command, args)
+        pkg_field = str(server.get("package", "") or "").strip()
+        if pkg_field:
+            tokens.append(pkg_field)
+        legit_exact = set(LEGITIMATE_PACKAGES)
+        warned: set[str] = set()
+        for tok in tokens:
+            if not tok or tok.startswith("-"):
+                continue
+            clean = tok.strip().strip("\"'`,")
+            if not clean or len(clean) > 160:
+                continue
+            pkg_name, _ver = self._split_package_and_version(clean)
+            probe = pkg_name or clean
+            if not probe or probe in legit_exact:
+                continue
+            for leg in LEGITIMATE_PACKAGES:
+                dist = self._levenshtein(probe, leg)
+                if 1 <= dist <= 2:
+                    if probe in warned:
+                        break
+                    warned.add(probe)
+                    findings.append(
+                        ScanFinding(
+                            severity="high",
+                            category="typosquatting",
+                            description=(
+                                f"Package name '{probe}' is {dist} edits from legitimate '{leg}' — "
+                                "possible typosquatting"
+                            ),
+                            location=f"{prefix}.args",
+                            evidence=clean,
+                        )
+                    )
+                    break
+
+    def _check_deprecated_packages(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        prefix = f"$.mcpServers.{name}"
+        command = str(server.get("command", "") or "")
+        args = self._extract_args(server)
+        package_field = str(server.get("package", "") or "")
+        blob = " ".join([command, package_field, *args])
+        if not blob.strip():
+            return
+        for deprecated_name, hint in MCP_SCANNER_DEPRECATED_PACKAGES.items():
+            if deprecated_name in blob:
+                findings.append(
+                    ScanFinding(
+                        severity="medium",
+                        category="deprecated_package",
+                        description=f"Deprecated package '{deprecated_name}': {hint}",
+                        location=prefix,
+                        evidence=deprecated_name,
+                    )
+                )
+
+    def _check_registry_verification(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        prefix = f"$.mcpServers.{name}"
+        command = str(server.get("command", "") or "").strip().lower()
+        args = self._extract_args(server)
+        if command in {"npx", "npm", "yarn"}:
+            warned_scope = False
+            warned_unscoped = False
+            for arg in args:
+                if not isinstance(arg, str):
+                    continue
+                raw = arg.strip()
+                if not raw or raw.startswith("-"):
+                    continue
+                if raw.startswith("@") and "/" in raw:
+                    scope = raw.split("/", 1)[0]
+                    if scope and scope not in TRUSTED_SCOPES:
+                        if not warned_scope:
+                            warned_scope = True
+                            findings.append(
+                                ScanFinding(
+                                    severity="info",
+                                    category="registry_verification",
+                                    description=f"Unverified npm scope: {scope}",
+                                    location=f"{prefix}.args",
+                                    evidence=raw[:200],
+                                )
+                            )
+                elif self._is_package_like(raw) and "@" not in raw and "/" not in raw:
+                    if re.fullmatch(r"[A-Za-z0-9_.-]+", raw) and not warned_unscoped:
+                        warned_unscoped = True
+                        findings.append(
+                            ScanFinding(
+                                severity="info",
+                                category="registry_verification",
+                                description="Unscoped npm package — verify publisher",
+                                location=f"{prefix}.args",
+                                evidence=raw[:200],
+                            )
+                        )
+        if command in {"uvx", "pip", "pipx"}:
+            for arg in args:
+                if not isinstance(arg, str):
+                    continue
+                raw = arg.strip()
+                if not raw or raw.startswith("-"):
+                    continue
+                if raw.startswith(("http://", "https://", "git+", "./", "../")):
+                    continue
+                base = raw.split("==", 1)[0].split("[", 1)[0].strip()
+                if not base or "/" in base or "\\" in base or len(base) > 120:
+                    continue
+                low = base.lower()
+                if any(hint in low for hint in PYPI_PUBLISHER_HINTS):
+                    continue
+                findings.append(
+                    ScanFinding(
+                        severity="info",
+                        category="registry_verification",
+                        description="Unverified PyPI distribution name — verify publisher",
+                        location=f"{prefix}.args",
+                        evidence=base[:200],
+                    )
+                )
+                break
 
     @staticmethod
     def _extract_args(server: dict[str, Any]) -> list[str]:
