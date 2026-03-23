@@ -149,3 +149,16 @@ def test_secret_scanner_regression_orphaned_continuation_bytes() -> None:
     sc.scan(b"\xec\xb5\xec\x00\x00\x88".decode("utf-8", errors="replace"))
     sc.scan("\x84" * 50 + "normal text")
     assert True
+
+
+def test_secret_scanner_fuzz_null_bytes_short_binary_no_crash() -> None:
+    """Regression: CI fuzz — 5-byte input with nulls must not crash."""
+    scanner = SecretScanner()
+    payload = b"M\x02\x00\x00\x00".decode("utf-8", errors="replace")
+    assert scanner.scan_text(payload) == []
+
+
+def test_secret_scanner_empty_and_none_no_crash() -> None:
+    scanner = SecretScanner()
+    assert scanner.scan_text("") == []
+    assert scanner.scan_text(None) == []

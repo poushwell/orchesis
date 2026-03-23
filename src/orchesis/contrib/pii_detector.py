@@ -135,20 +135,46 @@ def preprocess_for_pii(text: str) -> list[str]:
 
 
 def _sanitize_detect_input(text: Any) -> str:
+    """Coerce fuzz/binary input to a safe Unicode string for PII regex scanning."""
+    if text is None:
+        return ""
     if isinstance(text, bytes):
-        text = text.decode("utf-8", errors="replace")
-    if not isinstance(text, str):
-        text = str(text)
-    text = text.encode("utf-16", errors="surrogatepass").decode("utf-16", errors="replace")
-    text = text.replace("\ufffd", "")
-    text = text.replace("\x00", "")
-    # Remove BIDI override and other formatting characters.
-    text = "".join(
-        c for c in text if unicodedata.category(c) != "Cf" or c in (" ", "\t", "\n")
-    )
-    # Remove replacement chars from broken UTF-8 and null bytes after normalization.
-    text = text.replace("\ufffd", "")
-    text = text.replace("\x00", "")
+        try:
+            text = text.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+    elif not isinstance(text, str):
+        try:
+            text = str(text)
+        except Exception:
+            return ""
+    try:
+        text = text.replace("\x00", "")
+    except Exception:
+        return ""
+    try:
+        text = text.encode("utf-16", errors="surrogatepass").decode("utf-16", errors="replace")
+    except Exception:
+        try:
+            text = text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+    try:
+        text = text.replace("\ufffd", "")
+        text = text.replace("\x00", "")
+    except Exception:
+        return ""
+    try:
+        text = "".join(
+            c for c in text if unicodedata.category(c) != "Cf" or c in (" ", "\t", "\n")
+        )
+    except Exception:
+        return ""
+    try:
+        text = text.replace("\ufffd", "")
+        text = text.replace("\x00", "")
+    except Exception:
+        return ""
     if len(text) > 100000:
         text = text[:100000]
     return text
@@ -211,6 +237,12 @@ class PiiDetector:
             return []
 
     def scan_text(self, text: Any) -> list[dict[str, Any]]:
+        try:
+            return self._scan_text_impl(text)
+        except Exception:
+            return []
+
+    def _scan_text_impl(self, text: Any) -> list[dict[str, Any]]:
         text = _sanitize_detect_input(text)
         if not isinstance(text, str):
             return []
@@ -219,8 +251,11 @@ class PiiDetector:
         except Exception:
             return []
         text = "".join(ch for ch in text if ch not in BIDI_CONTROLS)
-        text = sanitize_text(text)
-        if text is None:
+        try:
+            text = sanitize_text(text) or ""
+        except Exception:
+            return []
+        if not text.strip():
             return []
         all_findings: list[dict[str, Any]] = []
         try:

@@ -147,3 +147,17 @@ def test_pii_detector_regression_continuation_bytes() -> None:
     payload = b"\x84" * 40 + b"\xe3\x81\xaf" + b"123-45-6789" + b"\x84\x00\xf8"
     pd.detect(payload.decode("utf-8", errors="replace"))
     assert True
+
+
+def test_pii_detector_fuzz_invalid_utf8_quotes_no_crash() -> None:
+    """Regression: CI fuzz — invalid UTF-8 + repeated quotes must not crash."""
+    detector = PiiDetector()
+    raw = b"\xd2\x90" + (b"'" * 15) + b"\xce\xd4\x12\x03\x10"
+    payload = raw.decode("utf-8", errors="replace")
+    assert isinstance(detector.scan_text(payload), list)
+
+
+def test_pii_detector_empty_and_none_no_crash() -> None:
+    detector = PiiDetector()
+    assert detector.scan_text("") == []
+    assert detector.scan_text(None) == []

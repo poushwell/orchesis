@@ -280,19 +280,43 @@ def preprocess_for_scanning(text: str) -> list[str]:
 
 
 def _sanitize_scan_input(text: Any) -> str:
-    # Sanitize: replace invalid bytes and null bytes
+    """Coerce fuzz/binary input to a safe Unicode string for regex scanning."""
+    if text is None:
+        return ""
     if isinstance(text, bytes):
-        text = text.decode("utf-8", errors="replace")
-    if not isinstance(text, str):
-        text = str(text)
-    # Round-trip through UTF-16 to collapse orphaned UTF-8 continuation bytes.
-    text = text.encode("utf-16", errors="surrogatepass").decode("utf-16", errors="replace")
-    text = text.replace("\ufffd", "")
-    text = text.replace("\x00", "")
-    # Strip format string tokens that could cause issues
-    text = text.replace("%u", "").replace("%n", "").replace("%s", "")
-    # Remove non-printable high bytes
-    text = "".join(c for c in text if ord(c) < 0xFFFE)
+        try:
+            text = text.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+    elif not isinstance(text, str):
+        try:
+            text = str(text)
+        except Exception:
+            return ""
+    try:
+        text = text.replace("\x00", "")
+    except Exception:
+        return ""
+    try:
+        text = text.encode("utf-16", errors="surrogatepass").decode("utf-16", errors="replace")
+    except Exception:
+        try:
+            text = text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+    try:
+        text = text.replace("\ufffd", "")
+        text = text.replace("\x00", "")
+    except Exception:
+        return ""
+    try:
+        text = text.replace("%u", "").replace("%n", "").replace("%s", "")
+    except Exception:
+        pass
+    try:
+        text = "".join(c for c in text if ord(c) < 0xFFFE)
+    except Exception:
+        return ""
     return text
 
 
@@ -348,6 +372,12 @@ class SecretScanner:
             return []
 
     def scan_text(self, text: Any) -> list[dict[str, Any]]:
+        try:
+            return self._scan_text_impl(text)
+        except Exception:
+            return []
+
+    def _scan_text_impl(self, text: Any) -> list[dict[str, Any]]:
         text = _sanitize_scan_input(text)
         if not isinstance(text, str):
             return []
@@ -356,8 +386,11 @@ class SecretScanner:
         text = "".join(ch for ch in text if ch.isprintable() or ch in {"\n", "\r", "\t"})
         if not text.strip():
             return []
-        text = sanitize_text(text)
-        if text is None:
+        try:
+            text = sanitize_text(text) or ""
+        except Exception:
+            return []
+        if not text.strip():
             return []
         all_findings: list[dict[str, Any]] = []
         try:

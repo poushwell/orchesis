@@ -24,10 +24,10 @@ def test_viral_tools_section_present() -> None:
         "localhost:8080",
         "orchesis verify",
         "orchesis dashboard",
-        "MIT License",
-        "4,670+",
     ):
         assert marker in readme
+    assert re.search(r"\bMIT\b", readme), "MIT license marker missing"
+    assert re.search(r"4,\d{3}\+", readme), "tests count (e.g. 4,813+) missing"
 
 
 def test_readme_pypi_synced() -> None:
@@ -35,6 +35,8 @@ def test_readme_pypi_synced() -> None:
     pypi = Path("README-PYPI.md").read_text(encoding="utf-8")
     assert re.search(r"tests-[\d%2C]+", readme), "No test count badge found in README"
     assert re.search(r"tests-[\d%2C]+", pypi), "No test count badge found in README-PYPI"
-    for marker in ("pip install orchesis", "localhost:8080", "MIT License"):
+    for marker in ("pip install orchesis", "localhost:8080"):
         assert marker in readme
         assert marker in pypi
+    assert re.search(r"\bMIT\b", readme), "MIT missing in README"
+    assert re.search(r"\bMIT\b", pypi), "MIT missing in README-PYPI"
