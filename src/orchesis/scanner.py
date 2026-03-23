@@ -50,6 +50,14 @@ REMEDIATION_GUIDE = {
     "context_oversharing": "Scope credentials and directory allowlists per server; remove wildcards from permissions.",
     "command_injection_risk": "Remove shell metacharacters from args; invoke binaries directly without sh -c.",
     "token_management": "Use short-lived tokens per server, unique credentials, and a secrets manager.",
+    "cursor_ide_config": "Review Cursor rules and workspace trust; keep permission bypass flags disabled.",
+    "claude_code_config": "Tighten Claude Code permissions allow-list; pin budgets for expensive models.",
+    "paperclip_config": "Enable Paperclip permission checks, cap budgets, and store secrets outside adapter env.",
+    "openclaw_config": "Keep OpenClaw sandbox on, enable loop detection, and require tool approval.",
+    "safety_bypass": "Disable safety-bypass flags; enforce approvals and least-privilege tool access.",
+    "a2a_security": "Require strong auth (OAuth 2.1/JWT/OIDC), signed AgentCards, and TLS for A2A endpoints.",
+    "runtime_hygiene": "Add timeouts, rate limits, container resource caps, restart policies, and stable ports.",
+    "network_segmentation": "Avoid exposing local resources on remote endpoints; fix port clashes; prefer 127.0.0.1 over localhost.",
 }
 
 VULNERABLE_PACKAGES = {
@@ -237,6 +245,37 @@ STANDARD_MCP_URL_PORTS = frozenset({80, 443, 3000, 8080, 8081})
 RAW_SHELL_COMMANDS = frozenset(
     {"sh", "bash", "cmd", "powershell", "pwsh", "cmd.exe", "powershell.exe"}
 )
+
+UNIVERSAL_SAFETY_BYPASS_KEYS = frozenset(
+    k.lower()
+    for k in (
+        "dangerouslySkipPermissions",
+        "dangerously_skip_permissions",
+        "skip_permissions",
+        "skipPermissions",
+        "noPermissions",
+        "no_permissions",
+        "unsafe_mode",
+        "unsafeMode",
+        "trust_all",
+        "trustAll",
+        "auto_approve",
+        "autoApprove",
+        "disable_safety",
+        "disableSafety",
+    )
+)
+
+PAPERCLIP_SECRET_SUBSTRINGS = (
+    "sk-",
+    "ghp_",
+    "xoxb-",
+    "xoxp-",
+    "akia",
+    "gho_",
+    "glpat-",
+)
+
 
 def _cross_service_env_name_hints(env_key: str) -> tuple[str, ...] | None:
     k = env_key.upper().strip()
@@ -607,6 +646,7 @@ class McpConfigScanner:
 
         servers = self._iter_servers(payload)
         shared_cred_index: dict[str, set[str]] = defaultdict(set)
+        port_index: defaultdict[int, list[str]] = defaultdict(list)
         for name, server in servers:
             prefix = f"$.mcpServers.{name}"
             host = str(server.get("host", "")).strip()
@@ -785,8 +825,18 @@ class McpConfigScanner:
             self._check_context_oversharing(name, server, findings)
             self._check_command_injection_risk(name, server, findings)
             self._check_token_management(name, server, findings, shared_cred_index)
+            self._check_cursor_config(name, server, findings)
+            self._check_claude_code_config(name, server, findings)
+            self._check_paperclip_config(name, server, findings)
+            self._check_openclaw_config(name, server, findings)
+            self._check_dangerous_permissions_universal(name, server, findings)
+            self._check_a2a_security(name, server, findings)
+            self._check_runtime_hygiene(name, server, findings)
+            self._check_network_segmentation(name, server, findings)
+            self._record_server_listen_port(name, server, port_index)
 
         self._check_token_management(None, None, findings, shared_cred_index)
+        self._check_network_port_collisions(port_index, findings)
         self._check_cross_server(servers, findings)
         server_scores = self._compute_server_scores(servers, findings)
         critical_count = sum(1 for item in findings if item.severity == "critical")
@@ -1932,6 +1982,911 @@ class McpConfigScanner:
                 )
             if len(evs) >= 16:
                 shared_cred_index[evs].add(name)
+
+    @staticmethod
+    def _config_truthy_bypass(value: Any) -> bool:
+        if value is True:
+            return True
+        if isinstance(value, (int, float)) and int(value) == 1:
+            return True
+        if isinstance(value, str):
+            return value.strip().lower() in {"yes", "true", "1"}
+        return False
+
+    def _deep_search_keys(self, root: Any, target_keys: frozenset[str] | set[str]) -> list[tuple[str, Any]]:
+        """Recursively find (original_key, value) where key matches any target (case-insensitive). Handles cycles."""
+        targets_lower = frozenset(str(x).lower() for x in target_keys)
+        results: list[tuple[str, Any]] = []
+        seen_ids: set[int] = set()
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                i = id(node)
+                if i in seen_ids:
+                    return
+                seen_ids.add(i)
+                for k, v in node.items():
+                    ks = str(k)
+                    if ks.lower() in targets_lower:
+                        results.append((ks, v))
+                    if isinstance(v, (dict, list)):
+                        walk(v)
+            elif isinstance(node, list):
+                i = id(node)
+                if i in seen_ids:
+                    return
+                seen_ids.add(i)
+                for item in node:
+                    walk(item)
+
+        walk(root)
+        return results
+
+    @staticmethod
+    def _server_json_blob(server: dict[str, Any]) -> str:
+        try:
+            return json.dumps(server, default=str).lower()
+        except (TypeError, ValueError):
+            return str(server).lower()
+
+    def _check_cursor_config(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        prefix = f"$.mcpServers.{name}"
+        blob = self._server_json_blob(server)
+        env = server.get("env")
+        if isinstance(env, dict):
+            for ek in env:
+                if str(ek).upper() == "CURSOR_RULES":
+                    findings.append(
+                        ScanFinding(
+                            severity="info",
+                            category="cursor_ide_config",
+                            description="Cursor rules file referenced — verify no injection in rules",
+                            location=f"{prefix}.env.{ek}",
+                            evidence=str(ek),
+                        )
+                    )
+                    break
+        if ".cursor/rules" in blob:
+            findings.append(
+                ScanFinding(
+                    severity="info",
+                    category="cursor_ide_config",
+                    description="Cursor rules file referenced — verify no injection in rules",
+                    location=prefix,
+                    evidence=".cursor/rules",
+                )
+            )
+        for key, value in self._deep_search_keys(
+            server, frozenset({"dangerouslySkipPermissions", "dangerously_skip_permissions"})
+        ):
+            if self._config_truthy_bypass(value):
+                findings.append(
+                    ScanFinding(
+                        severity="critical",
+                        category="cursor_ide_config",
+                        description="Cursor permission bypass enabled — all safety checks disabled",
+                        location=prefix,
+                        evidence=key,
+                    )
+                )
+                break
+        for wt_key in ("workspace_trust", "workspaceTrust", "trusted_folders", "trustedFolders"):
+            raw = server.get(wt_key)
+            if raw is None:
+                continue
+            paths: list[str] = []
+            if isinstance(raw, str):
+                paths = [raw]
+            elif isinstance(raw, list):
+                paths = [str(p) for p in raw if p is not None]
+            elif isinstance(raw, dict):
+                paths = [str(x) for x in raw.values() if isinstance(x, (str, int, float))]
+            for p in paths:
+                pl = p.strip().lower().replace("\\", "/")
+                if not pl:
+                    continue
+                if pl.startswith("~") or pl.startswith("/home") or pl.startswith("/users"):
+                    findings.append(
+                        ScanFinding(
+                            severity="medium",
+                            category="cursor_ide_config",
+                            description="Overly broad workspace trust",
+                            location=f"{prefix}.{wt_key}",
+                            evidence=p[:200],
+                        )
+                    )
+                    break
+                if pl.startswith("c:/users"):
+                    findings.append(
+                        ScanFinding(
+                            severity="medium",
+                            category="cursor_ide_config",
+                            description="Overly broad workspace trust",
+                            location=f"{prefix}.{wt_key}",
+                            evidence=p[:200],
+                        )
+                    )
+                    break
+
+    def _check_claude_code_config(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        prefix = f"$.mcpServers.{name}"
+        blob = self._server_json_blob(server)
+        permissions = server.get("permissions")
+        if isinstance(permissions, dict):
+            allow = permissions.get("allow")
+            if isinstance(allow, list):
+                for entry in allow:
+                    if not isinstance(entry, str):
+                        continue
+                    e = entry.strip()
+                    if e == "Bash(*)":
+                        findings.append(
+                            ScanFinding(
+                                severity="critical",
+                                category="claude_code_config",
+                                description="Unrestricted bash execution",
+                                location=f"{prefix}.permissions.allow",
+                                evidence=e,
+                            )
+                        )
+                    elif e == "Read(*)":
+                        findings.append(
+                            ScanFinding(
+                                severity="high",
+                                category="claude_code_config",
+                                description="Unrestricted file read access",
+                                location=f"{prefix}.permissions.allow",
+                                evidence=e,
+                            )
+                        )
+                    elif e == "Write(*)":
+                        findings.append(
+                            ScanFinding(
+                                severity="critical",
+                                category="claude_code_config",
+                                description="Unrestricted file write access",
+                                location=f"{prefix}.permissions.allow",
+                                evidence=e,
+                            )
+                        )
+                    elif e == "WebFetch(*)":
+                        findings.append(
+                            ScanFinding(
+                                severity="medium",
+                                category="claude_code_config",
+                                description="Unrestricted web access",
+                                location=f"{prefix}.permissions.allow",
+                                evidence=e,
+                            )
+                        )
+                    elif e.startswith("mcp__") and "*" in e:
+                        findings.append(
+                            ScanFinding(
+                                severity="high",
+                                category="claude_code_config",
+                                description="Wildcard MCP tool permission",
+                                location=f"{prefix}.permissions.allow",
+                                evidence=e,
+                            )
+                        )
+        if "claude.md" in blob or ".claude/" in blob:
+            findings.append(
+                ScanFinding(
+                    severity="info",
+                    category="claude_code_config",
+                    description="Claude Code project config detected — verify CLAUDE.md integrity",
+                    location=prefix,
+                    evidence="CLAUDE.md / .claude/",
+                )
+            )
+        model = server.get("model")
+        if isinstance(model, str) and model.strip():
+            ml = model.lower()
+            if any(tok in ml for tok in ("opus", "o1", "gpt-4")):
+                top_keys = {str(k).lower() for k in server}
+                if "budget" not in top_keys and "max_cost" not in top_keys:
+                    findings.append(
+                        ScanFinding(
+                            severity="medium",
+                            category="claude_code_config",
+                            description="Expensive model without budget limit",
+                            location=f"{prefix}.model",
+                            evidence=model[:120],
+                        )
+                    )
+
+    def _paperclip_fingerprint(self, server: dict[str, Any]) -> bool:
+        if not isinstance(server, dict):
+            return False
+        keys_lower = {str(k).lower() for k in server}
+        if "adapterconfig" in keys_lower or "paperclip" in keys_lower:
+            return True
+        if isinstance(server.get("heartbeat"), dict):
+            return True
+        if isinstance(server.get("budget"), dict):
+            return True
+        return False
+
+    def _check_paperclip_config(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        if not self._paperclip_fingerprint(server):
+            return
+        prefix = f"$.mcpServers.{name}"
+        for key, value in self._deep_search_keys(
+            server, frozenset({"dangerouslySkipPermissions", "dangerously_skip_permissions"})
+        ):
+            if self._config_truthy_bypass(value):
+                findings.append(
+                    ScanFinding(
+                        severity="critical",
+                        category="paperclip_config",
+                        description="All Paperclip permission checks disabled — agent has unrestricted access",
+                        location=prefix,
+                        evidence=key,
+                    )
+                )
+                break
+        adapter = server.get("adapterConfig")
+        if not isinstance(adapter, dict):
+            adapter = server.get("adapter_config")
+        if isinstance(adapter, dict):
+            aenv = adapter.get("env")
+            if isinstance(aenv, dict):
+                for ek, ev in aenv.items():
+                    if not isinstance(ev, str):
+                        continue
+                    low = ev.lower()
+                    if any(pat in low for pat in PAPERCLIP_SECRET_SUBSTRINGS):
+                        findings.append(
+                            ScanFinding(
+                                severity="high",
+                                category="paperclip_config",
+                                description="Plaintext credentials in Paperclip adapter config",
+                                location=f"{prefix}.adapterConfig.env.{ek}",
+                                evidence=str(ek),
+                            )
+                        )
+                        break
+        budget = server.get("budget")
+        if not isinstance(budget, dict):
+            findings.append(
+                ScanFinding(
+                    severity="medium",
+                    category="paperclip_config",
+                    description="No budget cap or very high budget — runaway cost risk",
+                    location=prefix,
+                    evidence="budget missing",
+                )
+            )
+        else:
+            raw_max = budget.get("max")
+            num = None
+            if isinstance(raw_max, (int, float)):
+                num = float(raw_max)
+            elif isinstance(raw_max, str):
+                try:
+                    num = float(raw_max.strip())
+                except ValueError:
+                    num = None
+            if num is not None:
+                if num > 100:
+                    findings.append(
+                        ScanFinding(
+                            severity="medium",
+                            category="paperclip_config",
+                            description="No budget cap or very high budget — runaway cost risk",
+                            location=f"{prefix}.budget",
+                            evidence=str(raw_max),
+                        )
+                    )
+                if num <= 0:
+                    findings.append(
+                        ScanFinding(
+                            severity="medium",
+                            category="paperclip_config",
+                            description="Budget set to zero or negative — likely misconfiguration",
+                            location=f"{prefix}.budget",
+                            evidence=str(raw_max),
+                        )
+                    )
+            elif "max" not in budget:
+                findings.append(
+                    ScanFinding(
+                        severity="medium",
+                        category="paperclip_config",
+                        description="No budget cap or very high budget — runaway cost risk",
+                        location=f"{prefix}.budget",
+                        evidence="budget.max missing",
+                    )
+                )
+        heartbeat = server.get("heartbeat")
+        if isinstance(heartbeat, dict):
+            interval = heartbeat.get("interval")
+            iv: int | None = None
+            if isinstance(interval, (int, float)):
+                iv = int(interval)
+            elif isinstance(interval, str):
+                try:
+                    iv = int(float(interval.strip()))
+                except ValueError:
+                    iv = None
+            if iv is not None:
+                if iv > 60000:
+                    findings.append(
+                        ScanFinding(
+                            severity="medium",
+                            category="paperclip_config",
+                            description="Slow heartbeat interval — delayed failure detection",
+                            location=f"{prefix}.heartbeat",
+                            evidence=str(iv),
+                        )
+                    )
+                if iv < 1000:
+                    findings.append(
+                        ScanFinding(
+                            severity="medium",
+                            category="paperclip_config",
+                            description="Extremely fast heartbeat — unnecessary overhead",
+                            location=f"{prefix}.heartbeat",
+                            evidence=str(iv),
+                        )
+                    )
+
+    def _openclaw_fingerprint(self, server: dict[str, Any]) -> bool:
+        keys_lower = {str(k).lower() for k in server}
+        return bool(
+            keys_lower & {"sandbox", "maxtokens", "sessiondefaults", "loopdetection"}
+            or "openclaw" in keys_lower
+        )
+
+    def _openclaw_has_elevated_key(self, root: Any) -> bool:
+        seen_ids: set[int] = set()
+
+        def walk(node: Any) -> bool:
+            if isinstance(node, dict):
+                i = id(node)
+                if i in seen_ids:
+                    return False
+                seen_ids.add(i)
+                for k, v in node.items():
+                    if "elevated" in str(k).lower() and v is not None and v is not False:
+                        return True
+                    if isinstance(v, (dict, list)) and walk(v):
+                        return True
+            elif isinstance(node, list):
+                i = id(node)
+                if i in seen_ids:
+                    return False
+                seen_ids.add(i)
+                for item in node:
+                    if walk(item):
+                        return True
+            return False
+
+        return walk(root)
+
+    def _check_openclaw_config(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        if not self._openclaw_fingerprint(server):
+            return
+        prefix = f"$.mcpServers.{name}"
+        oc: dict[str, Any] = (
+            server["openclaw"] if isinstance(server.get("openclaw"), dict) else server
+        )
+        sandbox = oc.get("sandbox")
+        if isinstance(sandbox, dict) and sandbox.get("enabled") is False:
+            if self._openclaw_has_elevated_key(server):
+                findings.append(
+                    ScanFinding(
+                        severity="critical",
+                        category="openclaw_config",
+                        description="Sandbox disabled with elevated permissions — full system access",
+                        location=f"{prefix}.sandbox",
+                        evidence="enabled=false with elevated",
+                    )
+                )
+        max_tokens = oc.get("maxTokens")
+        if max_tokens is None:
+            findings.append(
+                ScanFinding(
+                    severity="medium",
+                    category="openclaw_config",
+                    description="No token limit or very high limit — cost blowout risk",
+                    location=prefix,
+                    evidence="maxTokens absent",
+                )
+            )
+        else:
+            try:
+                mt = int(float(str(max_tokens).strip()))
+            except (TypeError, ValueError):
+                mt = None
+            if mt is not None and mt > 200_000:
+                findings.append(
+                    ScanFinding(
+                        severity="medium",
+                        category="openclaw_config",
+                        description="No token limit or very high limit — cost blowout risk",
+                        location=f"{prefix}.maxTokens",
+                        evidence=str(max_tokens),
+                    )
+                )
+        session_defaults = oc.get("sessionDefaults")
+        if isinstance(session_defaults, dict) and self._config_truthy_bypass(
+            session_defaults.get("autoApproveTools")
+        ):
+            findings.append(
+                ScanFinding(
+                    severity="high",
+                    category="openclaw_config",
+                    description="Auto-approve all tool calls — no human-in-the-loop",
+                    location=f"{prefix}.sessionDefaults",
+                    evidence="autoApproveTools",
+                )
+            )
+        loop_det = oc.get("loopDetection")
+        if isinstance(loop_det, dict) and loop_det.get("enabled") is False:
+            findings.append(
+                ScanFinding(
+                    severity="high",
+                    category="openclaw_config",
+                    description="Loop detection disabled — agents can loop indefinitely",
+                    location=f"{prefix}.loopDetection",
+                    evidence="enabled=false",
+                )
+            )
+
+    def _check_dangerous_permissions_universal(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        prefix = f"$.mcpServers.{name}"
+        warned: set[str] = set()
+        for key, value in self._deep_search_keys(server, UNIVERSAL_SAFETY_BYPASS_KEYS):
+            if not self._config_truthy_bypass(value):
+                continue
+            kl = key.lower()
+            if kl in warned:
+                continue
+            warned.add(kl)
+            findings.append(
+                ScanFinding(
+                    severity="critical",
+                    category="safety_bypass",
+                    description=f"Safety bypass flag '{key}' enabled — all protections disabled",
+                    location=prefix,
+                    evidence=key,
+                )
+            )
+
+    @staticmethod
+    def _a2a_collect_nodes(server: dict[str, Any]) -> list[dict[str, Any]]:
+        nodes: list[dict[str, Any]] = []
+        for key in ("a2a", "agentCard", "agent_card"):
+            block = server.get(key)
+            if isinstance(block, dict):
+                nodes.append(block)
+        return nodes
+
+    @staticmethod
+    def _a2a_collect_key_names(obj: Any, depth: int = 0) -> set[str]:
+        names: set[str] = set()
+        if depth > 12 or not isinstance(obj, dict):
+            return names
+        for k, v in obj.items():
+            names.add(str(k).lower())
+            if isinstance(v, dict):
+                names |= McpConfigScanner._a2a_collect_key_names(v, depth + 1)
+            elif isinstance(v, list):
+                for item in v:
+                    if isinstance(item, dict):
+                        names |= McpConfigScanner._a2a_collect_key_names(item, depth + 1)
+        return names
+
+    @staticmethod
+    def _a2a_iter_string_values(obj: Any, depth: int = 0) -> Any:
+        if depth > 12:
+            return
+        if isinstance(obj, str):
+            yield obj
+        elif isinstance(obj, dict):
+            for v in obj.values():
+                yield from McpConfigScanner._a2a_iter_string_values(v, depth + 1)
+        elif isinstance(obj, list):
+            for item in obj:
+                yield from McpConfigScanner._a2a_iter_string_values(item, depth + 1)
+
+    @staticmethod
+    def _a2a_auth_type_acceptable(raw: Any) -> bool:
+        if isinstance(raw, str):
+            t = raw.strip().lower()
+            return t in {"oauth2", "jwt", "oidc"} or "oauth" in t
+        if isinstance(raw, dict):
+            for cand in (raw.get("type"), raw.get("scheme"), raw.get("method")):
+                if isinstance(cand, str) and McpConfigScanner._a2a_auth_type_acceptable(cand):
+                    return True
+        return False
+
+    @staticmethod
+    def _a2a_has_signature_signals(keys_lower: set[str]) -> bool:
+        for k in keys_lower:
+            if k in {"signature", "signed", "verify"}:
+                return True
+            if "signature" in k:
+                return True
+            if k.startswith("verify") or k.endswith("_verify"):
+                return True
+        return False
+
+    @staticmethod
+    def _a2a_find_authentication_value(obj: Any, depth: int = 0) -> Any:
+        if depth > 12 or not isinstance(obj, dict):
+            return None
+        for k, v in obj.items():
+            if str(k).lower() == "authentication":
+                return v
+        for v in obj.values():
+            if isinstance(v, dict):
+                found = McpConfigScanner._a2a_find_authentication_value(v, depth + 1)
+                if found is not None:
+                    return found
+        return None
+
+    def _check_a2a_security(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        prefix = f"$.mcpServers.{name}"
+        url = str(server.get("url", "") or "").strip()
+        if url and ".well-known/agent-card.json" in url:
+            findings.append(
+                ScanFinding(
+                    severity="info",
+                    category="a2a_security",
+                    description="A2A discovery endpoint — verify access controls",
+                    location=f"{prefix}.url",
+                    evidence=url[:200],
+                )
+            )
+        nodes = self._a2a_collect_nodes(server)
+        if not nodes:
+            return
+        merged_keys: set[str] = set()
+        for node in nodes:
+            merged_keys |= self._a2a_collect_key_names(node)
+        has_auth = "authentication" in merged_keys
+        if not has_auth:
+            findings.append(
+                ScanFinding(
+                    severity="critical",
+                    category="a2a_security",
+                    description="AgentCard without authentication — any agent can connect",
+                    location=prefix,
+                    evidence="missing authentication",
+                )
+            )
+        else:
+            auth_val: Any = None
+            for node in nodes:
+                auth_val = self._a2a_find_authentication_value(node)
+                if auth_val is not None:
+                    break
+            if not self._a2a_auth_type_acceptable(auth_val):
+                findings.append(
+                    ScanFinding(
+                        severity="high",
+                        category="a2a_security",
+                        description="Weak A2A authentication — use OAuth 2.1 or JWT",
+                        location=prefix,
+                        evidence=str(auth_val)[:120] if auth_val is not None else "authentication",
+                    )
+                )
+            if not self._a2a_has_signature_signals(merged_keys):
+                findings.append(
+                    ScanFinding(
+                        severity="high",
+                        category="a2a_security",
+                        description="Unsigned AgentCard — identity unverifiable",
+                        location=prefix,
+                        evidence="no signature/signed/verify",
+                    )
+                )
+        http_plain_seen = False
+        for node in nodes:
+            for s in self._a2a_iter_string_values(node):
+                low = s.strip().lower()
+                if not low.startswith("http://"):
+                    continue
+                if low.startswith("http://localhost") or low.startswith("http://127.0.0.1"):
+                    continue
+                findings.append(
+                    ScanFinding(
+                        severity="critical",
+                        category="a2a_security",
+                        description="Agent-to-agent communication without TLS",
+                        location=prefix,
+                        evidence=s[:200],
+                    )
+                )
+                http_plain_seen = True
+                break
+            if http_plain_seen:
+                break
+        self._a2a_token_ttl_scan(nodes, prefix, findings)
+
+    def _a2a_token_ttl_scan(self, nodes: list[dict[str, Any]], prefix: str, findings: list[ScanFinding]) -> None:
+        def walk(o: Any, depth: int = 0) -> bool:
+            if depth > 10 or not isinstance(o, dict):
+                return False
+            kl = {str(x).lower() for x in o.keys()}
+            tokenish = bool(
+                kl & {"token", "tokens", "accesstoken", "access_token", "bearertoken", "credentials"}
+            )
+            if tokenish:
+                ttl_raw = None
+                for tk in ("ttl", "expiresIn", "expires_in", "lifetime"):
+                    for k in o:
+                        if str(k).lower() == tk.lower():
+                            ttl_raw = o.get(k)
+                            break
+                    if ttl_raw is not None:
+                        break
+                if ttl_raw is None:
+                    findings.append(
+                        ScanFinding(
+                            severity="medium",
+                            category="a2a_security",
+                            description="Long-lived A2A tokens — use short-lived credentials",
+                            location=prefix,
+                            evidence="token config without ttl/expiresIn",
+                        )
+                    )
+                    return True
+                try:
+                    ttl_num = float(str(ttl_raw).strip())
+                except (TypeError, ValueError):
+                    return False
+                if ttl_num > 3600:
+                    findings.append(
+                        ScanFinding(
+                            severity="medium",
+                            category="a2a_security",
+                            description="Long-lived A2A tokens — use short-lived credentials",
+                            location=prefix,
+                            evidence=f"ttl={ttl_raw}",
+                        )
+                    )
+                    return True
+            for v in o.values():
+                if isinstance(v, dict) and walk(v, depth + 1):
+                    return True
+                if isinstance(v, list):
+                    for item in v:
+                        if isinstance(item, dict) and walk(item, depth + 1):
+                            return True
+            return False
+
+        for node in nodes:
+            if walk(node):
+                break
+
+    @staticmethod
+    def _server_endpoint_remote_host(server: dict[str, Any]) -> tuple[bool, str]:
+        for key in ("url", "bind", "host"):
+            raw = str(server.get(key) or "").strip()
+            if not raw:
+                continue
+            parsed = urlparse(raw if "://" in raw else f"//{raw}")
+            host = (parsed.hostname or "").lower()
+            if not host:
+                continue
+            if host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}:
+                return False, host
+            return True, host
+        return False, ""
+
+    @staticmethod
+    def _has_runtime_docker_block(server: dict[str, Any]) -> bool:
+        if isinstance(server.get("docker"), dict) or isinstance(server.get("container"), dict):
+            return True
+        return bool(str(server.get("image", "") or "").strip())
+
+    @staticmethod
+    def _docker_block_has_resource_limits(cfg: dict[str, Any]) -> bool:
+        keys_lower = {str(k).lower() for k in cfg}
+        if keys_lower & {"memory", "mem_limit", "cpus", "cpu_limit", "nanocpus", "nano_cpus"}:
+            return True
+        hc = cfg.get("HostConfig")
+        if isinstance(hc, dict):
+            hkl = {str(k).lower() for k in hc}
+            if hkl & {"memory", "memlimit", "cpus", "cpushares", "nano_cpus"}:
+                return True
+        res = cfg.get("resources")
+        if isinstance(res, dict) and res:
+            return True
+        return False
+
+    @staticmethod
+    def _docker_block_has_restart_policy(cfg: dict[str, Any]) -> bool:
+        keys_lower = {str(k).lower() for k in cfg}
+        if "restart" in keys_lower or "restartpolicy" in keys_lower:
+            return True
+        hc = cfg.get("HostConfig")
+        if isinstance(hc, dict) and any(
+            str(k).lower() in {"restartpolicy", "restart"} for k in hc
+        ):
+            return True
+        return False
+
+    def _check_runtime_hygiene(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        prefix = f"$.mcpServers.{name}"
+        is_remote, _ = self._server_endpoint_remote_host(server)
+        top_keys = {str(k).lower() for k in server}
+        env = server.get("env")
+        env_keys_upper = {str(k).upper() for k in env} if isinstance(env, dict) else set()
+        if is_remote:
+            if not (top_keys & {"timeout", "requesttimeout"} or "TIMEOUT" in env_keys_upper):
+                findings.append(
+                    ScanFinding(
+                        severity="medium",
+                        category="runtime_hygiene",
+                        description="No request timeout — hung requests tie up resources",
+                        location=prefix,
+                        evidence="no timeout/requestTimeout/TIMEOUT",
+                    )
+                )
+            if not (
+                top_keys & {"ratelimit", "rate_limit"}
+                or env_keys_upper & {"MAX_REQUESTS", "RATE_LIMIT"}
+            ):
+                findings.append(
+                    ScanFinding(
+                        severity="medium",
+                        category="runtime_hygiene",
+                        description="No rate limiting configured — DoS risk",
+                        location=prefix,
+                        evidence="no rateLimit/rate_limit/MAX_REQUESTS/RATE_LIMIT",
+                    )
+                )
+        if self._has_runtime_docker_block(server):
+            limited = False
+            for block_key in ("docker", "container"):
+                blk = server.get(block_key)
+                if isinstance(blk, dict) and self._docker_block_has_resource_limits(blk):
+                    limited = True
+                    break
+            if not limited:
+                findings.append(
+                    ScanFinding(
+                        severity="medium",
+                        category="runtime_hygiene",
+                        description="Container without resource limits — can consume host resources",
+                        location=prefix,
+                        evidence="docker/container without memory/cpu limits",
+                    )
+                )
+            has_restart = False
+            for block_key in ("docker", "container"):
+                blk = server.get(block_key)
+                if isinstance(blk, dict) and self._docker_block_has_restart_policy(blk):
+                    has_restart = True
+                    break
+            if not has_restart:
+                findings.append(
+                    ScanFinding(
+                        severity="info",
+                        category="runtime_hygiene",
+                        description="No restart policy — server won't auto-recover",
+                        location=prefix,
+                        evidence="docker/container",
+                    )
+                )
+        port_raw = server.get("port")
+        if port_raw is not None:
+            try:
+                pnum = int(port_raw)
+            except (TypeError, ValueError):
+                pnum = None
+            if pnum == 0:
+                findings.append(
+                    ScanFinding(
+                        severity="info",
+                        category="runtime_hygiene",
+                        description="Random port assignment — may cause connectivity issues",
+                        location=f"{prefix}.port",
+                        evidence="0",
+                    )
+                )
+
+    @staticmethod
+    def _env_suggests_local_resource(key: str, value: str) -> bool:
+        ku = key.upper()
+        low = value.lower()
+        if ku in {"DATABASE_URL", "REDIS_URL"}:
+            return bool(
+                "localhost" in low
+                or "127.0.0.1" in low
+                or "/tmp/" in low
+                or "unix:" in low
+                or "/var/run/" in low
+            )
+        if ku == "FILE_PATH":
+            return bool("/" in value or "\\" in value)
+        if ku in {"ALLOWED_DIRECTORIES", "ALLOWED_PATHS"}:
+            return bool("/" in value or "\\" in value or "~" in value)
+        return False
+
+    def _check_network_segmentation(self, name: str, server: dict[str, Any], findings: list[ScanFinding]) -> None:
+        prefix = f"$.mcpServers.{name}"
+        is_remote, _ = self._server_endpoint_remote_host(server)
+        if not is_remote:
+            pass
+        else:
+            env = server.get("env")
+            if isinstance(env, dict):
+                for ek, ev in env.items():
+                    if not isinstance(ev, str):
+                        continue
+                    if self._env_suggests_local_resource(str(ek), ev):
+                        findings.append(
+                            ScanFinding(
+                                severity="high",
+                                category="network_segmentation",
+                                description="External server with local resource access — data exfiltration vector",
+                                location=f"{prefix}.env.{ek}",
+                                evidence=str(ek),
+                            )
+                        )
+                        break
+        url = str(server.get("url", "") or "").strip()
+        if url:
+            parsed = urlparse(url)
+            if (parsed.hostname or "").lower() == "localhost":
+                findings.append(
+                    ScanFinding(
+                        severity="info",
+                        category="network_segmentation",
+                        description="Use 127.0.0.1 instead of localhost — prevents DNS rebinding",
+                        location=f"{prefix}.url",
+                        evidence=url[:200],
+                    )
+                )
+
+    @staticmethod
+    def _record_server_listen_port(
+        name: str, server: dict[str, Any], port_index: dict[int, list[str]]
+    ) -> None:
+        praw = server.get("port")
+        port_val: int | None = None
+        if isinstance(praw, (int, float)):
+            try:
+                port_val = int(praw)
+            except (TypeError, ValueError):
+                port_val = None
+        elif isinstance(praw, str) and praw.strip().isdigit():
+            port_val = int(praw.strip())
+        if port_val is None:
+            for key in ("url", "bind", "host"):
+                raw = str(server.get(key) or "").strip()
+                if not raw:
+                    continue
+                parsed = urlparse(raw if "://" in raw else f"//{raw}")
+                if parsed.port is not None:
+                    port_val = parsed.port
+                    break
+        if port_val is not None:
+            port_index[port_val].append(name)
+
+    @staticmethod
+    def _check_network_port_collisions(
+        port_index: defaultdict[int, list[str]] | dict[int, list[str]],
+        findings: list[ScanFinding],
+    ) -> None:
+        for port, names in port_index.items():
+            uniq = sorted({n for n in names})
+            if len(uniq) < 2:
+                continue
+            findings.append(
+                ScanFinding(
+                    severity="medium",
+                    category="network_segmentation",
+                    description=f"Port collision: servers {', '.join(uniq)} both on port {port}",
+                    location="$.mcpServers",
+                    evidence=str(port),
+                )
+            )
 
     @staticmethod
     def _extract_args(server: dict[str, Any]) -> list[str]:

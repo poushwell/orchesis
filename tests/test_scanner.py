@@ -546,3 +546,494 @@ def test_shared_credential_across_servers(tmp_path: Path) -> None:
     report = McpConfigScanner().scan(str(path))
     tok = [f for f in report.findings if f.category == "token_management" and f.severity == "high"]
     assert any("shared credential" in f.description.lower() for f in tok)
+
+
+def test_cursor_broad_workspace_trust(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "c1": _mcp_base_server(
+                        {"url": "http://localhost:3000", "trusted_folders": ["~/Projects"]}
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    cur = [f for f in report.findings if f.category == "cursor_ide_config" and f.severity == "medium"]
+    assert any("workspace trust" in f.description.lower() for f in cur)
+
+
+def test_cursor_dangerous_skip_permissions(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "c2": _mcp_base_server(
+                        {
+                            "url": "http://localhost:3000",
+                            "dangerouslySkipPermissions": True,
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    cur = [f for f in report.findings if f.category == "cursor_ide_config" and f.severity == "critical"]
+    assert any("permission bypass" in f.description.lower() for f in cur)
+
+
+def test_claude_code_unrestricted_bash(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "cc1": _mcp_base_server(
+                        {
+                            "url": "http://localhost:3000",
+                            "permissions": {"allow": ["Bash(*)"]},
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    cc = [f for f in report.findings if f.category == "claude_code_config" and f.severity == "critical"]
+    assert any("bash" in f.description.lower() for f in cc)
+
+
+def test_claude_code_unrestricted_write(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "cc2": _mcp_base_server(
+                        {
+                            "url": "http://localhost:3000",
+                            "permissions": {"allow": ["Write(*)"]},
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    cc = [f for f in report.findings if f.category == "claude_code_config" and f.severity == "critical"]
+    assert any("write" in f.description.lower() for f in cc)
+
+
+def test_claude_code_expensive_model_no_budget(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "cc3": _mcp_base_server(
+                        {
+                            "url": "http://localhost:3000",
+                            "model": "claude-opus-4",
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    cc = [f for f in report.findings if f.category == "claude_code_config" and f.severity == "medium"]
+    assert any("budget" in f.description.lower() for f in cc)
+
+
+def test_paperclip_skip_permissions_critical(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "p1": _mcp_base_server(
+                        {
+                            "url": "http://localhost:3000",
+                            "adapterConfig": {},
+                            "dangerouslySkipPermissions": True,
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    pc = [f for f in report.findings if f.category == "paperclip_config" and f.severity == "critical"]
+    assert any("paperclip" in f.description.lower() and "permission" in f.description.lower() for f in pc)
+
+
+def test_paperclip_plaintext_api_key(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "p2": _mcp_base_server(
+                        {
+                            "url": "http://localhost:3000",
+                            "adapterConfig": {"env": {"API_KEY": "sk-test123456789012345678"}},
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    pc = [f for f in report.findings if f.category == "paperclip_config" and f.severity == "high"]
+    assert any("plaintext" in f.description.lower() or "credential" in f.description.lower() for f in pc)
+
+
+def test_paperclip_no_budget_warning(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "p3": _mcp_base_server(
+                        {
+                            "url": "http://localhost:3000",
+                            "adapterConfig": {},
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    pc = [f for f in report.findings if f.category == "paperclip_config" and f.severity == "medium"]
+    assert any("budget" in f.description.lower() for f in pc)
+
+
+def test_paperclip_slow_heartbeat(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "p4": _mcp_base_server(
+                        {
+                            "url": "http://localhost:3000",
+                            "heartbeat": {"interval": 70000},
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    pc = [f for f in report.findings if f.category == "paperclip_config" and f.severity == "medium"]
+    assert any("heartbeat" in f.description.lower() and "slow" in f.description.lower() for f in pc)
+
+
+def test_openclaw_sandbox_disabled_elevated(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "o1": _mcp_base_server(
+                        {
+                            "url": "http://localhost:3000",
+                            "maxTokens": 8000,
+                            "sandbox": {"enabled": False},
+                            "elevated": True,
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    oc = [f for f in report.findings if f.category == "openclaw_config" and f.severity == "critical"]
+    assert any("sandbox" in f.description.lower() for f in oc)
+
+
+def test_openclaw_auto_approve_tools(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "o2": _mcp_base_server(
+                        {
+                            "url": "http://localhost:3000",
+                            "maxTokens": 8000,
+                            "sessionDefaults": {"autoApproveTools": True},
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    oc = [f for f in report.findings if f.category == "openclaw_config" and f.severity == "high"]
+    assert any("auto-approve" in f.description.lower() or "approve" in f.description.lower() for f in oc)
+
+
+def test_openclaw_loop_detection_disabled(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "o3": _mcp_base_server(
+                        {
+                            "url": "http://localhost:3000",
+                            "maxTokens": 8000,
+                            "loopDetection": {"enabled": False},
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    oc = [f for f in report.findings if f.category == "openclaw_config" and f.severity == "high"]
+    assert any("loop" in f.description.lower() for f in oc)
+
+
+def test_universal_dangerous_skip_permissions(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "u1": _mcp_base_server(
+                        {
+                            "url": "http://localhost:3000",
+                            "meta": {"trust_all": True},
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    uni = [f for f in report.findings if f.category == "safety_bypass" and f.severity == "critical"]
+    assert any("safety bypass" in f.description.lower() for f in uni)
+    assert any("trust_all" in f.evidence.lower() or "trust" in f.description.lower() for f in uni)
+
+
+def test_a2a_no_authentication_critical(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "a2a1": _mcp_base_server(
+                        {"url": "http://localhost:3000", "agentCard": {"title": "Agent"}}
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    a2a = [f for f in report.findings if f.category == "a2a_security" and f.severity == "critical"]
+    assert any("authentication" in f.description.lower() for f in a2a)
+
+
+def test_a2a_unsigned_agent_card(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "a2a2": _mcp_base_server(
+                        {
+                            "url": "http://localhost:3000",
+                            "agentCard": {"authentication": {"type": "jwt"}},
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    a2a = [f for f in report.findings if f.category == "a2a_security" and f.severity == "high"]
+    assert any("unsigned" in f.description.lower() or "unverifiable" in f.description.lower() for f in a2a)
+
+
+def test_a2a_http_no_tls_critical(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "a2a3": _mcp_base_server(
+                        {
+                            "url": "http://localhost:3000",
+                            "a2a": {"endpoint": "http://agents.example.com/v1"},
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    a2a = [f for f in report.findings if f.category == "a2a_security" and f.severity == "critical"]
+    assert any("tls" in f.description.lower() or "without" in f.description.lower() for f in a2a)
+
+
+def test_a2a_long_lived_token_warning(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "a2a4": _mcp_base_server(
+                        {
+                            "url": "http://localhost:3000",
+                            "agentCard": {
+                                "authentication": {"type": "oauth2"},
+                                "signature": "ed25519:stub",
+                                "token": {"ttl": 7200},
+                            },
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    a2a = [f for f in report.findings if f.category == "a2a_security" and f.severity == "medium"]
+    assert any("token" in f.description.lower() and "long" in f.description.lower() for f in a2a)
+
+
+def test_runtime_no_timeout_warning(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "rt1": _mcp_base_server(
+                        {"url": "https://api.example.com/mcp", "token": "remote-token"}
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    rt = [f for f in report.findings if f.category == "runtime_hygiene" and f.severity == "medium"]
+    assert any("timeout" in f.description.lower() for f in rt)
+
+
+def test_runtime_no_rate_limit(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "rt2": _mcp_base_server({"url": "https://remote.test/mcp", "token": "x"})
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    rt = [f for f in report.findings if f.category == "runtime_hygiene" and f.severity == "medium"]
+    assert any("rate" in f.description.lower() for f in rt)
+
+
+def test_runtime_container_no_resource_limits(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "rt3": _mcp_base_server(
+                        {"url": "http://localhost:3000", "docker": {"image": "mcp:latest"}}
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    rt = [f for f in report.findings if f.category == "runtime_hygiene" and f.severity == "medium"]
+    assert any("resource" in f.description.lower() or "limit" in f.description.lower() for f in rt)
+
+
+def test_network_external_with_local_access(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "n1": _mcp_base_server(
+                        {
+                            "url": "https://edge.example/mcp",
+                            "token": "t",
+                            "env": {"DATABASE_URL": "postgresql://localhost:5432/app"},
+                        }
+                    )
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    net = [f for f in report.findings if f.category == "network_segmentation" and f.severity == "high"]
+    assert any("exfiltration" in f.description.lower() or "local" in f.description.lower() for f in net)
+
+
+def test_network_port_collision(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "n2": _mcp_base_server({"url": "http://127.0.0.1:9000", "token": "a"}),
+                    "n3": _mcp_base_server({"url": "http://127.0.0.1:9000", "token": "b"}),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    net = [f for f in report.findings if f.category == "network_segmentation" and f.severity == "medium"]
+    assert any("collision" in f.description.lower() and "9000" in f.evidence for f in net)
+
+
+def test_network_localhost_dns_rebinding_info(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "n4": _mcp_base_server({"url": "http://localhost:4000", "token": "t"}),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = McpConfigScanner().scan(str(path))
+    net = [f for f in report.findings if f.category == "network_segmentation" and f.severity == "info"]
+    assert any("127.0.0.1" in f.description or "dns" in f.description.lower() for f in net)
