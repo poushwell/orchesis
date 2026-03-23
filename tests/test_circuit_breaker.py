@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 import json
 import socket
@@ -14,6 +15,8 @@ import pytest
 
 from orchesis.circuit_breaker import CircuitBreaker
 from orchesis.proxy import HTTPProxyConfig, LLMHTTPProxy
+
+_CB_COOLDOWN_WAIT = float(os.environ.get("ORCHESIS_CB_COOLDOWN_TEST_SLEEP", "1.1"))
 
 
 def test_closed_to_open_after_threshold_errors() -> None:
@@ -34,7 +37,7 @@ def test_open_state_blocks_requests() -> None:
 def test_open_to_half_open_after_cooldown() -> None:
     cb = CircuitBreaker(enabled=True, error_threshold=1, cooldown_seconds=1)
     cb.record_failure()
-    time.sleep(1.1)
+    time.sleep(_CB_COOLDOWN_WAIT)
     assert cb.should_allow() is True
     assert cb.get_state() == "HALF_OPEN"
 
@@ -42,7 +45,7 @@ def test_open_to_half_open_after_cooldown() -> None:
 def test_half_open_to_closed_on_success() -> None:
     cb = CircuitBreaker(enabled=True, error_threshold=1, cooldown_seconds=1)
     cb.record_failure()
-    time.sleep(1.1)
+    time.sleep(_CB_COOLDOWN_WAIT)
     assert cb.should_allow() is True
     cb.record_success()
     assert cb.get_state() == "CLOSED"
@@ -51,7 +54,7 @@ def test_half_open_to_closed_on_success() -> None:
 def test_half_open_to_open_on_failure_with_backoff() -> None:
     cb = CircuitBreaker(enabled=True, error_threshold=1, cooldown_seconds=1, max_cooldown_seconds=8)
     cb.record_failure()
-    time.sleep(1.1)
+    time.sleep(_CB_COOLDOWN_WAIT)
     assert cb.should_allow() is True
     cb.record_failure()
     stats = cb.get_stats()
@@ -62,7 +65,7 @@ def test_half_open_to_open_on_failure_with_backoff() -> None:
 def test_failures_outside_window_not_counted() -> None:
     cb = CircuitBreaker(enabled=True, error_threshold=2, window_seconds=1)
     cb.record_failure()
-    time.sleep(1.1)
+    time.sleep(_CB_COOLDOWN_WAIT)
     cb.record_failure()
     assert cb.get_state() == "CLOSED"
 

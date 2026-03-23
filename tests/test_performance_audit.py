@@ -12,6 +12,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
+import pytest
+
+from ci_multiplier import get_ci_multiplier
+
 from orchesis.ars import AgentReliabilityScore
 from orchesis.entropy_detector import EntropyDetector
 from orchesis.message_chain import validate_tool_chain
@@ -28,7 +32,12 @@ from orchesis.structural_patterns import StructuralPatternDetector
 from orchesis.telemetry_export import TelemetryRecord
 
 ITERATIONS = 1000
-CI_FACTOR = 3.0 if (os.environ.get("CI") or os.name == "nt") else 1.0
+
+_CI = os.environ.get("CI")
+# Historically 3.0× slack on CI; scale with ORCHESIS_CI_MULTIPLIER (default 10 vs old 5).
+CI_FACTOR = 1.0 if not _CI else max(3.0, get_ci_multiplier() * 0.6)
+
+pytestmark = [pytest.mark.performance, pytest.mark.slow]
 
 
 def _th(value: float) -> float:

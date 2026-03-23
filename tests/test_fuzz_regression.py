@@ -4,6 +4,10 @@ import os
 import tempfile
 from typing import Any
 
+import pytest
+
+pytestmark = pytest.mark.fuzz
+
 
 def _load_pii_detector() -> Any:
     try:
@@ -138,7 +142,7 @@ def test_policy_yaml_fuzz_crash_malformed_merge_keys() -> None:
         try:
             _ = load_policy(policy_path)
         except ValueError as exc:
-            assert "Invalid YAML policy" in str(exc)
+            assert "Policy parse failed" in str(exc) or "ConfigError" in type(exc).__name__
     finally:
         if isinstance(policy_path, str) and os.path.exists(policy_path):
             os.unlink(policy_path)

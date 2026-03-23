@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from orchesis.config import load_policy
 from orchesis.contrib.pii_detector import PiiDetector
 from orchesis.contrib.secret_scanner import SecretScanner
+
+pytestmark = pytest.mark.fuzz
 
 
 def test_secret_scanner_binary_0xff() -> None:

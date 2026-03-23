@@ -83,7 +83,15 @@ def test_server_scores_high_risk(tmp_path: Path) -> None:
 def test_server_scores_clean(tmp_path: Path) -> None:
     _findings, report = _scan_servers(
         tmp_path,
-        {"clean": {"command": "node", "auth": "token", "url": "https://localhost:8443", "cors": {"allow": ["*"]}}},
+        {
+            "clean": {
+                "command": "node",
+                "auth": "token",
+                "url": "https://127.0.0.1",
+                "log_level": "info",
+                "cors": {"allow": ["*"]},
+            }
+        },
     )
     assert report.server_scores["clean"] == 0
 

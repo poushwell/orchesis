@@ -14,6 +14,13 @@ from pathlib import Path
 from typing import Any
 
 
+def discover_mcp_config_paths() -> list[Path]:
+    """Return known MCP JSON config paths that exist (delegates to ``discover_mcp_configs``)."""
+    from orchesis.scanner import discover_mcp_configs
+
+    return discover_mcp_configs()
+
+
 class OrchesisVerifier:
     """Runs pre-flight checks on Orchesis + OpenClaw config."""
 
@@ -27,6 +34,12 @@ class OrchesisVerifier:
         "budget_configured": "Spending budget is configured",
         "recording_enabled": "Session recording is enabled",
         "threat_intel_active": "Threat intelligence is active",
+        "policy_startup_validation": "Policy loads and passes startup validation",
+        "listen_ports_available": "Proxy and dashboard listen ports are free",
+        "python_environment": "Python version and optional dependencies",
+        "mcp_config_discovery": "MCP config files discovered and scanned",
+        "upstream_connectivity": "Upstream proxy.target reachable (HTTP HEAD)",
+        "data_directory_disk_space": "Free space for Orchesis data directory",
     }
 
     CONFIG_SCHEMA_ISSUE = {
@@ -77,6 +90,18 @@ class OrchesisVerifier:
                 return self._check_policy_flag(policy_path, "recording")
             if check_id == "threat_intel_active":
                 return self._check_policy_flag(policy_path, "threat_intel")
+            if check_id == "policy_startup_validation":
+                return self._check_policy_startup_validation(policy_path)
+            if check_id == "listen_ports_available":
+                return self._check_listen_ports_available(policy_path)
+            if check_id == "python_environment":
+                return self._check_python_environment()
+            if check_id == "mcp_config_discovery":
+                return self._check_mcp_config_discovery()
+            if check_id == "upstream_connectivity":
+                return self._check_upstream_connectivity(policy_path)
+            if check_id == "data_directory_disk_space":
+                return self._check_data_directory_disk_space()
         except Exception as error:  # pragma: no cover - defensive fallback
             return {"status": "WARN", "message": str(error)}
         return {"status": "WARN", "message": "Unknown check"}
@@ -194,6 +219,233 @@ class OrchesisVerifier:
             "message": f"Loop detection active (threshold: {threshold_value})",
         }
 
+    def _check_policy_startup_validation(self, policy_path: str) -> dict[str, Any]:
+        from orchesis.config import ConfigError, PolicyError, load_policy, validate_startup_policy
+
+        p = Path(policy_path)
+        if not p.exists():
+            return {
+                "status": "WARN",
+                "message": f"{policy_path} — file not found; startup validation skipped",
+                "warnings_count": 0,
+            }
+        try:
+            policy = load_policy(p)
+        except ConfigError as error:
+            return {"status": "FAIL", "message": f"{policy_path} — {error}", "warnings_count": 0}
+        except PolicyError as error:
+            return {"status": "FAIL", "message": f"{policy_path} — {error}", "warnings_count": 0}
+        except Exception as error:
+            return {"status": "FAIL", "message": f"{policy_path} — policy load failed: {error}", "warnings_count": 0}
+
+        proxy_cfg = policy.get("proxy") if isinstance(policy.get("proxy"), dict) else {}
+        listen_raw = proxy_cfg.get("listen_port", proxy_cfg.get("port"))
+        listen_port: int | None = None
+        if isinstance(listen_raw, int | float):
+            try:
+                lp = int(listen_raw)
+                if 1 <= lp <= 65535:
+                    listen_port = lp
+            except (TypeError, ValueError):
+                listen_port = None
+
+        critical, warnings = validate_startup_policy(policy, listen_port=listen_port)
+        n_warn = len(warnings)
+        if critical:
+            joined = "; ".join(critical[:5])
+            return {
+                "status": "FAIL",
+                "message": f"{policy_path} — parse OK; {n_warn} warning(s); critical: {joined}",
+                "warnings_count": n_warn,
+            }
+        if n_warn:
+            return {
+                "status": "WARN",
+                "message": f"{policy_path} — parse OK; {n_warn} warning(s)",
+                "warnings_count": n_warn,
+            }
+        return {
+            "status": "PASS",
+            "message": f"{policy_path} — parse OK; 0 warning(s)",
+            "warnings_count": 0,
+        }
+
+    def _check_listen_ports_available(self, policy_path: str) -> dict[str, Any]:
+        proxy_port = 8080
+        dashboard_port = 8081
+        p = Path(policy_path)
+        if p.exists():
+            try:
+                import yaml
+
+                cfg = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+                if isinstance(cfg, dict):
+                    pc = cfg.get("proxy")
+                    if isinstance(pc, dict):
+                        lp = pc.get("listen_port", pc.get("port"))
+                        if isinstance(lp, int | float):
+                            try:
+                                proxy_port = int(lp)
+                            except (TypeError, ValueError):
+                                pass
+                        elif isinstance(lp, str) and lp.strip().isdigit():
+                            proxy_port = int(lp.strip())
+            except Exception:
+                pass
+
+        host = "127.0.0.1"
+
+        def _port_in_use(port: int) -> bool:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                probe.settimeout(0.5)
+                return probe.connect_ex((host, port)) == 0
+            except OSError:
+                return False
+            finally:
+                probe.close()
+
+        parts: list[str] = []
+        any_in_use = False
+        for label, port in (("Proxy", proxy_port), ("Dashboard", dashboard_port)):
+            if _port_in_use(port):
+                parts.append(f"{label} port {port} in use (not free)")
+                any_in_use = True
+            else:
+                parts.append(f"{label} port {port} available")
+        status = "WARN" if any_in_use else "PASS"
+        return {"status": status, "message": " — ".join(parts)}
+
+    def _check_python_environment(self) -> dict[str, Any]:
+        import importlib.util
+        import sys
+        from importlib.metadata import PackageNotFoundError, version
+
+        if sys.version_info < (3, 10):
+            return {
+                "status": "FAIL",
+                "message": f"Python {sys.version_info[0]}.{sys.version_info[1]} < 3.10 required",
+            }
+
+        chunks: list[str] = [
+            f"Python {sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]} OK",
+        ]
+        optional = (
+            ("yaml", "PyYAML"),
+            ("fastapi", "fastapi"),
+            ("uvicorn", "uvicorn"),
+            ("httpx", "httpx"),
+        )
+        for import_name, dist_name in optional:
+            spec = importlib.util.find_spec(import_name)
+            if spec is None:
+                chunks.append(f"{dist_name} not installed (optional)")
+            else:
+                try:
+                    ver = version(dist_name)
+                except PackageNotFoundError:
+                    ver = "installed"
+                chunks.append(f"{dist_name} {ver}")
+        return {"status": "PASS", "message": "; ".join(chunks)}
+
+    def _check_mcp_config_discovery(self) -> dict[str, Any]:
+        from orchesis.scanner import McpConfigScanner
+
+        paths = discover_mcp_config_paths()
+        if not paths:
+            return {"status": "PASS", "message": "found 0 MCP config files at: [] — 0 findings (0 critical, 0 high)"}
+
+        scanner = McpConfigScanner()
+        total = critical = high = 0
+        for path in paths:
+            try:
+                report = scanner.scan(str(path))
+            except Exception as error:
+                return {"status": "WARN", "message": f"scan failed for {path}: {error}"}
+            for item in report.findings:
+                total += 1
+                sev = str(item.severity).lower()
+                if sev == "critical":
+                    critical += 1
+                elif sev == "high":
+                    high += 1
+
+        listed = ", ".join(str(x) for x in paths)
+        return {
+            "status": "PASS",
+            "message": f"found {len(paths)} MCP config file(s) at: [{listed}] — {total} total findings ({critical} critical, {high} high)",
+        }
+
+    def _check_upstream_connectivity(self, policy_path: str) -> dict[str, Any]:
+        import time
+        import urllib.error
+        import urllib.request
+
+        p = Path(policy_path)
+        if not p.exists():
+            return {"status": "WARN", "message": f"{policy_path} missing — upstream check skipped"}
+
+        try:
+            import yaml
+
+            cfg = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        except Exception as error:
+            return {"status": "WARN", "message": f"could not read policy: {error}"}
+
+        if not isinstance(cfg, dict):
+            return {"status": "WARN", "message": "policy not a mapping — upstream check skipped"}
+
+        proxy_cfg = cfg.get("proxy")
+        target: str | None = None
+        if isinstance(proxy_cfg, dict):
+            raw = proxy_cfg.get("target")
+            if isinstance(raw, str) and raw.strip():
+                target = raw.strip()
+
+        if not target:
+            return {"status": "PASS", "message": "no proxy.target in policy — upstream check skipped"}
+
+        started = time.perf_counter()
+        try:
+            req = urllib.request.Request(target, method="HEAD")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                code = getattr(resp, "status", None) or resp.getcode()
+            ms = (time.perf_counter() - started) * 1000
+            return {
+                "status": "PASS",
+                "message": f"reachable — HTTP {int(code)}, {ms:.0f}ms latency",
+            }
+        except urllib.error.HTTPError as error:
+            ms = (time.perf_counter() - started) * 1000
+            return {
+                "status": "PASS",
+                "message": f"reachable — HTTP {error.code}, {ms:.0f}ms latency",
+            }
+        except Exception as error:
+            return {"status": "WARN", "message": f"unreachable — {error}"}
+
+    def _check_data_directory_disk_space(self) -> dict[str, Any]:
+        import shutil
+
+        data_dir = Path(".orchesis")
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        try:
+            resolved = data_dir.resolve()
+            anchor = resolved if resolved.exists() else Path.cwd().resolve()
+            free_b = shutil.disk_usage(anchor).free
+            free_mb = int(free_b // (1024 * 1024))
+            if free_mb < 100:
+                return {
+                    "status": "WARN",
+                    "message": f".orchesis — {free_mb}MB free (< 100MB)",
+                }
+            return {"status": "PASS", "message": f".orchesis — {free_mb}MB free"}
+        except OSError as error:
+            return {"status": "WARN", "message": f"could not read disk usage — {error}"}
+
     def _check_policy_flag(self, policy_path: str, section: str) -> dict[str, Any]:
         import yaml
 
@@ -261,10 +513,10 @@ class OrchesisVerifier:
 
     def format_report(self, result: dict[str, Any]) -> str:
         lines = ["\norchesis verify\n" + "-" * 40]
-        icons = {"PASS": "OK", "FAIL": "FAIL", "WARN": "WARN"}
         for check_id, check in result["checks"].items():
-            icon = icons.get(check["status"], "?")
-            lines.append(f"[{icon}] {check_id}: {check['message']}")
+            status = check["status"]
+            label = self.CHECKS.get(check_id, check_id.replace("_", " ").title())
+            lines.append(f"[{status}] {label} — {check['message']}")
         lines.append("-" * 40)
         lines.append(
             f"{'Ready' if result['ready'] else 'Issues found'} "

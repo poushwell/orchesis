@@ -5,10 +5,13 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 import http.client
+import logging
 import ssl
 import threading
 import time
 from typing import Any
+
+_CONNECTION_POOL_LOGGER = logging.getLogger(__name__)
 
 
 class ConnectionPoolExhausted(Exception):
@@ -67,8 +70,8 @@ class PooledConnection:
     def close(self) -> None:
         try:
             self._conn.close()
-        except Exception:
-            pass
+        except OSError as exc:
+            _CONNECTION_POOL_LOGGER.debug("Suppressed: %s", exc)
 
 
 class ConnectionPool:

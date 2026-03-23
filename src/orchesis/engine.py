@@ -1,6 +1,7 @@
 """Rule evaluation engine."""
 
 import hashlib
+import logging
 import ipaddress
 import json
 import fnmatch
@@ -27,6 +28,8 @@ from orchesis.models import Decision
 from orchesis.plugins import PluginRegistry
 from orchesis.state import DEFAULT_SESSION_ID, GLOBAL_AGENT_ID, RateLimitTracker
 from orchesis.telemetry import DecisionEvent, EventEmitter
+
+_ENGINE_LOGGER = logging.getLogger(__name__)
 
 RULE_EVALUATION_ORDER = [
     "identity_check",
@@ -519,7 +522,8 @@ def _constraint_denies(values: list[str], patterns: list[str], *, normalize_path
         if normalize_path:
             try:
                 value = _normalize_path(raw)
-            except Exception:
+            except Exception as exc:
+                _ENGINE_LOGGER.debug("Suppressed: %s", exc)
                 continue
         if _matches_any_glob(value, patterns):
             return True
@@ -536,7 +540,8 @@ def _constraint_allows(values: list[str], patterns: list[str], *, normalize_path
         if normalize_path:
             try:
                 value = _normalize_path(raw)
-            except Exception:
+            except Exception as exc:
+                _ENGINE_LOGGER.debug("Suppressed: %s", exc)
                 continue
         if not _matches_any_glob(value, patterns):
             return False
@@ -664,7 +669,8 @@ def _evaluate_tool_access_control(
             for value in _iter_string_values(request.get("params")):
                 try:
                     normalized_value = _normalize_path(value)
-                except Exception:
+                except Exception as exc:
+                    _ENGINE_LOGGER.debug("Suppressed: %s", exc)
                     continue
                 if any(normalized_value.startswith(prefix) for prefix in normalized_denied):
                     reasons.append(
@@ -916,7 +922,7 @@ def _is_ip_address(value: str) -> bool:
     try:
         ipaddress.ip_address(value)
         return True
-    except Exception:
+    except ValueError:
         return False
 
 
@@ -960,7 +966,8 @@ def _check_sandbox(
             for raw in paths:
                 try:
                     normalized = _normalize_path(raw)
-                except Exception:
+                except Exception as exc:
+                    _ENGINE_LOGGER.debug("Suppressed: %s", exc)
                     continue
                 if any(normalized.startswith(prefix) for prefix in denied_paths):
                     reasons.append(f"sandbox: filesystem path '{normalized}' denied for session '{session_type}'")
@@ -975,7 +982,8 @@ def _check_sandbox(
                 for raw in paths:
                     try:
                         normalized = _normalize_path(raw)
-                    except Exception:
+                    except Exception as exc:
+                        _ENGINE_LOGGER.debug("Suppressed: %s", exc)
                         continue
                     if not any(normalized.startswith(prefix) for prefix in allowed_paths):
                         reasons.append(
@@ -1664,7 +1672,7 @@ class PolicyEngine:
         emitter: EventEmitter | None = None,
         registry: AgentRegistry | None = None,
         plugins: PluginRegistry | None = None,
-    ):
+    ) -> None:
         self._policy = policy or {"rules": []}
         self._state = state if state is not None else RateLimitTracker(persist_path=None)
         self._emitter = emitter
@@ -2422,8 +2430,8 @@ def evaluate(
                 tokens_output=safe_tokens_out,
                 cost_override=current_tool_cost if model is None else None,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            _ENGINE_LOGGER.debug("Suppressed: %s", exc)
     _attach_debug_trace(decision)
     _emit_event(
         emitter=emitter,
@@ -2524,8 +2532,8 @@ def _emit_event(
             credentials_injected=credentials_injected,
         )
         emitter.emit(event)
-    except Exception:
-        pass
+    except Exception as exc:
+        _ENGINE_LOGGER.debug("Suppressed: %s", exc)
 
 
 def _get_policy_plan(

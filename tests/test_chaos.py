@@ -7,7 +7,7 @@ import time
 import pytest
 import yaml
 
-CI_MULTIPLIER = 5.0 if os.getenv("CI") else 1.0
+from ci_multiplier import CI_MULTIPLIER
 
 
 def test_empty_request() -> None:
@@ -47,6 +47,7 @@ def test_deeply_nested_policy() -> None:
     assert result is not None
 
 
+@pytest.mark.performance
 def test_1000_rules_in_policy() -> None:
     """Policy with 1000 rules evaluates in reasonable time."""
     from orchesis.engine import evaluate

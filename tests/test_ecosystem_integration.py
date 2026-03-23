@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import os
+
+import pytest
 import tempfile
 import time
 from pathlib import Path
@@ -28,6 +30,8 @@ from orchesis.models import (
     Severity,
 )
 from orchesis.vibe_watch import AuditResult, VibeWatcher
+
+pytestmark = pytest.mark.integration
 
 
 def test_casura_import_to_stix_chain() -> None:

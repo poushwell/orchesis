@@ -11,6 +11,7 @@ from orchesis.config import load_policy
 from orchesis.engine import evaluate
 from orchesis.models import Decision
 
+pytestmark = pytest.mark.fuzz
 
 JSON_SCALAR = st.one_of(
     st.none(),

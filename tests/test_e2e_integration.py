@@ -14,10 +14,13 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from orchesis.replay import read_events_from_jsonl
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("orchesis") is None,
-    reason="requires orchesis CLI installed",
-)
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        shutil.which("orchesis") is None,
+        reason="requires orchesis CLI installed",
+    ),
+]
 
 
 def _write_policy(path: Path, *, max_requests: int = 10, daily_budget: float = 5.0) -> None:

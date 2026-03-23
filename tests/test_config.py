@@ -5,7 +5,14 @@ import pytest
 from orchesis import config as config_module
 from orchesis.config import (
     ConfigError,
+    DEFAULT_CASCADE_CACHE_TTL_SECONDS,
+    DEFAULT_CONNECTION_POOL_MAX_PER_HOST,
+    DEFAULT_CONNECTION_POOL_MAX_TOTAL,
+    DEFAULT_PROXY_MAX_WORKERS,
     DEFAULT_RESUME_TOKEN,
+    DEFAULT_SEMANTIC_CACHE_MAX_ENTRIES,
+    DEFAULT_SEMANTIC_CACHE_TTL_SECONDS,
+    DEFAULT_STREAMING_MAX_ACCUMULATED_EVENTS,
     PolicyError,
     PolicyWatcher,
     _redact_config,
@@ -109,6 +116,7 @@ def test_load_policy_empty_result_warns(tmp_path: Path, caplog: pytest.LogCaptur
 
 
 def test_default_resume_token_warns() -> None:
+    """validate_startup_policy without load_policy normalization still flags the known default string."""
     policy = {
         "kill_switch": {"enabled": True, "resume_token": DEFAULT_RESUME_TOKEN, "auto_triggers": {}},
         "proxy": {"upstream": {"openai": "https://api.openai.com"}},
@@ -117,6 +125,65 @@ def test_default_resume_token_warns() -> None:
         policy, listen_port=8100, runtime_upstream={"openai": "https://api.openai.com"}
     )
     assert any("Default resume token" in w for w in warns)
+
+
+def test_auto_generated_resume_token_is_secure(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    policy_path = _write_yaml(
+        tmp_path,
+        "kill-on.yaml",
+        """
+rules: []
+proxy:
+  upstream:
+    openai: https://api.openai.com
+kill_switch:
+  enabled: true
+  auto_triggers: {}
+""".strip(),
+    )
+    with caplog.at_level(logging.INFO):
+        policy = load_policy(policy_path)
+    token = policy["kill_switch"]["resume_token"]
+    assert token != DEFAULT_RESUME_TOKEN
+    assert len(token) >= 32
+    assert any("Auto-generated secure resume token" in rec.message for rec in caplog.records)
+
+
+def test_explicit_resume_token_preserved(tmp_path: Path) -> None:
+    policy_path = _write_yaml(
+        tmp_path,
+        "kill-explicit.yaml",
+        """
+rules: []
+proxy:
+  upstream:
+    openai: https://api.openai.com
+kill_switch:
+  enabled: true
+  resume_token: my-fixed-resume-token-for-tests-12345
+  auto_triggers: {}
+""".strip(),
+    )
+    policy = load_policy(policy_path)
+    assert policy["kill_switch"]["resume_token"] == "my-fixed-resume-token-for-tests-12345"
+
+
+def test_named_constants_exist() -> None:
+    from orchesis import proxy as proxy_module
+
+    assert DEFAULT_PROXY_MAX_WORKERS == 200
+    assert DEFAULT_CONNECTION_POOL_MAX_PER_HOST == 10
+    assert DEFAULT_CONNECTION_POOL_MAX_TOTAL == 50
+    assert DEFAULT_STREAMING_MAX_ACCUMULATED_EVENTS == 10000
+    assert DEFAULT_SEMANTIC_CACHE_MAX_ENTRIES == 1000
+    assert DEFAULT_SEMANTIC_CACHE_TTL_SECONDS == 600.0
+    assert DEFAULT_CASCADE_CACHE_TTL_SECONDS == 300
+    assert proxy_module._DASHBOARD_MAX_EVENTS == 500
+    assert proxy_module._DASHBOARD_MAX_COST_TIMELINE == 1000
+    assert proxy_module._DEFAULT_LISTEN_HOST == "127.0.0.1"
+    assert "localhost" in proxy_module._LOCALHOST_HOSTNAMES
 
 
 def test_short_resume_token_warns() -> None:

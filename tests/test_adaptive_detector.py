@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import os
 import threading
 import time
 
+import pytest
+
+from ci_multiplier import CI_MULTIPLIER
 from orchesis.adaptive_detector import AdaptiveDetector, DetectionResult
 from orchesis.structural_patterns import PatternMatch
-
-CI_MULTIPLIER = 5.0 if os.getenv("CI") else 1.0
 
 
 def _req(messages: list[dict], model: str = "gpt-4o-mini", tools: list[str] | None = None) -> dict:
@@ -380,6 +380,7 @@ def test_detectors_run_list_accurate() -> None:
     assert r.detectors_run == ["structural"]
 
 
+@pytest.mark.performance
 def test_check_within_5ms_budget() -> None:
     det = AdaptiveDetector()
     _baseline(det, n=8)

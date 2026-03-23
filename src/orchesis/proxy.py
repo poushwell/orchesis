@@ -17,7 +17,7 @@ import socket
 import threading
 import time
 import uuid
-from typing import Any
+from typing import Any, AsyncGenerator
 import http.client
 from urllib.parse import parse_qs, urlsplit
 from urllib.error import URLError
@@ -47,6 +47,11 @@ from orchesis.credential_vault import CredentialNotFoundError, build_vault_from_
 from orchesis.contrib.pii_detector import PiiDetector
 from orchesis.contrib.secret_scanner import SecretScanner
 from orchesis.config import (
+    DEFAULT_CONNECTION_POOL_MAX_PER_HOST,
+    DEFAULT_CONNECTION_POOL_MAX_TOTAL,
+    DEFAULT_PROXY_MAX_WORKERS,
+    DEFAULT_RESUME_TOKEN,
+    DEFAULT_STREAMING_MAX_ACCUMULATED_EVENTS,
     PolicyWatcher,
     _redact_config,
     load_policy,
@@ -141,9 +146,17 @@ def compute_upstream_retry_delay(
     return delay * (0.5 + u * 0.5)
 
 
+_DEFAULT_LISTEN_HOST = "127.0.0.1"
+_LOCALHOST_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+_DASHBOARD_MAX_EVENTS = 500
+_DASHBOARD_MAX_COST_TIMELINE = 1000
+_DASHBOARD_RECENT_BLOCKED_WINDOW_SECONDS = 300.0
+_DEFAULT_OTLP_HTTP_ENDPOINT = "http://localhost:4318"
+
+
 @dataclass
 class ProxyConfig:
-    listen_host: str = "127.0.0.1"
+    listen_host: str = _DEFAULT_LISTEN_HOST
     listen_port: int = 8080
     upstream_url: str | None = None
     intercept_mode: str = "tool_call"
@@ -217,7 +230,12 @@ class ProxyStats:
 class PooledThreadHTTPServer(HTTPServer):
     """HTTPServer with bounded worker pool."""
 
-    def __init__(self, server_address: tuple[str, int], request_handler_class: Any, max_workers: int = 200):
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        request_handler_class: Any,
+        max_workers: int = DEFAULT_PROXY_MAX_WORKERS,
+    ) -> None:
         super().__init__(server_address, request_handler_class)
         self._pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=max(1, int(max_workers)),
@@ -392,7 +410,7 @@ def _init_components(policy: dict[str, Any], *, policy_path: str = "policy.yaml"
 class OrchesisProxy:
     """Asyncio HTTP proxy that can enforce Orchesis policy checks."""
 
-    def __init__(self, engine, config: ProxyConfig, event_bus=None, redactor=None, policy: dict[str, Any] | None = None):
+    def __init__(self, engine, config: ProxyConfig, event_bus=None, redactor=None, policy: dict[str, Any] | None = None) -> None:
         self._engine = engine
         self._config = config
         self._event_bus = event_bus
@@ -451,7 +469,7 @@ class OrchesisProxy:
     def stats(self) -> ProxyStats:
         return self._stats
 
-    async def start(self):
+    async def start(self) -> asyncio.Server:
         self._server = await asyncio.start_server(
             self.handle_request,
             host=self._config.listen_host,
@@ -459,13 +477,13 @@ class OrchesisProxy:
         )
         return self._server
 
-    async def stop(self):
+    async def stop(self) -> None:
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
 
-    async def handle_request(self, reader, writer):
+    async def handle_request(self, reader: Any, writer: Any) -> None:
         started = time.perf_counter()
         decision_label = "ERROR"
         bytes_count = 0
@@ -733,8 +751,8 @@ class OrchesisProxy:
             try:
                 writer.write(self._build_error_response(400, "bad_request", "Malformed HTTP request"))
                 await writer.drain()
-            except Exception:
-                pass
+            except Exception as exc:
+                _HTTP_PROXY_LOGGER.debug("Suppressed: %s", exc)
             decision_label = "ERROR"
         finally:
             latency_ms = (time.perf_counter() - started) * 1000.0
@@ -742,8 +760,8 @@ class OrchesisProxy:
             try:
                 writer.close()
                 await writer.wait_closed()
-            except Exception:
-                pass
+            except Exception as exc:
+                _HTTP_PROXY_LOGGER.debug("Suppressed: %s", exc)
 
     def _extract_tool_call(
         self, method: str, path: str, headers: dict[str, str], body: bytes
@@ -862,7 +880,7 @@ class OrchesisProxy:
         parsed = urlsplit(upstream)
         if parsed.scheme not in {"http"}:
             return 502, {"content-type": "application/json"}, b'{"error":"unsupported_upstream_scheme"}'
-        host = parsed.hostname or "127.0.0.1"
+        host = parsed.hostname or _DEFAULT_LISTEN_HOST
         port = parsed.port or 80
         base_path = parsed.path or ""
         target_path = path if path.startswith("/") else f"/{path}"
@@ -901,8 +919,8 @@ class OrchesisProxy:
             try:
                 writer.close()
                 await writer.wait_closed()
-            except Exception:
-                pass
+            except Exception as exc:
+                _HTTP_PROXY_LOGGER.debug("Suppressed: %s", exc)
 
     def _scan_response(self, tool_name: str, response_body: bytes) -> list[dict[str, Any]]:
         findings: list[dict[str, Any]] = []
@@ -1005,7 +1023,7 @@ class OrchesisProxy:
             text = self._pii_detector.redact_text(text)
         return text.encode("utf-8")
 
-    def _evaluate(self, payload: dict[str, Any]):
+    def _evaluate(self, payload: dict[str, Any]) -> Any:
         if hasattr(self._engine, "evaluate"):
             return self._engine.evaluate(payload)
         if callable(self._engine):
@@ -1017,8 +1035,8 @@ class OrchesisProxy:
             return
         try:
             self._event_bus.emit(event)
-        except Exception:
-            pass
+        except Exception as exc:
+            _HTTP_PROXY_LOGGER.debug("Suppressed: %s", exc)
 
     def _extract_reason_rule_severity(self, decision) -> tuple[str, str, str]:
         reasons = getattr(decision, "reasons", [])
@@ -1312,7 +1330,8 @@ def create_proxy_app(
                         f"Incident [{incident.severity.upper()}]: {incident.title} "
                         f"(agent={incident.agent_id}, tool={incident.tool})"
                     )
-            except Exception:
+            except Exception as exc:
+                _HTTP_PROXY_LOGGER.debug("Suppressed: %s", exc)
                 continue
 
     def _sync_webhooks(candidate_policy: dict[str, Any]) -> None:
@@ -1479,7 +1498,7 @@ def create_proxy_app(
         _sync_credentials(current_policy)
 
     @asynccontextmanager
-    async def _lifespan(_app: FastAPI):
+    async def _lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             yield
         finally:
@@ -1821,7 +1840,7 @@ def _default_policy_path() -> str:
 def build_app_from_env() -> FastAPI:
     """Create proxy app configured from environment variables."""
     policy_path = os.getenv("POLICY_PATH", _default_policy_path())
-    backend_url = os.getenv("BACKEND_URL", "http://127.0.0.1:8081")
+    backend_url = os.getenv("BACKEND_URL", f"http://{_DEFAULT_LISTEN_HOST}:8081")
     policy = load_policy(policy_path)
     return create_proxy_app(policy=policy, policy_path=policy_path, backend_url=backend_url)
 
@@ -1833,7 +1852,7 @@ app = build_app_from_env()
 class HTTPProxyConfig:
     """Configuration for stdlib HTTP LLM proxy."""
 
-    host: str = "127.0.0.1"
+    host: str = _DEFAULT_LISTEN_HOST
     port: int = 8080
     timeout: float = 300.0
     cors: bool = True
@@ -1960,9 +1979,9 @@ class LLMHTTPProxy:
         proxy_engine_cfg = self._policy.get("proxy")
         self._proxy_engine_cfg = proxy_engine_cfg if isinstance(proxy_engine_cfg, dict) else {}
         self._ssrf_allow_private = bool(self._proxy_engine_cfg.get("ssrf_allow_private", False))
-        self._max_workers = int(self._proxy_engine_cfg.get("max_workers", 200))
+        self._max_workers = int(self._proxy_engine_cfg.get("max_workers", DEFAULT_PROXY_MAX_WORKERS))
         if self._max_workers <= 0:
-            self._max_workers = 200
+            self._max_workers = DEFAULT_PROXY_MAX_WORKERS
         max_body_size_raw = self._proxy_engine_cfg.get("max_body_size_bytes", 10_485_760)
         self._max_body_size_bytes = int(max_body_size_raw) if isinstance(max_body_size_raw, int | float) else 10_485_760
         if self._max_body_size_bytes <= 0:
@@ -1971,8 +1990,10 @@ class LLMHTTPProxy:
         pool_cfg = pool_cfg_raw if isinstance(pool_cfg_raw, dict) else {}
         self._connection_pool = ConnectionPool(
             PoolConfig(
-                max_connections_per_host=int(pool_cfg.get("max_per_host", 10)),
-                max_total_connections=int(pool_cfg.get("max_total", 50)),
+                max_connections_per_host=int(
+                    pool_cfg.get("max_per_host", DEFAULT_CONNECTION_POOL_MAX_PER_HOST)
+                ),
+                max_total_connections=int(pool_cfg.get("max_total", DEFAULT_CONNECTION_POOL_MAX_TOTAL)),
                 idle_timeout=float(pool_cfg.get("idle_timeout", 60.0)),
                 connection_timeout=float(pool_cfg.get("connection_timeout", self._config.timeout)),
                 retry_on_connection_error=bool(pool_cfg.get("retry_on_connection_error", True)),
@@ -1993,9 +2014,11 @@ class LLMHTTPProxy:
         self._streaming_buffer_size = int(streaming_cfg.get("buffer_size", 4096))
         if self._streaming_buffer_size <= 0:
             self._streaming_buffer_size = 4096
-        self._streaming_max_accumulated_events = int(streaming_cfg.get("max_accumulated_events", 10000))
+        self._streaming_max_accumulated_events = int(
+            streaming_cfg.get("max_accumulated_events", DEFAULT_STREAMING_MAX_ACCUMULATED_EVENTS)
+        )
         if self._streaming_max_accumulated_events <= 0:
-            self._streaming_max_accumulated_events = 10000
+            self._streaming_max_accumulated_events = DEFAULT_STREAMING_MAX_ACCUMULATED_EVENTS
         self._streaming_count = 0
         self._streaming_chunks_total = 0
         budgets = self._policy.get("budgets")
@@ -2129,7 +2152,7 @@ class LLMHTTPProxy:
         if isinstance(otel_cfg, dict) and bool(otel_cfg.get("enabled", False)):
             export_cfg = OTLPExportConfig(
                 enabled=True,
-                endpoint=str(otel_cfg.get("endpoint", "http://localhost:4318")),
+                endpoint=str(otel_cfg.get("endpoint", _DEFAULT_OTLP_HTTP_ENDPOINT)),
                 traces_path=str(otel_cfg.get("traces_path", "/v1/traces")),
                 headers=dict(otel_cfg.get("headers", {})),
                 batch_size=int(otel_cfg.get("batch_size", 50)),
@@ -2153,7 +2176,7 @@ class LLMHTTPProxy:
         self._kill_enabled = bool(self._kill_cfg.get("enabled", False))
         auto_cfg = self._kill_cfg.get("auto_triggers")
         self._kill_auto_cfg = auto_cfg if isinstance(auto_cfg, dict) else {}
-        self._resume_token = str(self._kill_cfg.get("resume_token", "orchesis-resume-2024"))
+        self._resume_token = str(self._kill_cfg.get("resume_token", DEFAULT_RESUME_TOKEN))
         self._killed = False
         self._kill_reason = ""
         self._kill_time = ""
@@ -2296,8 +2319,8 @@ class LLMHTTPProxy:
             "cascade_requests_by_level": {"simple": 0, "medium": 0, "complex": 0},
             "started_at": datetime.now(timezone.utc).isoformat(),
         }
-        self._dashboard_events: deque[dict[str, Any]] = deque(maxlen=500)
-        self._dashboard_cost_timeline: deque[dict[str, float]] = deque(maxlen=1000)
+        self._dashboard_events: deque[dict[str, Any]] = deque(maxlen=_DASHBOARD_MAX_EVENTS)
+        self._dashboard_cost_timeline: deque[dict[str, float]] = deque(maxlen=_DASHBOARD_MAX_COST_TIMELINE)
         self._dashboard_cost_timeline.append(
             {"timestamp": time.time(), "cumulative_cost": float(self._cost_tracker.get_daily_total())}
         )
@@ -2580,7 +2603,10 @@ class LLMHTTPProxy:
             if (now - float(e.get("timestamp", 0.0))) <= 60.0 and str(e.get("severity", "")).lower() == "critical"
         ]
         blocked_recent = [
-            e for e in recent_events if (now - float(e.get("timestamp", 0.0))) <= 300.0 and e.get("type") == "blocked"
+            e
+            for e in recent_events
+            if (now - float(e.get("timestamp", 0.0))) <= _DASHBOARD_RECENT_BLOCKED_WINDOW_SECONDS
+            and e.get("type") == "blocked"
         ]
         circuit_state = str(stats.get("circuit_breaker", {}).get("state", "CLOSED")).upper()
         if circuit_state == "OPEN" or critical_recent:
@@ -3440,18 +3466,20 @@ class LLMHTTPProxy:
                 continue
             try:
                 current = float(getattr(match, "confidence", 0.0) or 0.0)
-            except Exception:
+            except (TypeError, ValueError) as exc:
+                _HTTP_PROXY_LOGGER.debug("Suppressed: %s", exc)
                 current = 0.0
             adjusted = max(0.0, min(1.0, current * 0.5))
             try:
                 match.confidence = adjusted
-            except Exception:
-                pass
+            except Exception as exc:
+                _HTTP_PROXY_LOGGER.debug("Suppressed: %s", exc)
             try:
                 action = str(getattr(match, "action", "")).lower()
                 if action == "block" and adjusted < 0.7:
                     match.action = "warn"
-            except Exception:
+            except Exception as exc:
+                _HTTP_PROXY_LOGGER.debug("Suppressed: %s", exc)
                 continue
 
     def _phase_cascade(self, ctx: _RequestContext) -> bool:
@@ -4712,7 +4740,7 @@ class LLMHTTPProxy:
                 return ""
             try:
                 data = json.loads(data_str)
-            except Exception:
+            except json.JSONDecodeError:
                 continue
             if isinstance(data, dict):
                 if data.get("type") == "content_block_delta":
@@ -4761,7 +4789,7 @@ class LLMHTTPProxy:
                     continue
                 try:
                     data = json.loads(line[6:])
-                except Exception:
+                except json.JSONDecodeError:
                     continue
                 if isinstance(data, dict):
                     usage = data.get("usage", {})
@@ -4992,8 +5020,8 @@ class LLMHTTPProxy:
                 elif isinstance(body_raw, str):
                     ctx.resp_body = body_raw.encode("utf-8")
             ctx.proc_result["plugins_response"] = plugin_context
-        except Exception:
-            pass
+        except Exception as exc:
+            _HTTP_PROXY_LOGGER.debug("Suppressed: %s", exc)
         ctx.parsed_resp_obj = None
         try:
             decoded = json.loads(ctx.resp_body.decode("utf-8"))
@@ -5014,7 +5042,8 @@ class LLMHTTPProxy:
                         },
                     )
                     return False
-        except Exception:
+        except Exception as exc:
+            _HTTP_PROXY_LOGGER.debug("Suppressed: %s", exc)
             ctx.proc_result = {"cost": 0.0}
         if 200 <= ctx.resp_status < 300:
             self._circuit_breaker.record_success()
@@ -5065,8 +5094,8 @@ class LLMHTTPProxy:
                     parsed_resp_retry = parse_response(decoded_retry, ctx.provider)
                     ctx.parsed_resp_obj = parsed_resp_retry
                     ctx.proc_result = self._response_processor.process(parsed_resp_retry)
-            except Exception:
-                pass
+            except Exception as exc:
+                _HTTP_PROXY_LOGGER.debug("Suppressed: %s", exc)
         if self._mast is not None:
             mast_response_payload: dict[str, Any] = {}
             try:
@@ -5137,8 +5166,8 @@ class LLMHTTPProxy:
                 )
                 ctx.proc_result["auto_healing_verified"] = bool(healed_ok)
                 ctx.proc_result["auto_healing_post_score"] = float(post_det.anomaly_score)
-            except Exception:
-                pass
+            except Exception as exc:
+                _HTTP_PROXY_LOGGER.debug("Suppressed: %s", exc)
         if self._cascade_router is not None and ctx.cascade_decision is not None and ctx.parsed_resp_obj is not None:
             token_sum = int(getattr(ctx.parsed_resp_obj, "input_tokens", 0)) + int(
                 getattr(ctx.parsed_resp_obj, "output_tokens", 0)
@@ -5344,8 +5373,8 @@ class LLMHTTPProxy:
                 retry_count=retry_count,
                 compression_ratio=1.0,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            _HTTP_PROXY_LOGGER.debug("Suppressed: %s", exc)
 
         try:
             _evidence_ledger.record(
@@ -5358,8 +5387,8 @@ class LLMHTTPProxy:
                     "retry_count": retry_count,
                 }
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            _HTTP_PROXY_LOGGER.debug("Suppressed: %s", exc)
 
         cost_value = float(ctx.proc_result.get("cost", 0.0)) if isinstance(ctx.proc_result, dict) else 0.0
         if cost_value > 0.0:
@@ -6182,6 +6211,8 @@ class LLMHTTPProxy:
             return False
         if self._ssrf_allow_private:
             return True
+        if host.strip().lower() in _LOCALHOST_HOSTNAMES:
+            return False
         try:
             port = parsed.port or (443 if parsed.scheme == "https" else 80)
             resolved = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
@@ -6233,8 +6264,8 @@ class LLMHTTPProxy:
             elif isinstance(raw_err, str):
                 error_type = raw_err
             setattr(handler, "_orchesis_last_error_type", str(error_type))
-        except Exception:
-            pass
+        except Exception as exc:
+            _HTTP_PROXY_LOGGER.debug("Suppressed: %s", exc)
         try:
             handler.send_response(status)
             handler.send_header("Content-Type", "application/json")

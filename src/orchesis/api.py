@@ -14,7 +14,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncGenerator
 
 import yaml
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -195,7 +195,7 @@ def create_api_app(
 ) -> FastAPI:
     """Create governance control-plane API."""
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         yield
         monitor = getattr(app.state, "mcp_monitor", None)
         if monitor is not None and hasattr(monitor, "stop"):
@@ -214,7 +214,7 @@ def create_api_app(
         )
 
     @app.exception_handler(HTTPException)
-    async def _http_error_handler(request, exc: HTTPException):  # noqa: ANN001
+    async def _http_error_handler(request: Request, exc: HTTPException) -> JSONResponse:  # noqa: ANN401
         _ = request
         if exc.status_code == 401:
             return JSONResponse(status_code=401, content={"error": "unauthorized"})
@@ -1602,7 +1602,7 @@ def create_api_app(
         app.state.dna_store.save(dna)
 
     @app.middleware("http")
-    async def trace_headers_middleware(request: Request, call_next):
+    async def trace_headers_middleware(request: Request, call_next: Any) -> Response:
         if _is_protected_api_request(request):
             client_id = _client_id_from_request(request)
             limit_result = app.state.api_limiter.check(client_id)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import threading
 import tracemalloc
 from collections import defaultdict
@@ -16,7 +15,11 @@ from orchesis.incident_manager import IncidentManager
 from orchesis.models import Decision
 from orchesis.state import RateLimitTracker
 
-CI_MULTIPLIER = 5.0 if os.getenv("CI") else 1.0
+import pytest
+
+from ci_multiplier import CI_MULTIPLIER
+
+pytestmark = [pytest.mark.performance, pytest.mark.slow]
 
 
 def _full_policy() -> dict[str, object]:

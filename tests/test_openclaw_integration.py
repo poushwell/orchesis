@@ -9,7 +9,11 @@ from http.server import BaseHTTPRequestHandler
 from urllib.error import HTTPError
 from urllib.request import Request as UrlRequest, urlopen
 
+import pytest
+
 from orchesis.proxy import HTTPProxyConfig, LLMHTTPProxy, PooledThreadHTTPServer
+
+pytestmark = pytest.mark.integration
 
 
 def _pick_port() -> int:

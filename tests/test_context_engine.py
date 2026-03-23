@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import threading
+
+from ci_multiplier import CI_MULTIPLIER
 from typing import Any
 
 import pytest
@@ -13,8 +15,6 @@ from orchesis.context_engine import (
     ContextEngine,
     ContextResult,
 )
-
-CI_MULTIPLIER = 5.0 if os.getenv("CI") else 1.0
 
 
 # --- Dedup Strategy (8 tests) ---
@@ -124,6 +124,7 @@ def test_dedup_single_message() -> None:
     assert result.messages[0]["content"] == "hello"
 
 
+@pytest.mark.performance
 def test_dedup_large_window_performance() -> None:
     """Dedup should handle large batches without quadratic slowdowns."""
     import time

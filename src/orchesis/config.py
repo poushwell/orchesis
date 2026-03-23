@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import posixpath
 import re
 import time
@@ -33,6 +34,15 @@ class ConfigError(PolicyError):
 
 
 DEFAULT_RESUME_TOKEN = "orchesis-resume-2024"
+
+# Default proxy / pool / cache numeric defaults (single source of truth for policy normalization)
+DEFAULT_PROXY_MAX_WORKERS = 200
+DEFAULT_CONNECTION_POOL_MAX_PER_HOST = 10
+DEFAULT_CONNECTION_POOL_MAX_TOTAL = 50
+DEFAULT_STREAMING_MAX_ACCUMULATED_EVENTS = 10000
+DEFAULT_SEMANTIC_CACHE_MAX_ENTRIES = 1000
+DEFAULT_SEMANTIC_CACHE_TTL_SECONDS = 600.0
+DEFAULT_CASCADE_CACHE_TTL_SECONDS = 300
 
 _SENSITIVE_KEY_FRAGMENT = re.compile(
     r"(token|secret|password|api_key|apikey|authorization|credential|bearer)",
@@ -304,12 +314,12 @@ def _normalize_proxy_config(policy: dict[str, Any]) -> None:
     proxy_cfg = policy.get("proxy")
     if not isinstance(proxy_cfg, dict):
         policy["proxy"] = {
-            "max_workers": 200,
+            "max_workers": DEFAULT_PROXY_MAX_WORKERS,
             "max_body_size_bytes": 10_485_760,
             "ssrf_allow_private": False,
             "connection_pool": {
-                "max_per_host": 10,
-                "max_total": 50,
+                "max_per_host": DEFAULT_CONNECTION_POOL_MAX_PER_HOST,
+                "max_total": DEFAULT_CONNECTION_POOL_MAX_TOTAL,
                 "idle_timeout": 60,
                 "connection_timeout": 30,
                 "retry_on_connection_error": True,
@@ -320,7 +330,7 @@ def _normalize_proxy_config(policy: dict[str, Any]) -> None:
             "streaming": {
                 "enabled": True,
                 "buffer_size": 4096,
-                "max_accumulated_events": 10000,
+                "max_accumulated_events": DEFAULT_STREAMING_MAX_ACCUMULATED_EVENTS,
             },
         }
         return
@@ -362,7 +372,7 @@ def _normalize_proxy_config(policy: dict[str, Any]) -> None:
     elif upstream is not None:
         proxy_cfg["upstream"] = {}
 
-    max_workers = proxy_cfg.get("max_workers", 200)
+    max_workers = proxy_cfg.get("max_workers", DEFAULT_PROXY_MAX_WORKERS)
     if not _is_number(max_workers) or int(max_workers) <= 0:
         raise PolicyError("proxy.max_workers must be > 0")
     proxy_cfg["max_workers"] = int(max_workers)
@@ -373,8 +383,8 @@ def _normalize_proxy_config(policy: dict[str, Any]) -> None:
 
     pool_cfg_raw = proxy_cfg.get("connection_pool")
     pool_cfg = pool_cfg_raw if isinstance(pool_cfg_raw, dict) else {}
-    max_per_host = pool_cfg.get("max_per_host", 10)
-    max_total = pool_cfg.get("max_total", 50)
+    max_per_host = pool_cfg.get("max_per_host", DEFAULT_CONNECTION_POOL_MAX_PER_HOST)
+    max_total = pool_cfg.get("max_total", DEFAULT_CONNECTION_POOL_MAX_TOTAL)
     idle_timeout = pool_cfg.get("idle_timeout", 60)
     connection_timeout = pool_cfg.get("connection_timeout", 30)
     max_retries = pool_cfg.get("max_retries", 2)
@@ -394,12 +404,22 @@ def _normalize_proxy_config(policy: dict[str, Any]) -> None:
     pool_cfg["connection_timeout"] = float(connection_timeout)
     pool_cfg["retry_on_connection_error"] = bool(pool_cfg.get("retry_on_connection_error", True))
     pool_cfg["max_retries"] = int(max_retries)
+    base_retry = pool_cfg.get("upstream_retry_base_delay_seconds", 0.1)
+    max_retry_d = pool_cfg.get("upstream_retry_max_delay_seconds", 2.0)
+    pool_cfg["upstream_retry_base_delay_seconds"] = (
+        float(base_retry) if _is_number(base_retry) and float(base_retry) >= 0 else 0.1
+    )
+    pool_cfg["upstream_retry_max_delay_seconds"] = (
+        float(max_retry_d) if _is_number(max_retry_d) and float(max_retry_d) >= 0 else 2.0
+    )
+    if pool_cfg["upstream_retry_max_delay_seconds"] < pool_cfg["upstream_retry_base_delay_seconds"]:
+        pool_cfg["upstream_retry_max_delay_seconds"] = pool_cfg["upstream_retry_base_delay_seconds"]
     proxy_cfg["connection_pool"] = pool_cfg
 
     streaming_cfg_raw = proxy_cfg.get("streaming")
     streaming_cfg = streaming_cfg_raw if isinstance(streaming_cfg_raw, dict) else {}
     buffer_size = streaming_cfg.get("buffer_size", 4096)
-    max_accumulated = streaming_cfg.get("max_accumulated_events", 10000)
+    max_accumulated = streaming_cfg.get("max_accumulated_events", DEFAULT_STREAMING_MAX_ACCUMULATED_EVENTS)
     if not _is_number(buffer_size) or int(buffer_size) <= 0:
         raise PolicyError("proxy.streaming.buffer_size must be > 0")
     if not _is_number(max_accumulated) or int(max_accumulated) <= 0:
@@ -424,6 +444,10 @@ def _normalize_kill_switch(policy: dict[str, Any]) -> None:
         raw["resume_token"] = resume_token.strip()
     else:
         raw["resume_token"] = DEFAULT_RESUME_TOKEN
+
+    if raw["enabled"] and raw["resume_token"] == DEFAULT_RESUME_TOKEN:
+        raw["resume_token"] = secrets.token_urlsafe(32)
+        _LOGGER.info("Auto-generated secure resume token (32 bytes)")
 
     auto = raw.get("auto_triggers")
     if auto is None:
@@ -508,10 +532,18 @@ def _normalize_cascade(policy: dict[str, Any]) -> None:
     if not isinstance(cache, dict):
         raise PolicyError("cascade.cache must be a mapping")
     cache["enabled"] = bool(cache.get("enabled", True))
-    ttl_seconds = cache.get("ttl_seconds", 300)
-    max_entries = cache.get("max_entries", 1000)
-    cache["ttl_seconds"] = int(ttl_seconds) if _is_number(ttl_seconds) and int(ttl_seconds) > 0 else 300
-    cache["max_entries"] = int(max_entries) if _is_number(max_entries) and int(max_entries) > 0 else 1000
+    ttl_seconds = cache.get("ttl_seconds", DEFAULT_CASCADE_CACHE_TTL_SECONDS)
+    max_entries = cache.get("max_entries", DEFAULT_SEMANTIC_CACHE_MAX_ENTRIES)
+    cache["ttl_seconds"] = (
+        int(ttl_seconds)
+        if _is_number(ttl_seconds) and int(ttl_seconds) > 0
+        else int(DEFAULT_CASCADE_CACHE_TTL_SECONDS)
+    )
+    cache["max_entries"] = (
+        int(max_entries)
+        if _is_number(max_entries) and int(max_entries) > 0
+        else int(DEFAULT_SEMANTIC_CACHE_MAX_ENTRIES)
+    )
     raw["cache"] = cache
     raw["respect_client_tokens"] = bool(raw.get("respect_client_tokens", False))
 
@@ -1070,8 +1102,8 @@ def _normalize_semantic_cache(policy: dict[str, Any]) -> None:
     if not isinstance(raw, dict):
         raise PolicyError("semantic_cache must be a mapping")
     raw["enabled"] = bool(raw.get("enabled", False))
-    raw["max_entries"] = max(1, int(raw.get("max_entries", 1000)))
-    raw["ttl_seconds"] = max(1.0, float(raw.get("ttl_seconds", 600)))
+    raw["max_entries"] = max(1, int(raw.get("max_entries", DEFAULT_SEMANTIC_CACHE_MAX_ENTRIES)))
+    raw["ttl_seconds"] = max(1.0, float(raw.get("ttl_seconds", DEFAULT_SEMANTIC_CACHE_TTL_SECONDS)))
     raw["simhash_threshold"] = max(0, min(64, int(raw.get("simhash_threshold", 8))))
     raw["jaccard_threshold"] = max(0.0, min(1.0, float(raw.get("jaccard_threshold", 0.6))))
     raw["min_content_length"] = max(0, int(raw.get("min_content_length", 20)))
@@ -1088,7 +1120,7 @@ def _normalize_semantic_cache(policy: dict[str, Any]) -> None:
     exact_match_only = bool(raw.get("exact_match_only", False))
     raw["exact_match_only"] = exact_match_only
 
-    max_entries = int(raw.get("max_entries", 1000))
+    max_entries = int(raw.get("max_entries", DEFAULT_SEMANTIC_CACHE_MAX_ENTRIES))
     raw["max_entries"] = max(1, min(100000, max_entries))
     policy["semantic_cache"] = raw
 
@@ -1687,7 +1719,7 @@ class PolicyWatcher:
         on_reload: Callable[[dict[str, Any]], None],
         *,
         check_interval_s: float | None = None,
-    ):
+    ) -> None:
         self.path = Path(path)
         self.on_reload = on_reload
         self._last_hash: str = ""

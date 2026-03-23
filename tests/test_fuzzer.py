@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from orchesis.config import load_policy
 from orchesis.fuzzer import FuzzReport, SyntheticFuzzer, update_fuzz_metadata
 from orchesis.scenarios import AdversarialScenarios
+
+pytestmark = pytest.mark.fuzz
 
 
 def _production_policy() -> dict:

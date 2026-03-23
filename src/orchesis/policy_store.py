@@ -31,7 +31,7 @@ class PolicyStore:
         self,
         max_versions: int = 10,
         history_path: str | Path = ".orchesis/policy_versions.jsonl",
-    ):
+    ) -> None:
         self._versions: list[PolicyVersion] = []
         self._current: PolicyVersion | None = None
         self._max_versions = max_versions

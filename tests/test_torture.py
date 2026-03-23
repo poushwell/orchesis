@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import time
 import tracemalloc
 from concurrent.futures import ThreadPoolExecutor
@@ -11,7 +10,11 @@ from orchesis.identity import AgentIdentity, AgentRegistry, TrustTier
 from orchesis.state import RateLimitTracker
 from orchesis.telemetry import InMemoryEmitter
 
-CI_MULTIPLIER = 5.0 if os.getenv("CI") else 1.0
+import pytest
+
+from ci_multiplier import CI_MULTIPLIER
+
+pytestmark = [pytest.mark.performance, pytest.mark.slow]
 
 
 def _policy(*, rate_limit: int = 10, daily_budget: float = 1000.0, max_cost: float = 10.0) -> dict:

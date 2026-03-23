@@ -32,7 +32,7 @@ class RateLimitTracker:
 
     _TRACKERS_BY_PATH: dict[str, WeakSet["RateLimitTracker"]] = {}
 
-    def __init__(self, persist_path: str | Path | None = ".orchesis/state.jsonl"):
+    def __init__(self, persist_path: str | Path | None = ".orchesis/state.jsonl") -> None:
         self.persist_path = Path(persist_path) if persist_path is not None else None
         # DESIGN NOTE: Single lock is sufficient for Phase 1/2.
         # Under 50+ concurrent agents, consider per-agent locks

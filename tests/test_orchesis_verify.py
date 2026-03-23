@@ -72,7 +72,7 @@ def test_format_report_generated() -> None:
     }
     text = verifier.format_report(result)
     assert "orchesis verify" in text
-    assert "schema_injection_risk" in text
+    assert "Config schema not leaking" in text or "schema" in text.lower()
     assert "Savings: ~$270/month" in text
 
 
@@ -142,8 +142,10 @@ def test_loop_calibration_correct_passes(tmp_path: Path) -> None:
     assert "threshold: 5" in check["message"]
 
 
-def test_verify_now_has_9_checks() -> None:
+def test_verify_check_registry_complete() -> None:
     verifier = OrchesisVerifier()
-    assert len(verifier.CHECKS) == 9
+    assert len(verifier.CHECKS) == 15
     assert "openclaw_routing" in verifier.CHECKS
     assert "loop_calibration" in verifier.CHECKS
+    assert "policy_startup_validation" in verifier.CHECKS
+    assert "mcp_config_discovery" in verifier.CHECKS

@@ -5,40 +5,35 @@ build-backend = "setuptools.build_meta:__legacy__"
 [project]
 name = "orchesis"
 version = "0.5.0"
-description = "Runtime Gateway for AI Agents. 17-phase security pipeline."
-readme = "README-PYPI.md"
+description = "Runtime Gateway for AI Agents — block threats, cut waste, monitor fleet"
+readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
-authors = [{name = "Pavel", email = "contact@orchesis.io"}]
+authors = [{name = "Orchesis Contributors"}]
 keywords = [
     "ai",
     "agents",
     "security",
     "proxy",
     "llm",
+    "mcp",
     "openai",
     "anthropic",
-    "mcp",
-    "ai-security",
-    "llm-proxy",
-    "agent-security",
-    "prompt-injection",
-    "cost-optimization",
-    "openai-proxy",
-    "anthropic-proxy",
-    "ai-agent",
-    "mcp-security",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Security",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Networking :: Monitoring",
     "Topic :: Internet :: Proxy Servers",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
 ]
 
 dependencies = []
@@ -66,10 +61,11 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://orchesis.ai"
-Repository = "https://github.com/poushwell/orchesis"
+Homepage = "https://orchesis.io"
 Documentation = "https://github.com/poushwell/orchesis/blob/main/QUICK_START.md"
-"Bug Tracker" = "https://github.com/poushwell/orchesis/issues"
+Repository = "https://github.com/poushwell/orchesis"
+Issues = "https://github.com/poushwell/orchesis/issues"
+Changelog = "https://github.com/poushwell/orchesis/blob/main/CHANGELOG.md"
 "MCP Scanner" = "https://orchesis.ai/scan"
 
 [project.scripts]
@@ -79,7 +75,7 @@ orchesis = "orchesis.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"orchesis" = ["dashboard_dist/**/*", "dashboard_dist/*"]
+"orchesis" = ["py.typed", "dashboard_dist/**/*", "dashboard_dist/*"]
 
 [tool.ruff]
 line-length = 100

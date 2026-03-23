@@ -4,14 +4,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import pytest
+from click.testing import CliRunner
+
+from orchesis.cli import main
 from orchesis.verify import (
     Severity,
+    OrchesisVerifier,
     check_config_schema_injection,
     check_openclaw_compatibility,
     check_openclaw_proxy_routing,
     check_proxy_connectivity,
+    discover_mcp_config_paths,
     run_all_checks,
 )
 
@@ -175,3 +181,110 @@ class TestOpenClawCompatibility:
         assert result.severity == Severity.WARNING
         assert result.detail is not None
         assert "whitelist" in result.detail.lower()
+
+
+class TestOrchesisVerifierExtended:
+    """Extended ``orchesis verify`` checks (policy startup, ports, MCP, CLI exit)."""
+
+    def test_verify_reports_policy_status(self, tmp_path: Path) -> None:
+        pol = tmp_path / "policy.yaml"
+        pol.write_text(
+            "proxy:\n  target: https://example.com\n",
+            encoding="utf-8",
+        )
+        verifier = OrchesisVerifier()
+        result = verifier._check_policy_startup_validation(str(pol))  # noqa: SLF001
+        assert result["status"] in ("PASS", "WARN")
+        assert "policy.yaml" in result["message"]
+        assert "warning" in result["message"].lower() or "0 warning" in result["message"].lower()
+
+    def test_verify_policy_startup_fail_on_config_error(self, tmp_path: Path) -> None:
+        pol = tmp_path / "bad.yaml"
+        pol.write_text("{ not valid yaml [[[\n", encoding="utf-8")
+        verifier = OrchesisVerifier()
+        result = verifier._check_policy_startup_validation(str(pol))  # noqa: SLF001
+        assert result["status"] == "FAIL"
+
+    def test_verify_checks_port_availability(self, tmp_path: Path) -> None:
+        pol = tmp_path / "p.yaml"
+        pol.write_text("rules: []\n", encoding="utf-8")
+        verifier = OrchesisVerifier()
+        mock_sock = MagicMock()
+        mock_sock.connect_ex.return_value = 1
+        with patch("orchesis.verify.socket.socket", return_value=mock_sock):
+            result = verifier._check_listen_ports_available(str(pol))  # noqa: SLF001
+        assert result["status"] == "PASS"
+        assert "8080" in result["message"] and "8081" in result["message"]
+
+    def test_verify_ports_warn_when_in_use(self, tmp_path: Path) -> None:
+        pol = tmp_path / "p.yaml"
+        pol.write_text("rules: []\n", encoding="utf-8")
+        verifier = OrchesisVerifier()
+        mock_sock = MagicMock()
+        mock_sock.connect_ex.return_value = 0
+        with patch("orchesis.verify.socket.socket", return_value=mock_sock):
+            result = verifier._check_listen_ports_available(str(pol))  # noqa: SLF001
+        assert result["status"] == "WARN"
+
+    def test_verify_checks_python_version(self) -> None:
+        verifier = OrchesisVerifier()
+        result = verifier._check_python_environment()  # noqa: SLF001
+        assert result["status"] == "PASS"
+        assert "Python" in result["message"]
+
+    def test_verify_python_version_fail_below_310(self) -> None:
+        verifier = OrchesisVerifier()
+        with patch("sys.version_info", (3, 9, 0)):
+            result = verifier._check_python_environment()  # noqa: SLF001
+        assert result["status"] == "FAIL"
+
+    def test_verify_discovers_mcp_configs(self, tmp_path: Path) -> None:
+        mcp_file = tmp_path / "mcp.json"
+        mcp_file.write_text('{"mcpServers": {}}', encoding="utf-8")
+        verifier = OrchesisVerifier()
+        with patch("orchesis.verify.discover_mcp_config_paths", return_value=[mcp_file]):
+            result = verifier._check_mcp_config_discovery()  # noqa: SLF001
+        assert result["status"] == "PASS"
+        assert "MCP config" in result["message"]
+        assert str(mcp_file) in result["message"]
+
+    def test_discover_mcp_config_paths_delegates(self) -> None:
+        with patch("orchesis.scanner.discover_mcp_configs", return_value=[]):
+            assert discover_mcp_config_paths() == []
+
+    def test_verify_exit_code_zero_on_pass(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "orchesis.yaml").write_text(
+            "proxy:\n"
+            "  target: https://example.com\n"
+            "loop_detection:\n"
+            "  enabled: true\n"
+            "  block_threshold: 5\n"
+            "threat_intel:\n"
+            "  enabled: true\n"
+            "  disabled_threats: [ORCH-TA-002]\n"
+            "budgets:\n"
+            "  enabled: true\n"
+            "recording:\n"
+            "  enabled: true\n",
+            encoding="utf-8",
+        )
+        mock_sock = MagicMock()
+        mock_sock.connect_ex.return_value = 1
+        mock_cm = MagicMock()
+        mock_cm.__enter__.return_value = MagicMock(status=200, getcode=lambda: 200)
+        mock_cm.__exit__.return_value = None
+        with (
+            patch("orchesis.verify.socket.socket", return_value=mock_sock),
+            patch("urllib.request.urlopen", return_value=mock_cm),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(main, ["verify", "--proxy", "http://127.0.0.1:65534"])
+        assert result.exit_code == 0, result.output
+
+    def test_verify_exit_code_one_on_fail(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "orchesis.yaml").write_text("invalid: [\n", encoding="utf-8")
+        runner = CliRunner()
+        result = runner.invoke(main, ["verify", "--proxy", "http://127.0.0.1:65534"])
+        assert result.exit_code == 1

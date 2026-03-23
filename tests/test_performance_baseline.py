@@ -1,8 +1,11 @@
-import os
 import statistics
 import time
 
-CI_MULTIPLIER = 5.0 if (os.getenv("CI") or os.name == "nt") else 1.0
+import pytest
+
+from ci_multiplier import CI_MULTIPLIER
+
+pytestmark = pytest.mark.performance
 
 
 def _time_it(fn, n=100):
@@ -95,6 +98,7 @@ def test_casura_create_incident_under_20ms():
     assert result["mean_ms"] < 20.0 * CI_MULTIPLIER
 
 
+@pytest.mark.slow
 def test_throughput_100_rps():
     """Engine handles 100 requests/second without errors."""
     import threading

@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Callable
 
 from orchesis.telemetry import DecisionEvent, EventEmitter
 
+_EVENT_BUS_LOGGER = logging.getLogger(__name__)
+
 
 class EventBus:
     """Central pub/sub for decision events."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._lock = threading.Lock()
         self._next_id = 1
         self._subscribers: dict[int, EventEmitter] = {}
@@ -49,7 +52,8 @@ class EventBus:
                 if filter_fn is not None and not filter_fn(event):
                     continue
                 emitter.emit(event)
-            except Exception:
+            except Exception as exc:
+                _EVENT_BUS_LOGGER.debug("Suppressed: %s", exc)
                 continue
 
     def emit(self, event: DecisionEvent) -> None:

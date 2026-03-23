@@ -54,7 +54,7 @@ class CostTracker:
         max_call_history: int = 10_000,
         max_tasks: int = 5000,
         max_days: int = 365,
-    ):
+    ) -> None:
         self._lock = threading.Lock()
         self._tool_costs = {**DEFAULT_TOOL_COSTS, **(tool_costs or {})}
         self._model_costs = {**MODEL_COSTS, **(model_costs or {})}

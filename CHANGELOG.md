@@ -1,6 +1,16 @@
-## [0.5.0] - 2026-03-21
+## [0.5.0] - 2026-03-23
 
 ### Added
+- MCP Scanner: 113 checks across 9 categories (was 49)
+- OWASP MCP Top 10 coverage (9/10 categories)
+- CVE database for known vulnerable MCP packages
+- IDE/agent config scanning (Cursor, Claude Code, Paperclip, OpenClaw)
+- A2A protocol security scanning
+- SSRF protection for X-Orchesis-Upstream header
+- Evidence Ledger buffered writes
+- Auto-generated resume tokens
+- `orchesis dashboard` CLI command
+- `orchesis[all]` install extra
 - Channel Health Monitor: silent_drop detection with HIGH/MEDIUM/LOW severity classification
 - Channel-specific amplification: WhatsApp session expiry, WebChat stale pong, Telegram webhook errors
 - orchesis serve - production server with TLS support (self-signed + custom certs)
@@ -12,11 +22,22 @@
 - CasuraCategory enum with 12 AI-specific incident categories
 - Deduplication by incident_id in bulk imports
 
-### Changed
-- Version bump 0.4.0 -> 0.5.0
-
 ### Fixed
+- Session header normalization for OpenClaw
+- Dashboard polling burst reduction
+- Reset command exclusion from loop detection
+- Content-Length DoS protection
+- XSS escape in dashboard components
+- Event bus secret redaction
 - Channel Health Monitor: _check_channel() no longer returns empty stub
+
+### Changed
+- Zero core dependencies (FastAPI/Uvicorn optional via extras)
+- Default ports aligned: proxy 8080, dashboard 8081
+- Python >= 3.10 (was >= 3.12)
+- Fail-closed on invalid policy files
+- Memory caps on CostTracker, BehavioralDetector, LoopDetector, ConnectionPool
+- Version bump 0.4.0 -> 0.5.0
 
 ## [0.4.0] — 2026-03-19
 
