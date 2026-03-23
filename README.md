@@ -96,7 +96,7 @@ orchesis dashboard       # opens at localhost:8081
 ## How it works
 
 <p align="center">
-  <img src="docs/assets/ekg-pipeline.png" alt="17-phase request lifecycle" width="100%">
+  <img src="docs/assets/pipeline.png" alt="17-phase request lifecycle" width="100%">
 </p>
 
 <details>
@@ -125,12 +125,12 @@ base_url = "http://localhost:8080/v1"  # one line change
 |---|:---:|:---:|:---:|:---:|
 | Sees | One agent, one session | Code at rest | Metrics and logs | **Everything, cross-agent** |
 | Code changes | Required | Required | Required | **None** |
-| Fleet correlation | 🔴 | 🔴 | 🟡 partial | 🟢 |
-| Real-time detection | 🟡 partial | 🔴 | 🔴 | 🟢 |
+| Fleet correlation | 🔴 | 🔴 | 🟡<br><sub>partial</sub> | 🟢 |
+| Real-time detection | 🟡<br><sub>partial</sub> | 🔴 | 🔴 | 🟢 |
 | Formal security proofs | 🔴 | 🔴 | 🔴 | 🟢 |
 | Published detection limits | 🔴 | 🔴 | 🔴 | 🟢 |
 | Zero code changes | 🔴 | 🔴 | 🔴 | 🟢 |
-| Open source (MIT) | 🟡 varies | 🟡 some | 🔴 | 🟢 |
+| Open source (MIT) | 🟡<br><sub>varies</sub> | 🟡<br><sub>some</sub> | 🔴 | 🟢 |
 | Self-hosted | 🔴 | 🔴 | 🔴 | 🟢 |
 | No telemetry | 🔴 | 🔴 | 🔴 | 🟢 |
 
