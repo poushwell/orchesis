@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\loop_detector.py
+# hypothesis_version: 6.151.9
+
+[0.0, 0.001, 300.0, 'action', 'allow', 'block', 'blocked', 'loops_blocked', 'loops_warned', 'message', 'repetitions', 'saved_usd', 'total_loops_detected', 'total_saved_usd', 'unhashable', 'utf-8', 'warn', 'warned']

@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\contrib\secret_scanner_plugin.py
+# hypothesis_version: 6.151.9
+
+[', ', '1.0', '__unknown__', 'check_params', 'critical', 'high', 'ignore_patterns', 'info', 'low', 'medium', 'params', 'secret_scanner', 'severity', 'severity_threshold', 'tool']

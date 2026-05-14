@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\loop_detector.py
+# hypothesis_version: 6.151.9
+
+[0.0, 0.01, 100.0, 300.0, 1000.0, 100, 'action', 'active_patterns', 'allow', 'block', 'content_text', 'downgrade_model', 'enabled', 'exact', 'exact_detections', 'fuzzy', 'fuzzy_detections', 'loop_type', 'loops_blocked', 'loops_warned', 'max_cost_saved', 'message', 'messages', 'model', 'name', 'none', 'notify', 'on_detect', 'repetitions', 'saved_usd', 'threshold', 'tool_calls', 'total_cost_saved_usd', 'total_loops_detected', 'total_saved_usd', 'utf-8', 'warn', 'window_seconds']

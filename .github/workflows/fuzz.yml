@@ -1,0 +1,238 @@
+name: Continuous Fuzzing
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      fuzz_seconds:
+        description: 'Seconds per target'
+        default: '18000'
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+  issues: write
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        fuzzer:
+          - fuzz_policy_yaml
+          - fuzz_http_proxy
+          - fuzz_mcp_jsonrpc
+          - fuzz_secret_scanner
+          - fuzz_pii_detector
+          - fuzz_compliance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+          pip install atheris
+          pip install -e ".[server]"
+          pip install pyyaml httpx hypothesis mcp pytest-asyncio fastapi
+
+      - name: Restore corpus cache
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzzing/corpus/${{ matrix.fuzzer }}
+          key: fuzz-corpus-${{ matrix.fuzzer }}-${{ github.sha }}
+          restore-keys: fuzz-corpus-${{ matrix.fuzzer }}-
+
+      - name: Prepare directories
+        run: mkdir -p fuzzing/corpus/${{ matrix.fuzzer }} fuzzing/crashes/
+
+      - name: Seed corpus
+        run: |
+          TARGET=${{ matrix.fuzzer }}
+          SEED_DIR=""
+          case $TARGET in
+            fuzz_policy_yaml) SEED_DIR="fuzzing/seeds/policy_yaml" ;;
+            fuzz_http_proxy) SEED_DIR="fuzzing/seeds/http_proxy" ;;
+            fuzz_mcp_jsonrpc) SEED_DIR="fuzzing/seeds/mcp_jsonrpc" ;;
+            fuzz_secret_scanner) SEED_DIR="fuzzing/seeds/secret_scanner" ;;
+            fuzz_pii_detector) SEED_DIR="fuzzing/seeds/pii_detector" ;;
+            fuzz_compliance) SEED_DIR="fuzzing/seeds/compliance" ;;
+          esac
+          if [ -d "$SEED_DIR" ]; then
+            cp "$SEED_DIR"/* fuzzing/corpus/${{ matrix.fuzzer }}/ 2>/dev/null || true
+          fi
+
+      - name: Run fuzzer
+        run: |
+          FUZZ_TIME=${{ github.event.inputs.fuzz_seconds || '18000' }}
+          DICT=""
+          case ${{ matrix.fuzzer }} in
+            fuzz_policy_yaml) DICT="-dict=fuzzing/dictionaries/yaml.dict" ;;
+            fuzz_http_proxy) DICT="-dict=fuzzing/dictionaries/http.dict" ;;
+            fuzz_mcp_jsonrpc) DICT="-dict=fuzzing/dictionaries/jsonrpc.dict" ;;
+          esac
+          timeout $((FUZZ_TIME + 60)) python fuzzing/${{ matrix.fuzzer }}.py \
+            -max_total_time=$FUZZ_TIME \
+            -artifact_prefix=fuzzing/crashes/ \
+            -print_final_stats=1 \
+            $DICT \
+            fuzzing/corpus/${{ matrix.fuzzer }} \
+          || true
+
+      - name: Save corpus cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: fuzzing/corpus/${{ matrix.fuzzer }}
+          key: fuzz-corpus-${{ matrix.fuzzer }}-${{ github.sha }}
+
+      - name: Upload crashes
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: crashes-${{ matrix.fuzzer }}-${{ github.run_id }}
+          path: fuzzing/crashes/
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Check for crashes
+        id: check_crashes
+        run: |
+          if ls fuzzing/crashes/crash-* 1>/dev/null 2>&1; then
+            echo "has_crashes=true" >> $GITHUB_OUTPUT
+            COUNT=$(ls -1 fuzzing/crashes/crash-* 2>/dev/null | wc -l | tr -d ' ')
+            echo "crash_count=$COUNT" >> $GITHUB_OUTPUT
+            echo "::error::Fuzzer ${{ matrix.fuzzer }} found crashes!"
+          else
+            echo "has_crashes=false" >> $GITHUB_OUTPUT
+            echo "crash_count=0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build crash metadata
+        if: steps.check_crashes.outputs.has_crashes == 'true'
+        id: crash_meta
+        run: |
+          python - <<'PY'
+          import hashlib
+          import importlib.util
+          import json
+          import os
+          from pathlib import Path
+
+          crash_paths = sorted(Path("fuzzing/crashes").glob("crash-*"))
+          seen = set()
+          crash_hashes = []
+          for crash_path in crash_paths:
+              digest = hashlib.sha256(crash_path.read_bytes()).hexdigest()
+              if digest not in seen:
+                  seen.add(digest)
+                  crash_hashes.append(digest)
+
+          known_regression_hashes = set()
+          regression_path = Path("tests/test_fuzz_regression.py")
+          if regression_path.exists():
+              spec = importlib.util.spec_from_file_location("fuzz_regression_mod", regression_path)
+              if spec and spec.loader:
+                  module = importlib.util.module_from_spec(spec)
+                  spec.loader.exec_module(module)
+                  for value in vars(module).values():
+                      if isinstance(value, (bytes, bytearray)):
+                          known_regression_hashes.add(
+                              hashlib.sha256(bytes(value)).hexdigest()
+                          )
+
+          regression_matches = [h for h in crash_hashes if h in known_regression_hashes]
+
+          output_path = os.environ["GITHUB_OUTPUT"]
+          with open(output_path, "a", encoding="utf-8") as out:
+              out.write("crash_hashes_json<<EOF\n")
+              out.write(json.dumps(crash_hashes))
+              out.write("\nEOF\n")
+              out.write("regression_hashes_json<<EOF\n")
+              out.write(json.dumps(regression_matches))
+              out.write("\nEOF\n")
+          PY
+
+      - name: File deduplicated issues on crash
+        if: steps.check_crashes.outputs.has_crashes == 'true'
+        uses: actions/github-script@v7
+        env:
+          CRASH_HASHES_JSON: ${{ steps.crash_meta.outputs.crash_hashes_json }}
+          REGRESSION_HASHES_JSON: ${{ steps.crash_meta.outputs.regression_hashes_json }}
+        with:
+          script: |
+            const crashHashes = JSON.parse(process.env.CRASH_HASHES_JSON || "[]");
+            const regressionHashes = new Set(JSON.parse(process.env.REGRESSION_HASHES_JSON || "[]"));
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            if (!Array.isArray(crashHashes) || crashHashes.length === 0) {
+              core.info("No crash hashes found after metadata step.");
+              return;
+            }
+
+            const openIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "open",
+              labels: "fuzzing",
+              per_page: 100,
+            });
+
+            for (const crashHash of crashHashes) {
+              const shortHash = crashHash.slice(0, 12);
+
+              if (regressionHashes.has(crashHash)) {
+                core.info(`Skipping issue for ${shortHash}: matches known regression test.`);
+                continue;
+              }
+
+              const exists = openIssues.some((issue) => {
+                if (issue.pull_request) {
+                  return false;
+                }
+                const title = issue.title || "";
+                const body = issue.body || "";
+                return title.includes(shortHash) || body.includes(`Crash-Hash: ${crashHash}`);
+              });
+
+              if (exists) {
+                core.info(`Skipping issue for ${shortHash}: existing open issue with same hash.`);
+                continue;
+              }
+
+              const body = [
+                "## Fuzzing Crash Report",
+                `**Target:** \`${{ matrix.fuzzer }}\``,
+                `**Crash-Hash:** \`${crashHash}\``,
+                `**Run:** ${runUrl}`,
+                `**Commit:** ${context.sha}`,
+                "",
+                "Download crash artifacts from the workflow run.",
+                "",
+                "Reproduce:",
+                "```",
+                `python fuzzing/${{ matrix.fuzzer }}.py crash-${shortHash}`,
+                "```",
+                "",
+                "- [ ] Reproduce locally",
+                "- [ ] Classify severity",
+                "- [ ] Fix and add to regression seeds",
+                "",
+                `Crash-Hash: ${crashHash}`,
+              ].join("\\n");
+
+              await github.rest.issues.create({
+                owner,
+                repo,
+                title: `🐛 Fuzzing crash [deduplicate][${shortHash}]: ${{ matrix.fuzzer }}`,
+                labels: ["bug", "fuzzing", "automated"],
+                body,
+              });
+            }

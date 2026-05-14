@@ -1,0 +1,17 @@
+{
+  "name": "orchesis-radar",
+  "version": "0.1.0",
+  "description": "Radar visualization for AI agent overwatch. Works with Orchesis proxy.",
+  "bin": {
+    "orchesis-radar": "./index.js"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "orchesis",
+    "openclaw",
+    "security",
+    "monitoring"
+  ],
+  "license": "MIT"
+}

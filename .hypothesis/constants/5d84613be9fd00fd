@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\llm_config.py
+# hypothesis_version: 6.151.9
+
+['ORCHESIS_LLM_API_KEY', 'ORCHESIS_LLM_MODEL', 'gpt-4o']

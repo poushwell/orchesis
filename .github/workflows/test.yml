@@ -1,0 +1,147 @@
+name: Tests
+# Local sanity: orchesis quickstart --preset minimal --non-interactive --output /tmp/orchesis.yaml
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CI: "true"
+  PYTHONPATH: "src"
+  ORCHESIS_CI_MULTIPLIER: "10"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install ruff pyyaml httpx hypothesis mcp pytest-asyncio fastapi
+      - name: Ruff check
+        run: python -m ruff check src/ tests/
+      - name: Ruff format (check only)
+        run: python -m ruff format --check src/ tests/
+
+  test-fast:
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install pyyaml httpx hypothesis mcp pytest-asyncio fastapi pytest-json-report
+      - name: Fast tests (exclude slow & integration)
+        run: >
+          python -m pytest tests/
+          -m "not slow and not integration"
+          -q --tb=short
+          --junit-xml=junit-fast.xml
+          --json-report
+          --json-report-file=pytest-report.json
+      - name: Upload JUnit
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-fast-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: junit-fast.xml
+        continue-on-error: true
+      - name: Upload JSON report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-json-fast-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: pytest-report.json
+        continue-on-error: true
+
+  test-scanner:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install pyyaml httpx hypothesis mcp pytest-asyncio fastapi
+      - name: MCP scanner tests
+        run: |
+          python -m pytest tests/test_scanner.py tests/test_mcp_scanner_phase4.py -q --tb=short
+
+  test-full:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install pyyaml httpx hypothesis mcp pytest-asyncio fastapi pytest-json-report
+      - name: Full suite
+        run: >
+          python -m pytest tests/ -q --tb=short
+          --junit-xml=junit-full.xml
+          --json-report
+          --json-report-file=pytest-report-full.json
+      - name: Upload JUnit (full)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-full-main
+          path: junit-full.xml
+        continue-on-error: true
+      - name: Upload JSON report (full)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-json-full-main
+          path: pytest-report-full.json
+        continue-on-error: true
+
+  test-performance:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+      ORCHESIS_CI_MULTIPLIER: "15"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install pyyaml httpx hypothesis mcp pytest-asyncio fastapi
+      - name: Performance-marked tests
+        run: python -m pytest tests/ -m "performance" -q --tb=short

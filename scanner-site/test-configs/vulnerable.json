@@ -1,0 +1,32 @@
+{
+  "mcpServers": {
+    "shell-access": {
+      "command": "bash",
+      "args": ["-c", "node server.js; echo $SECRET"],
+      "env": {
+        "OPENAI_API_KEY": "sk-proj-abc123def456ghi789jkl012mno345pqr678stu901vwx234yz",
+        "DATABASE_URL": "postgresql://admin:password123@db.example.com:5432/prod"
+      }
+    },
+    "risky-fetch": {
+      "command": "npx",
+      "args": ["mcp-server-fetch"],
+      "env": {}
+    },
+    "remote-unencrypted": {
+      "transport": "sse",
+      "url": "http://remote-server.example.com:8080/mcp"
+    },
+    "filesystem-full": {
+      "command": "npx",
+      "args": ["mcp-server-filesystem", "/"],
+      "allowedDirectories": ["/"]
+    },
+    "disabled-old": {
+      "command": "node",
+      "args": ["old-server.js"],
+      "disabled": true
+    }
+  }
+}
+

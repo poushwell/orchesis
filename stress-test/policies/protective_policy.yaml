@@ -1,0 +1,50 @@
+version: "1.0"
+name: "stress-test-protection"
+
+tool_access:
+  mode: allowlist
+  default: deny
+  allowed:
+    - read_file
+    - write_file
+    - web_search
+    - send_email
+  denied:
+    - shell_execute
+    - run_command
+    - execute_code
+    - bash
+    - terminal
+  rate_limits:
+    read_file: 10/minute
+    send_email: 3/minute
+    web_search: 5/minute
+
+denied_paths:
+  - /etc
+  - /etc/passwd
+  - /etc/shadow
+  - ~/.ssh
+  - ~/.ssh/id_rsa
+  - ~/.aws
+  - ~/.env
+  - /root
+  - ../.env
+  - "../../../../"
+
+denied_operations:
+  - DROP
+  - DELETE
+  - TRUNCATE
+  - FORMAT
+
+secret_scanning:
+  enabled: true
+  block_on_detection: true
+
+pii_detection:
+  enabled: true
+  auto_redact: true
+
+daily_budget: 10.00
+rate_limit_per_minute: 30

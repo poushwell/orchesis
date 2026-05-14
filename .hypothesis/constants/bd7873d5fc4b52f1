@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\cost_reporter.py
+# hypothesis_version: 6.151.9
+
+[0.0, '  (no calls)', '## Hourly Breakdown', '## Loop Detection', '## Top Tools by Cost', 'Top tools by cost:', 'calls', 'cost_usd', 'date', 'hourly_breakdown', 'loops', 'timestamp', 'tool', 'top_tools', 'total_calls', 'total_loops_detected', 'total_saved_usd', 'total_usd', '| Tool | Cost |', '|------|------|']

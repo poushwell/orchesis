@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "search": {
+      "command": "npx",
+      "args": ["-y", "mcp-server-brave-search@1.2.0"],
+      "env": {
+        "BRAVE_API_KEY": ""
+      }
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "mcp-server-filesystem@1.0.0", "./workspace"],
+      "description": "Access workspace files only"
+    },
+    "remote-api": {
+      "transport": "sse",
+      "url": "https://api.example.com/mcp",
+      "description": "Remote API access"
+    }
+  }
+}
+

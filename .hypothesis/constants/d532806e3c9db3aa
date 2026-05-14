@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\engine.py
+# hypothesis_version: 6.151.9
+
+['*', '.', 'AND', 'OR', '__unknown__', 'agent', 'allowed_paths', 'budget_limit', 'composite', 'conditions', 'context', 'context_rules', 'cost', 'denied_operations', 'denied_paths', 'denied_tools', 'deny_patterns', 'field', 'file_access', 'max_cost_per_call', 'name', 'operator', 'params', 'path', 'query', 'rate_limit', 'regex_match', 'rule', 'rules', 'sql_restriction', 'tool', 'type']

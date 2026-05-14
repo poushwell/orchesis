@@ -1,0 +1,170 @@
+name: Nightly Fuzzer
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          pip install -e .[dev]
+          pip install pyyaml httpx hypothesis mcp pytest-asyncio fastapi
+
+      - name: Prime decision log
+        run: |
+          orchesis init
+          orchesis verify request.json --policy policy.yaml || true
+
+      - name: Run fuzzer (10,000 requests)
+        run: |
+          orchesis fuzz --policy examples/production_policy.yaml \
+            --count 10000 --seed ${{ github.run_number }} \
+            --save-bypasses 2>&1 | tee fuzz_report.txt
+
+      - name: Run mutation engine
+        run: |
+          orchesis mutate --policy examples/production_policy.yaml \
+            --count 1000 --seed ${{ github.run_number }} 2>&1 | tee mutation_report.txt
+
+      - name: Verify invariants
+        run: |
+          orchesis invariants --policy examples/production_policy.yaml 2>&1 | tee invariants_report.txt
+
+      - name: Run replay verification
+        run: |
+          orchesis replay --log decisions.jsonl --policy examples/production_policy.yaml --strict \
+            2>&1 | tee replay_report.txt
+
+      - name: Run full test suite
+        run: pytest --tb=short -q
+
+      - name: Generate corpus regression tests
+        run: orchesis corpus --generate-tests
+
+      - name: Run corpus regression
+        run: pytest tests/test_corpus_regression.py -v
+
+      - name: Corpus stats
+        run: orchesis corpus --stats | tee corpus_stats.txt
+
+      - name: Reliability report
+        run: orchesis reliability-report --format md | tee reliability_report.md
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-fuzz-${{ github.run_number }}
+          path: |
+            fuzz_report.txt
+            mutation_report.txt
+            invariants_report.txt
+            replay_report.txt
+            corpus_stats.txt
+            reliability_report.md
+
+      - name: Detect issues
+        id: detect_issues
+        run: |
+          ISSUE=false
+          if grep -Eq "BYPASSES FOUND: [1-9]" fuzz_report.txt; then ISSUE=true; fi
+          if grep -q "BYPASS:" mutation_report.txt; then ISSUE=true; fi
+          if grep -q "✗" invariants_report.txt; then ISSUE=true; fi
+          echo "issue_detected=$ISSUE" >> "$GITHUB_OUTPUT"
+
+      - name: Build incident hash
+        if: steps.detect_issues.outputs.issue_detected == 'true'
+        id: incident_hash
+        run: |
+          HASH=$(
+            {
+              tail -n 80 fuzz_report.txt 2>/dev/null || true
+              tail -n 80 mutation_report.txt 2>/dev/null || true
+              cat invariants_report.txt 2>/dev/null || true
+            } | sha256sum | awk '{print $1}'
+          )
+          SHORT_HASH=$(printf '%s' "$HASH" | cut -c1-12)
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "short_hash=$SHORT_HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Build issue body
+        if: steps.detect_issues.outputs.issue_detected == 'true'
+        run: |
+          echo "# Nightly fuzz incident" > nightly_issue.md
+          echo "" >> nightly_issue.md
+          echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> nightly_issue.md
+          echo "" >> nightly_issue.md
+          echo "## Fuzzer report (tail)" >> nightly_issue.md
+          tail -n 40 fuzz_report.txt >> nightly_issue.md
+          echo "" >> nightly_issue.md
+          echo "## Mutation report (tail)" >> nightly_issue.md
+          tail -n 40 mutation_report.txt >> nightly_issue.md
+          echo "" >> nightly_issue.md
+          echo "## Invariants report" >> nightly_issue.md
+          cat invariants_report.txt >> nightly_issue.md
+          echo "" >> nightly_issue.md
+          echo "Incident-Hash: ${{ steps.incident_hash.outputs.hash }}" >> nightly_issue.md
+
+      - name: Create deduplicated issue on incident
+        if: steps.detect_issues.outputs.issue_detected == 'true'
+        uses: actions/github-script@v7
+        env:
+          INCIDENT_HASH: ${{ steps.incident_hash.outputs.hash }}
+          INCIDENT_SHORT_HASH: ${{ steps.incident_hash.outputs.short_hash }}
+        with:
+          script: |
+            const fs = require("fs");
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const incidentHash = process.env.INCIDENT_HASH || "";
+            const shortHash = process.env.INCIDENT_SHORT_HASH || "";
+
+            if (!incidentHash) {
+              core.info("No incident hash generated, skipping issue creation.");
+              return;
+            }
+
+            const openIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "open",
+              labels: "nightly-fuzz",
+              per_page: 100,
+            });
+
+            const existing = openIssues.find((issue) => {
+              if (issue.pull_request) {
+                return false;
+              }
+              const title = issue.title || "";
+              const body = issue.body || "";
+              return title.includes(shortHash) || body.includes(`Incident-Hash: ${incidentHash}`);
+            });
+
+            if (existing) {
+              core.info(`Skipping issue creation; duplicate nightly incident hash ${shortHash}.`);
+              return;
+            }
+
+            const body = fs.readFileSync("nightly_issue.md", "utf8");
+            await github.rest.issues.create({
+              owner,
+              repo,
+              title: `[Nightly][deduplicate][${shortHash}] Bypass or invariant failure detected`,
+              body,
+              labels: ["security", "nightly-fuzz"],
+            });

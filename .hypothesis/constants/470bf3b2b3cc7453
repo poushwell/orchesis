@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\replay.py
+# hypothesis_version: 6.151.9
+
+[':', 'ALLOW', 'agent', 'context', 'cost', 'event_id', 'file_access', 'name', 'params', 'regex_match', 'rules', 'sql_restriction', 'tool', 'tool_counts', 'type', 'utf-8']

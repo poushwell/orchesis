@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\.github\actions\orchesis-scan\checks\config_checks.py
+# hypothesis_version: 6.151.9
+
+['${ENV_VAR}', '*', '--allow-all', '--unsafe', '/', '0.0.0.0', '127.0.0.1', ':latest', '@latest', 'CFG_ARGS_INJECTION', 'CFG_DANGEROUS_FLAGS', 'CFG_INSECURE_HTTP', 'CFG_MALFORMED_JSON', 'CFG_PATH_TRAVERSAL', 'CFG_READ_ERROR', 'CFG_RELATIVE_COMMAND', 'CFG_REMOTE_NO_AUTH', 'CFG_ROOT_NOT_OBJECT', 'CFG_UNPINNED_IMAGE', 'CFG_UNPINNED_PACKAGE', 'CFG_WILDCARD_TOOLS', '\\', '\\.\\./|\\.\\.\\\\', 'allowed_paths', 'apiKey', 'args', 'auth', 'bash', 'bind', 'command', 'critical', 'curl', 'env', 'high', 'http://', 'https://', 'image', 'localhost', 'mcpServers', 'medium', 'package', 'roots', 'servers', 'token', 'tools', 'url', 'utf-8']

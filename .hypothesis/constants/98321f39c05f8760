@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\credential_injector.py
+# hypothesis_version: 6.151.9
+
+['Authorization', 'CredentialInjector', 'CredentialVault', 'InjectionRule', 'alias', 'header', 'header_name', 'header_template', 'headers', 'inject', 'match_tools', 'param', 'param_name', 'params', 'target', 'tool_name', '{value}']

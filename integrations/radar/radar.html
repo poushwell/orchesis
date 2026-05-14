@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Orchesis Radar</title>
+  <style>
+    :root {
+      --bg: #090909;
+      --card: #121212;
+      --border: rgba(255, 255, 255, 0.08);
+      --text: #f8fafc;
+      --muted: #a1a1aa;
+      --purple: #a855f7;
+      --green: #00FF41;
+      --red: #ef4444;
+      --yellow: #facc15;
+      --orange: #f97316;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(900px 500px at 20% -20%, rgba(168,85,247,0.16), var(--bg) 60%);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 16px;
+    }
+    .app {
+      width: 800px;
+      max-width: 100%;
+      min-height: 550px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: 0 18px 40px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.05);
+      padding: 14px;
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      gap: 10px;
+      position: relative;
+    }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .title {
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: 0.2px;
+    }
+    .summary {
+      color: var(--muted);
+      font-size: 13px;
+      font-family: "SF Mono", "Fira Code", ui-monospace, monospace;
+    }
+    .banner {
+      border: 1px solid rgba(250, 204, 21, 0.5);
+      color: #fde68a;
+      background: rgba(250, 204, 21, 0.12);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+      display: none;
+    }
+    .radar-wrap {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: rgba(0,0,0,0.2);
+      position: relative;
+      overflow: hidden;
+    }
+    svg {
+      width: 100%;
+      height: 430px;
+      display: block;
+    }
+    .zone-label {
+      fill: var(--muted);
+      font-size: 11px;
+      text-anchor: middle;
+    }
+    .tooltip {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      max-width: 300px;
+      background: rgba(9, 9, 9, 0.95);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--text);
+      padding: 8px 10px;
+      font-size: 12px;
+      display: none;
+      z-index: 4;
+    }
+    .footer {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+    }
+    button {
+      border: 1px solid rgba(168,85,247,0.5);
+      background: rgba(168,85,247,0.14);
+      color: #e9d5ff;
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button:hover {
+      background: rgba(168,85,247,0.22);
+    }
+    .legend {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 12px;
+      flex-wrap: wrap;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      display: inline-block;
+      margin-right: 5px;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="topbar">
+      <div class="title">Orchesis Radar</div>
+      <div id="summary" class="summary">0 agents · $0.00/day · 0 threats blocked</div>
+    </div>
+    <div id="banner" class="banner">DEMO MODE · Connect Orchesis for live data</div>
+    <div class="radar-wrap">
+      <div id="tooltip" class="tooltip"></div>
+      <svg id="radar" viewBox="0 0 760 430" aria-label="Overwatch radar"></svg>
+    </div>
+    <div class="footer">
+      <div class="legend">
+        <span><span class="dot" style="background:var(--green);"></span>working</span>
+        <span><span class="dot" style="background:#9ca3af;"></span>idle</span>
+        <span><span class="dot" style="background:var(--red);"></span>error</span>
+      </div>
+      <div style="flex:1;"></div>
+      <button id="share">Share</button>
+    </div>
+  </div>
+
+  <script>
+    const POLL_MS = 3000;
+    let snapshot = { summary: { active_agents: 0, total_cost_day_usd: 0, threats_blocked: 0 }, agents: [], demo_mode: true };
+
+    function fmtMoney(v) { return "$" + Number(v || 0).toFixed(2); }
+    function fmtNum(v) { return Number(v || 0).toLocaleString(); }
+
+    function gradeBucket(grade) {
+      const g = String(grade || "A").toUpperCase();
+      if (g.startsWith("A")) return 0;
+      if (g.startsWith("B")) return 1;
+      return 2;
+    }
+
+    function statusColor(status) {
+      const s = String(status || "").toLowerCase();
+      if (s === "error" || s === "alert") return "var(--red)";
+      if (s === "idle") return "#9ca3af";
+      return "var(--green)";
+    }
+
+    function normalize(payload) {
+      if (!payload || typeof payload !== "object") {
+        return { summary: { active_agents: 0, total_cost_day_usd: 0, threats_blocked: 0 }, agents: [], demo_mode: true };
+      }
+      const agents = Array.isArray(payload.agents) ? payload.agents : [];
+      const summaryRaw = payload.summary && typeof payload.summary === "object" ? payload.summary : {};
+      const active = Number(summaryRaw.active_agents || agents.length || 0);
+      const cost = Number(summaryRaw.total_cost_day_usd || agents.reduce((acc, a) => acc + Number(a.cost_day_usd || 0), 0));
+      const threats = Number(summaryRaw.threats_blocked || agents.reduce((acc, a) => acc + Number(a.threats_today || 0), 0));
+      return {
+        demo_mode: Boolean(payload.demo_mode),
+        summary: { active_agents: active, total_cost_day_usd: cost, threats_blocked: threats },
+        agents: agents
+      };
+    }
+
+    function render(data) {
+      snapshot = normalize(data);
+      const summary = snapshot.summary;
+      document.getElementById("summary").textContent =
+        `${fmtNum(summary.active_agents)} agents · ${fmtMoney(summary.total_cost_day_usd)}/day · ${fmtNum(summary.threats_blocked)} threats blocked`;
+      document.getElementById("banner").style.display = snapshot.demo_mode ? "block" : "none";
+      renderRadar(snapshot.agents);
+    }
+
+    function renderRadar(agents) {
+      const svg = document.getElementById("radar");
+      const tooltip = document.getElementById("tooltip");
+      const cx = 380;
+      const cy = 215;
+      const rings = [80, 155, 215];
+      const maxRequests = Math.max(1, ...agents.map((a) => Number(a.requests_today || 0)));
+      let html = `
+        <defs>
+          <radialGradient id="safeRing" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="rgba(0,255,65,0.14)"></stop>
+            <stop offset="100%" stop-color="rgba(0,255,65,0.01)"></stop>
+          </radialGradient>
+          <radialGradient id="warnRing" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="rgba(250,204,21,0.10)"></stop>
+            <stop offset="100%" stop-color="rgba(250,204,21,0.01)"></stop>
+          </radialGradient>
+          <radialGradient id="dangerRing" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="rgba(239,68,68,0.10)"></stop>
+            <stop offset="100%" stop-color="rgba(239,68,68,0.01)"></stop>
+          </radialGradient>
+          <linearGradient id="sweep" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stop-color="rgba(168,85,247,0)"></stop>
+            <stop offset="70%" stop-color="rgba(168,85,247,0)"></stop>
+            <stop offset="100%" stop-color="rgba(168,85,247,0.55)"></stop>
+          </linearGradient>
+        </defs>
+        <circle cx="${cx}" cy="${cy}" r="${rings[2]}" fill="url(#dangerRing)" stroke="rgba(239,68,68,0.2)"></circle>
+        <circle cx="${cx}" cy="${cy}" r="${rings[1]}" fill="url(#warnRing)" stroke="rgba(250,204,21,0.2)"></circle>
+        <circle cx="${cx}" cy="${cy}" r="${rings[0]}" fill="url(#safeRing)" stroke="rgba(0,255,65,0.2)"></circle>
+        <text class="zone-label" x="${cx}" y="${cy - rings[0] - 8}">A+/A safe zone</text>
+        <text class="zone-label" x="${cx}" y="${cy - rings[1] - 8}">B+/B warning zone</text>
+        <text class="zone-label" x="${cx}" y="${cy - rings[2] - 8}">C and below danger zone</text>
+        <circle cx="${cx}" cy="${cy}" r="10" fill="var(--purple)" stroke="rgba(255,255,255,0.3)"></circle>
+        <text class="zone-label" x="${cx}" y="${cy + 27}">orchestrator</text>
+        <line x1="${cx}" y1="${cy}" x2="${cx}" y2="${cy - rings[2]}" stroke="url(#sweep)" stroke-width="2.5">
+          <animateTransform attributeName="transform" attributeType="XML" type="rotate" from="0 ${cx} ${cy}" to="360 ${cx} ${cy}" dur="3s" repeatCount="indefinite"></animateTransform>
+        </line>
+      `;
+
+      agents.forEach((agent, idx) => {
+        const bucket = gradeBucket(agent.security_grade);
+        const minR = bucket === 0 ? 28 : (bucket === 1 ? 90 : 168);
+        const maxR = bucket === 0 ? 72 : (bucket === 1 ? 147 : 210);
+        const countSame = agents.length;
+        const angle = (idx / Math.max(1, countSame)) * (Math.PI * 2);
+        const spread = minR + ((idx % 6) / 5) * Math.max(6, maxR - minR);
+        const x = cx + Math.cos(angle) * spread;
+        const y = cy + Math.sin(angle) * spread;
+        const req = Number(agent.requests_today || 0);
+        const radius = 4 + (req / maxRequests) * 9;
+        html += `<circle id="agent-${idx}" cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="${radius.toFixed(2)}" fill="${statusColor(agent.status)}" stroke="rgba(255,255,255,0.35)"></circle>`;
+      });
+
+      svg.innerHTML = html;
+      tooltip.style.display = "none";
+      agents.forEach((agent, idx) => {
+        const node = document.getElementById(`agent-${idx}`);
+        if (!node) return;
+        node.addEventListener("click", () => {
+          tooltip.innerHTML = `
+            <div><strong>${agent.agent_id || "unknown"}</strong> (${agent.role || "worker"})</div>
+            <div style="margin-top:4px;">Status: ${agent.status || "-"}</div>
+            <div>Grade: ${agent.security_grade || "-"}</div>
+            <div>Task: ${agent.current_task || "Idle"}</div>
+            <div>Requests: ${fmtNum(agent.requests_today || 0)} · Cost/day: ${fmtMoney(agent.cost_day_usd || 0)}</div>
+            <div>Model: ${agent.model || "-"}</div>
+            <div>Threats: ${fmtNum(agent.threats_today || 0)}</div>
+          `;
+          tooltip.style.display = "block";
+        });
+      });
+    }
+
+    async function poll() {
+      try {
+        const response = await fetch("/api/overwatch", { cache: "no-store" });
+        if (!response.ok) throw new Error("bad response");
+        const data = await response.json();
+        render(data);
+      } catch (_err) {
+        render(snapshot);
+      }
+    }
+
+    function copyShare() {
+      const s = snapshot.summary || { active_agents: 0, total_cost_day_usd: 0, threats_blocked: 0 };
+      const text = `My AI overwatch: ${fmtNum(s.active_agents)} agents · ${fmtMoney(s.total_cost_day_usd)}/day · ${fmtNum(s.threats_blocked)} threats blocked · orchesis.io`;
+      if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(() => {});
+        return;
+      }
+      const temp = document.createElement("textarea");
+      temp.value = text;
+      document.body.appendChild(temp);
+      temp.select();
+      try { document.execCommand("copy"); } catch (_err) {}
+      document.body.removeChild(temp);
+    }
+
+    document.getElementById("share").addEventListener("click", copyShare);
+    poll();
+    setInterval(poll, POLL_MS);
+  </script>
+</body>
+</html>

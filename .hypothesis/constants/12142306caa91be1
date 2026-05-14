@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\integrations\telegram.py
+# hypothesis_version: 6.151.9
+
+[5.0, '; ', 'ANOMALY', 'DENY', 'Denied by policy', 'MarkdownV2', '_*[]()~`>#+-=|{}.!\\\\', 'anomaly:', 'chat_id', 'parse_mode', 'telegram send failed', 'telegram_notifier', 'text', '🚫 *Agent Blocked*']

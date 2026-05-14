@@ -1,0 +1,37 @@
+# Multi-agent policy with trust tiers
+version: "1.0"
+default_trust_tier: intern
+agents:
+  - id: "orchestrator"
+    name: "Main Orchestrator"
+    trust_tier: principal
+  - id: "researcher"
+    name: "Research Agent"
+    trust_tier: assistant
+    allowed_tools: ["read_file", "api_call"]
+    daily_budget: 20.0
+  - id: "writer"
+    name: "Writer Agent"
+    trust_tier: assistant
+    allowed_tools: ["read_file", "write_file"]
+  - id: "executor"
+    name: "Code Executor"
+    trust_tier: operator
+    allowed_tools: ["read_file", "write_file", "run_sql"]
+    max_cost_per_call: 3.0
+    daily_budget: 50.0
+  - id: "untrusted"
+    name: "Untrusted External"
+    trust_tier: intern
+    rate_limit_per_minute: 10
+rules:
+  - name: file_access
+    allowed_paths: ["/workspace", "/data"]
+    denied_paths: ["/etc", "/root", "/var"]
+  - name: sql_restriction
+    denied_operations: ["DROP", "DELETE", "TRUNCATE", "ALTER", "GRANT"]
+  - name: budget_limit
+    max_cost_per_call: 5.0
+    daily_budget: 100.0
+  - name: rate_limit
+    max_requests_per_minute: 60

@@ -1,0 +1,9 @@
+tool_access:
+  mode: allowlist
+  default: deny
+  allowed:
+    - read_file
+    - web_search
+rules:
+  - name: rate_limit
+    max_requests_per_minute: 30

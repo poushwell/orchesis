@@ -1,0 +1,147 @@
+{
+  "malicious_packages": [
+    {
+      "name": "mcp-server-free",
+      "versions_affected": [
+        "all"
+      ],
+      "cve": null,
+      "cvss": null,
+      "description": "Known malicious package detected by scanner MALICIOUS_PACKAGES list.",
+      "severity": "CRITICAL"
+    },
+    {
+      "name": "mcp-tool-helper",
+      "versions_affected": [
+        "all"
+      ],
+      "cve": null,
+      "cvss": null,
+      "description": "Known malicious package detected by scanner MALICIOUS_PACKAGES list.",
+      "severity": "CRITICAL"
+    },
+    {
+      "name": "claude-mcp-utils",
+      "versions_affected": [
+        "all"
+      ],
+      "cve": null,
+      "cvss": null,
+      "description": "Known malicious package detected by scanner MALICIOUS_PACKAGES list.",
+      "severity": "CRITICAL"
+    },
+    {
+      "name": "mcp-assistant-pro",
+      "versions_affected": [
+        "all"
+      ],
+      "cve": null,
+      "cvss": null,
+      "description": "Known malicious package detected by scanner MALICIOUS_PACKAGES list.",
+      "severity": "CRITICAL"
+    },
+    {
+      "name": "openai-mcp-bridge",
+      "versions_affected": [
+        "all"
+      ],
+      "cve": null,
+      "cvss": null,
+      "description": "Known malicious package detected by scanner MALICIOUS_PACKAGES list.",
+      "severity": "CRITICAL"
+    },
+    {
+      "name": "mcp-server-(git|fs|db)<digit>",
+      "versions_affected": [
+        "all"
+      ],
+      "cve": null,
+      "cvss": null,
+      "description": "Typosquatted package pattern from IoC indicators (SUPPLY-001).",
+      "severity": "HIGH"
+    },
+    {
+      "name": "@<vendor>-unofficial/*",
+      "versions_affected": [
+        "all"
+      ],
+      "cve": null,
+      "cvss": null,
+      "description": "Unofficial scoped package pattern from IoC indicators (SUPPLY-001).",
+      "severity": "HIGH"
+    },
+    {
+      "name": "openclaw-(plugin|skill|addon)-*",
+      "versions_affected": [
+        "all"
+      ],
+      "cve": null,
+      "cvss": null,
+      "description": "OpenClaw typosquat/addon package pattern from IoC indicators (SUPPLY-001).",
+      "severity": "HIGH"
+    }
+  ],
+  "vulnerable_packages": [
+    {
+      "name": "mcp-remote",
+      "versions_affected": [
+        "<0.1.16"
+      ],
+      "cve": "CVE-2025-6514",
+      "cvss": 9.6,
+      "description": "Known vulnerable package from scanner VULNERABLE_PACKAGES; fixed version 0.1.16.",
+      "severity": "CRITICAL"
+    },
+    {
+      "name": "@modelcontextprotocol/server-filesystem",
+      "versions_affected": [
+        "<0.6.3"
+      ],
+      "cve": "CVE-2025-5589",
+      "cvss": 7.5,
+      "description": "Known vulnerable package from scanner VULNERABLE_PACKAGES; fixed version 0.6.3.",
+      "severity": "HIGH"
+    },
+    {
+      "name": "framelink-figma-mcp",
+      "versions_affected": [
+        "<0.6.3"
+      ],
+      "cve": "CVE-2025-5891",
+      "cvss": 8.1,
+      "description": "Known vulnerable package from scanner VULNERABLE_PACKAGES; fixed version 0.6.3.",
+      "severity": "HIGH"
+    },
+    {
+      "name": "gemini-mcp-tool",
+      "versions_affected": [
+        "all"
+      ],
+      "cve": "CVE-2025-6001",
+      "cvss": 9.8,
+      "description": "Known vulnerable package from scanner VULNERABLE_PACKAGES; no fixed version available.",
+      "severity": "CRITICAL"
+    },
+    {
+      "name": "@anthropic/mcp-server-git",
+      "versions_affected": [
+        "<1.0.1"
+      ],
+      "cve": "CVE-2025-5234",
+      "cvss": 7.2,
+      "description": "Known vulnerable package from scanner VULNERABLE_PACKAGES; fixed version 1.0.1.",
+      "severity": "HIGH"
+    },
+    {
+      "name": "OpenClaw Gateway Token Theft",
+      "versions_affected": [],
+      "cve": "CVE-2026-25253",
+      "cvss": null,
+      "description": "IoC entry from contrib ioc_database: crafted URL/WebSocket token exfiltration vector.",
+      "severity": "CRITICAL"
+    }
+  ],
+  "last_updated": "2026-03-21",
+  "total_malicious": 8,
+  "total_vulnerable": 6
+}

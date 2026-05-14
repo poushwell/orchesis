@@ -1,0 +1,250 @@
+from __future__ import annotations
+
+from orchesis.contrib.pii_detector import PiiDetector
+from orchesis.contrib.pii_detector_plugin import PiiDetectorPlugin
+
+
+def test_detect_email() -> None:
+    findings = PiiDetector().scan_text("contact: user@example.com")
+    assert any(item["pattern"] == "email" for item in findings)
+
+
+def test_detect_phone() -> None:
+    findings = PiiDetector().scan_text("call me +1 555-123-4567")
+    assert any("phone" in item["pattern"] for item in findings)
+
+
+def test_detect_ssn() -> None:
+    findings = PiiDetector().scan_text("ssn 123-45-6789")
+    assert any(item["pattern"] == "ssn" for item in findings)
+    assert any(item["match"].endswith("6789") for item in findings if item["pattern"] == "ssn")
+
+
+def test_detect_credit_card_visa() -> None:
+    findings = PiiDetector().scan_text("card 4111 1111 1111 1111")
+    assert any(item["pattern"] == "credit_card_visa" for item in findings)
+
+
+def test_detect_iban() -> None:
+    findings = PiiDetector().scan_text("iban DE89370400440532013000")
+    assert any(item["pattern"] == "iban" for item in findings)
+
+
+def test_detect_date_of_birth() -> None:
+    findings = PiiDetector().scan_text("DOB: 01/31/1989")
+    assert any(item["pattern"] == "date_of_birth" for item in findings)
+
+
+def test_no_false_positive_normal_text() -> None:
+    findings = PiiDetector().scan_text("just a normal sentence with no sensitive fields")
+    assert findings == []
+
+
+def test_scan_dict_recursive() -> None:
+    findings = PiiDetector().scan_dict(
+        {"user": {"profile": {"email": "user@example.com"}}}, path="params"
+    )
+    assert any(item.get("path") == "params.user.profile.email" for item in findings)
+
+
+def test_classify_data_restricted() -> None:
+    level = PiiDetector().classify_data("cc 4111 1111 1111 1111")
+    assert level == "restricted"
+
+
+def test_classify_data_public() -> None:
+    level = PiiDetector().classify_data("simple text")
+    assert level == "public"
+
+
+def test_redact_text() -> None:
+    detector = PiiDetector()
+    redacted = detector.redact_text("email user@example.com and ssn 123-45-6789")
+    assert "[REDACTED-email]" in redacted
+    assert "[REDACTED-ssn]" in redacted
+
+
+def test_plugin_blocks_on_pii() -> None:
+    plugin = PiiDetectorPlugin({"block_on_pii": True})
+    result = plugin.evaluate("read_file", {"user": {"ssn": "123-45-6789"}}, "agent_a", {})
+    assert result["allowed"] is False
+    assert result["classification"] == "restricted"
+
+
+def test_plugin_allows_whitelisted_tool() -> None:
+    plugin = PiiDetectorPlugin({"block_on_pii": True, "allowed_pii_tools": ["send_email"]})
+    result = plugin.evaluate("send_email", {"to": "user@example.com"}, "agent_a", {})
+    assert result["allowed"] is True
+    assert result["pii_findings"]
+
+
+def test_plugin_redact_for_audit() -> None:
+    plugin = PiiDetectorPlugin({"redact_in_logs": True})
+    event = {"params": {"email": "user@example.com", "ssn": "123-45-6789"}}
+    redacted = plugin.redact_for_audit(event)
+    assert "user@example.com" not in str(redacted)
+    assert "123-45-6789" not in str(redacted)
+
+
+def test_scan_text_handles_fuzzed_binary_input_gracefully() -> None:
+    detector = PiiDetector()
+    crash_input = (
+        b"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBj\x00\x00\x00\x00\x00\x00\x00BBBBBBBBBBBBBB"
+        b"ij\xf4\x83\x91\x80 123-45-6789B\xf4\x83\x90\xb3\xf4\x83\x90\xb3ij\x00\x10\x1d 123-45-6789"
+        b"BBBBBBBBBBBBI341434348 "
+    )
+    text = crash_input.decode("utf-8", errors="replace")
+    findings = detector.scan_text(text)
+    assert isinstance(findings, list)
+
+
+def test_fuzz_crash_2f4fc2fec4e() -> None:
+    """Regression: crash-2f4fc2fec4e0 — invalid UTF-8 with SSN pattern."""
+    detector = PiiDetector()
+    crash_input = (
+        b"n\xf4\x83\x91\x8d\xf4\x83\x8c\xb1\xf1\x83\xa4\xb3\xe1\x84\x80\xf4\x81\xa0\x80"
+        b" 123-45-6789t\xad\xf1\xf1\xf1\xf1\xad\xad:Int\xad\xf1\xf1\xf1\xad\xad:\xad1"
+        b'\xad\xad\xad\xadt\xad\xf1\xf1\xad\xad39"0'
+    )
+    text = crash_input.decode("utf-8", errors="replace")
+    findings = detector.scan_text(text)
+    assert isinstance(findings, list)
+
+
+def test_pii_detector_handles_unicode_surrogates() -> None:
+    detector = PiiDetector()
+    findings = detector.detect("contact:\ud800user@example.com")
+    assert isinstance(findings, list)
+
+
+def test_pii_detector_handles_mixed_binary() -> None:
+    detector = PiiDetector()
+    text = b"\x00\xffuser@example.com123-45-6789".decode("utf-8", errors="replace")
+    findings = detector.scan_text(text)
+    assert isinstance(findings, list)
+
+
+def test_pii_detector_handles_bidi_unicode() -> None:
+    detector = PiiDetector()
+    text = "user@\u202eexample.com"
+    findings = detector.scan_text(text)
+    assert isinstance(findings, list)
+
+
+def test_pii_detector_regression_sanitizes_bytes_bidi_and_replacement() -> None:
+    detector = PiiDetector()
+    payload = b"\x00user@example.com\x00 \xe2\x80\xae 123-45-6789 \xef\xbf\xbd"
+    text = payload.decode("utf-8", errors="replace")
+    findings = detector.scan_text(text)
+    assert isinstance(findings, list)
+    assert any(item["pattern"] in {"email", "ssn"} for item in findings)
+
+
+def test_pii_detector_regression_strips_cf_and_nulls() -> None:
+    detector = PiiDetector()
+    payload = "user\u202e@example.com\x00 \ufffd 123-45-6789"
+    findings = detector.detect(payload)
+    assert isinstance(findings, list)
+    assert any(item["pattern"] in {"email", "ssn"} for item in findings)
+
+
+def test_pii_detector_regression_continuation_bytes() -> None:
+    pd = PiiDetector()
+    payload = b"\x84" * 40 + b"\xe3\x81\xaf" + b"123-45-6789" + b"\x84\x00\xf8"
+    pd.detect(payload.decode("utf-8", errors="replace"))
+    assert True
+
+
+def test_pii_detector_fuzz_invalid_utf8_quotes_no_crash() -> None:
+    """Regression: CI fuzz — invalid UTF-8 + repeated quotes must not crash."""
+    detector = PiiDetector()
+    raw = b"\xd2\x90" + (b"'" * 15) + b"\xce\xd4\x12\x03\x10"
+    payload = raw.decode("utf-8", errors="replace")
+    assert isinstance(detector.scan_text(payload), list)
+
+
+def test_pii_detector_empty_and_none_no_crash() -> None:
+    detector = PiiDetector()
+    assert detector.scan_text("") == []
+    assert detector.scan_text(None) == []
+
+
+def test_fuzz_crash_email_like_repeated_d5() -> None:
+    """Regression: CI fuzz crash with email-like prefix + repeated d5 + nulls."""
+    detector = PiiDetector()
+    raw = (
+        b"zCo@mpl.sl:o@eX"
+        + b"\xd5" * 57
+        + b"a.\x00\xc7m\x00\x00\x00\x00\x00\xef\x87 a*\x00c\xb5r\xe8ex7r@ex."
+    )
+    payload = raw.decode("utf-8", errors="replace")
+    result = detector.scan_text(payload)
+    assert isinstance(result, list)
+
+
+def test_fuzz_crash_ssn_binary_mix_round3() -> None:
+    from orchesis.contrib.pii_detector import PiiDetector
+
+    detector = PiiDetector()
+    raw = b">+2hhhhhh\x9b\x97\x97\x97hhhhhhh9;999\xb79+439hhhhhh(h\xec\xb7\x8d\xec\xbb\x8f\xec\xab\x8a\xed\x9b\x8d\xec\xb0\xff\xff\xa8 123\xb0\xff\xff\xa8 123-45-6789hhhhhhhhh9+22+439\xad\xad\xad123-5-467895\xf55I+9999559\x01"
+    payload = raw.decode("utf-8", errors="replace")
+    result = detector.scan_text(payload)
+    assert isinstance(result, list)
+
+
+def test_fuzz_crash_utf8_4byte_ssn_round4():
+    from orchesis.contrib.pii_detector import PiiDetector
+
+    detector = PiiDetector()
+    raw = b'"\x00\x00\x00\xe3\x84\x80\xe3\x83\xb0\xf4\x83\x84\xb1\xf4\x86\x85\xa3\xf4\x80\x80\x80\xf4\x80\x80\x80\xf4\x80\x80\x80 123-45-6789\xb136\xd2\x0155\xf55A+89999998\xb79+4\xad@\xae\xf55"8'
+    payload = raw.decode("utf-8", errors="replace")
+    result = detector.scan_text(payload)
+    assert isinstance(result, list)
+
+
+def test_fuzz_crash_truncated_ssn_repeated_8d_round5():
+    from orchesis.contrib.pii_detector import PiiDetector
+
+    detector = PiiDetector()
+    raw = b"\xee\xba\x82\xef\xbc\x80\xe1\x84\x90\xe1\x82\x85 123-45" + b"\x8d" * 90 + b"-6789\x180"
+    payload = raw.decode("utf-8", errors="replace")
+    result = detector.scan_text(payload)
+    assert isinstance(result, list)
+
+
+def test_fuzz_crash_bom_ssn_repeated_bf_round6():
+    from orchesis.contrib.pii_detector import PiiDetector
+
+    detector = PiiDetector()
+    raw = (
+        b"Z\x00\x00\x00\x00\x80\x00"
+        + b"\xef\xbf\xbf" * 12
+        + b"\xef\xbe\x83 123-45-6789\xad"
+        + b"\xf6" * 6
+        + b"\x83"
+        + b"\x00" * 7
+        + b":(+9\xc8N\xcc\xd2+30"
+        + b"\xad" * 5
+        + b"5"
+        + b"\xad" * 7
+        + b"3\xad9@"
+    )
+    payload = raw.decode("utf-8", errors="replace")
+    result = detector.scan_text(payload)
+    assert isinstance(result, list)
+
+
+def test_fuzz_crash_path_nulls_repeated_c_round7():
+    from orchesis.contrib.pii_detector import PiiDetector
+
+    raw = b".99999\xc7Haz$6/.\xe3\x85\xaf5/" + b"\x00" * 20 + b"c" * 79
+    result = PiiDetector().scan_text(raw.decode("utf-8", errors="replace"))
+    assert isinstance(result, list)
+
+
+def test_fuzz_crash_dash_nulls_time_pattern():
+    from orchesis.contrib.pii_detector import PiiDetector
+
+    raw = b"6-." + b"\x00" * 80 + b"\xe3\x85\xaf5\x88 9\x003:40"
+    result = PiiDetector().scan_text(raw.decode("utf-8", errors="replace"))
+    assert isinstance(result, list)

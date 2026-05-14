@@ -1,0 +1,13 @@
+{
+  "name": "orchesis-scan",
+  "version": "0.1.0",
+  "description": "MCP security scanner CLI — powered by Orchesis",
+  "bin": { "orchesis-scan": "./bin/orchesis-scan.js" },
+  "keywords": ["mcp", "security", "scanner", "ai-agent", "orchesis"],
+  "license": "MIT",
+  "engines": { "node": ">=18" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/poushwell/orchesis"
+  }
+}

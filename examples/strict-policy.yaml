@@ -1,0 +1,65 @@
+version: "1.0"
+default_trust_tier: intern
+
+tool_access:
+  mode: allowlist
+  default: deny
+  allowed:
+    - read_file
+    - web_search
+    - send_message
+    - list_directory
+
+agents:
+  - id: "default"
+    name: "Default Agent"
+    trust_tier: assistant
+    daily_budget: 20.0
+    rate_limit_per_minute: 30
+
+rules:
+  - name: file_access
+    denied_paths: ["/etc", "/root", "~/.ssh", "~/.aws", ".env"]
+  - name: sql_restriction
+    denied_operations: ["DROP", "DELETE", "TRUNCATE", "ALTER", "GRANT"]
+  - name: budget_limit
+    daily_budget: 20.0
+    max_cost_per_call: 2.0
+  - name: rate_limit
+    max_requests_per_minute: 30
+
+token_limits:
+  max_tokens_per_call: 4000
+  max_tokens_per_day: 500000
+  warn_at_percentage: 80
+
+session_policies:
+  group:
+    trust_tier: intern
+    tool_access:
+      mode: allowlist
+      allowed: ["web_search", "send_message"]
+    sandbox:
+      filesystem:
+        denied_paths: ["~/.ssh", "~/.aws", "~/.config", ".env"]
+        deny_hidden_files: true
+      network:
+        denied_domains: ["webhook.site", "requestbin.com", "ngrok.io"]
+      execution:
+        deny_shell: true
+  dm:
+    trust_tier: assistant
+  background:
+    trust_tier: intern
+    budget_per_session: 0.50
+
+alerts:
+  slack:
+    webhook_url: "${ORCHESIS_SLACK_WEBHOOK}"
+    notify_on: ["DENY", "ANOMALY"]
+
+logging:
+  redaction:
+    enabled: true
+    redact_secrets: true
+    redact_pii: true

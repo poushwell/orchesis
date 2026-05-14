@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\request_parser.py
+# hypothesis_version: 6.151.9
+
+['/chat/completions', '/messages', 'anthropic', 'arguments', 'choices', 'completion_tokens', 'content', 'finish_reason', 'function', 'id', 'input', 'input_tokens', 'max_tokens', 'message', 'messages', 'model', 'name', 'openai', 'output_tokens', 'prompt_tokens', 'stop_reason', 'text', 'tool_calls', 'tool_result', 'tool_use', 'tools', 'type', 'usage', '{}']

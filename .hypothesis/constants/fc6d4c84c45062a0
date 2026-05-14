@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\credential_vault.py
+# hypothesis_version: 6.151.9
+
+[384, 511, 120000, 'algorithm', 'ciphertext', 'credentials', 'env', 'file', 'mapping_path', 'orchesis-v1-local', 'orchesis.credentials', 'pbkdf2-sha256+xor', 'posix', 'salt', 'sha256', 'utf-8', 'vault', 'vault_path', 'version']

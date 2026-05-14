@@ -1,0 +1,12 @@
+{
+  "tool": "sql_query",
+  "params": {
+    "query": "DROP TABLE users",
+    "path": "/etc/passwd"
+  },
+  "cost": 0.10,
+  "context": {
+    "agent": "cursor",
+    "session": "abc-123"
+  }
+}

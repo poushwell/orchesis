@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\forensics.py
+# hypothesis_version: 6.151.9
+
+[0.0, 0.02, 0.4, 0.6, 1.0, '## Incidents', '## Summary', '%Y-%m-%dT%H:%M', '+00:00', 'DENY', 'Rate limit exceeded', 'Z', '__global__', '__unknown__', 'action', 'agent_id', 'anomaly', 'average_us', 'budget_breach', 'by_agent', 'by_severity', 'by_type', 'bypass', 'critical', 'decision', 'decreasing', 'denied', 'deny_count_1m', 'deny_rate', 'detected', 'exceeded', 'high', 'identity_violation', 'inc-', 'incidents', 'increasing', 'lacks capability', 'latency_us', 'low', 'mean_time_to_detect', 'medium', 'n/a', 'not in allowed_tools', 'open', 'period_end', 'period_start', 'rate_limit', 'rate_limit_breach', 'reasons', 'risk_score', 'stable', 'summary', 'tool', 'top_denied_tools', 'top_deny_reasons', 'total', 'total_requests', 'trend', 'ts', 'unknown', 'utf-8']

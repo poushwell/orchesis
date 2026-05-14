@@ -1,0 +1,11 @@
+# Minimal Orchesis policy — start here
+version: "1.0"
+rules:
+  - name: file_access
+    allowed_paths: ["/data"]
+    denied_paths: ["/etc", "/root", "/var"]
+  - name: budget_limit
+    max_cost_per_call: 5.0
+    daily_budget: 100.0
+  - name: rate_limit
+    max_requests_per_minute: 60

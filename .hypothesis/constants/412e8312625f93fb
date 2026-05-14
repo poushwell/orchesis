@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\rules_generator.py
+# hypothesis_version: 6.151.9
+
+[' calls per hour', ' calls per minute', ' calls per second', ' to', '## Security Rules', ', ', '.', '/hour', '/minute', '/second', ':', 'Per-tool limits: ', 'Security Rules', '_parsed_rate_limits', 'agents', 'allowed', 'allowlist', 'budget_limit', 'daily_budget', 'denied', 'denied_operations', 'denied_paths', 'denylist', 'file_access', 'markdown', 'max_requests', 'mode', 'name', 'rate_limits', 'rules', 'sql_restriction', 'text', 'tool_access', 'unit']

@@ -1,0 +1,135 @@
+{
+  "owasp_mcp": [
+    {
+      "id": "MCP01",
+      "name": "Token Mismanagement & Secret Exposure",
+      "our_categories": [
+        "credentials"
+      ],
+      "description": "Improper handling of API keys, tokens, secrets.",
+      "our_checks": [
+        "secret_leak",
+        "credential_sharing",
+        "weak_api_token"
+      ]
+    },
+    {
+      "id": "MCP02",
+      "name": "Excessive Permissions & Privilege Escalation",
+      "our_categories": [
+        "permissions"
+      ],
+      "description": "Overly broad tool/file permissions and privileged execution.",
+      "our_checks": [
+        "permissions",
+        "privilege_escalation",
+        "dangerous_tools",
+        "file_access"
+      ]
+    },
+    {
+      "id": "MCP03",
+      "name": "Tool Poisoning",
+      "our_categories": [
+        "tool_security",
+        "supply_chain"
+      ],
+      "description": "Malicious instructions in tool descriptions and poisoned tool payloads.",
+      "our_checks": [
+        "tool_poisoning",
+        "ioc_match"
+      ]
+    },
+    {
+      "id": "MCP04",
+      "name": "Supply Chain Attacks",
+      "our_categories": [
+        "supply_chain"
+      ],
+      "description": "Dependency tampering, typosquatting, and vulnerable package usage.",
+      "our_checks": [
+        "supply_chain_cve",
+        "malicious_package",
+        "typosquatting",
+        "version_pinning",
+        "deprecated_package",
+        "supply_chain"
+      ]
+    },
+    {
+      "id": "MCP05",
+      "name": "Command Injection",
+      "our_categories": [
+        "permissions",
+        "docker"
+      ],
+      "description": "Unsanitized command execution and shell abuse.",
+      "our_checks": [
+        "shell_execution",
+        "path_traversal",
+        "docker_security"
+      ]
+    },
+    {
+      "id": "MCP06",
+      "name": "Prompt Injection",
+      "our_categories": [
+        "tool_security"
+      ],
+      "description": "Injection via instruction files, tool descriptions, and Unicode obfuscation.",
+      "our_checks": [
+        "tool_poisoning",
+        "ioc_match"
+      ]
+    },
+    {
+      "id": "MCP07",
+      "name": "Insufficient Authentication",
+      "our_categories": [
+        "network"
+      ],
+      "description": "Missing auth and weak exposure controls on MCP endpoints.",
+      "our_checks": [
+        "no_auth",
+        "binding_exposure",
+        "websocket_no_origin_check",
+        "cors_missing"
+      ]
+    },
+    {
+      "id": "MCP08",
+      "name": "Insufficient Logging",
+      "our_categories": [
+        "observability"
+      ],
+      "description": "Insufficient audit traceability for agent actions.",
+      "our_checks": []
+    },
+    {
+      "id": "MCP09",
+      "name": "Shadow MCP Servers",
+      "our_categories": [
+        "cross_server"
+      ],
+      "description": "Undocumented/unapproved servers expand attack surface.",
+      "our_checks": [
+        "attack_surface"
+      ]
+    },
+    {
+      "id": "MCP10",
+      "name": "Context Over-sharing",
+      "our_categories": [
+        "cross_server",
+        "permissions"
+      ],
+      "description": "Cross-server context and credential leakage/exfiltration risks.",
+      "our_checks": [
+        "exfiltration_risk",
+        "credential_sharing",
+        "file_access"
+      ]
+    }
+  ],
+  "last_updated": "2026-03-21"
+}

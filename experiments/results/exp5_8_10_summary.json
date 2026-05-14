@@ -1,0 +1,69 @@
+{
+  "date": "2026-03-16",
+  "data_sources": {
+    "traces_jsonl": {
+      "path": ".orchesis/traces.jsonl",
+      "n_records": 6192,
+      "note": "Stress-test synthetic data. baseline_error_rate=0.623 — намеренно генерируемые ошибки, не production proxy traffic."
+    },
+    "decisions_jsonl": {
+      "path": ".orchesis/decisions.jsonl",
+      "n_records": 41,
+      "note": "Real proxy decisions. DENY events are meaningful quality signal."
+    }
+  },
+  "exp5_backpressure": {
+    "hypothesis": "Latency spike предшествует quality failure",
+    "verdict": "REJECTED on stress-test data",
+    "details": {
+      "correlation_r": -0.02,
+      "lift": 1.0,
+      "baseline_error_rate": 0.623,
+      "error_rate_after_high_z": 0.625
+    },
+    "interpretation": "REJECTED потому что traces.jsonl = synthetic stress-test с baseline_error_rate=62%. Случайный шум, не реальный сигнал. Гипотеза требует production proxy трафика где errors = genuine quality failures, а не намеренно инжектированные тестовые ошибки.",
+    "previous_run": {
+      "data": "decisions.jsonl (DENY events)",
+      "correlation_r": 0.153,
+      "lift": 3.52,
+      "verdict": "CONFIRMED",
+      "note": "Предыдущий прогон на decisions.jsonl дал lift 3.52x. Это правильный датасет для гипотезы. Нужен: production proxy трафик с context_profile_logger."
+    },
+    "action": "Заморозить до накопления данных context_profile_logger.py"
+  },
+  "exp8_zipf": {
+    "hypothesis": "Tool call sequences следуют Zipf's Law",
+    "verdict": "CONFIRMED (stronger than previous)",
+    "details": {
+      "zipf_alpha": 1.672,
+      "r_squared": 0.98,
+      "power_law_fits": true,
+      "zci_strategy": "aggressive",
+      "note": "Alpha=1.672 > 1.3 на N=41. Ещё более крутой Zipf чем первый прогон (1.364). R²=0.98 — excellent fit."
+    },
+    "action": "ZCI aggressive compression strategy — можно внедрять. При α > 1.3 агрессивное кэширование head инструментов безопасно.",
+    "stress_test_latency": {
+      "50_concurrent_agents_p95_ms": 519.8,
+      "1000_req_per_min_p95_ms": 164.9,
+      "note": "Orchesis p95 < 165ms на 1000 req/min. Overhead приемлем."
+    }
+  },
+  "exp10_causal": {
+    "hypothesis": "Root cause failures в первой половине сессии",
+    "verdict": "NOT CONFIRMED (N too small)",
+    "details": {
+      "n_deny_events": 9,
+      "early_root_rate": 0.364,
+      "threshold": 0.5,
+      "p_value": "not computed (N<10)"
+    },
+    "interpretation": "early_root_rate=0.364 < 0.5. Но N=9 DENY events — статистически недостаточно. Требует N≥50 для binomial test p<0.05.",
+    "action": "Повторить после накопления 50+ DENY events в production"
+  },
+  "summary": {
+    "exp5": "REJECTED on wrong data (stress-test). Repeat with context_profile_logger data.",
+    "exp8": "CONFIRMED. alpha=1.672, R²=0.980. Aggressive ZCI strategy validated.",
+    "exp10": "INSUFFICIENT DATA. N=9, need 50+.",
+    "key_number": "Zipf alpha=1.672 — три инструмента покрывают ~75% трафика. ZCI aggressive = safe."
+  }
+}

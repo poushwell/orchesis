@@ -1,0 +1,48 @@
+rules: []
+
+proxy:
+  host: 0.0.0.0
+  port: 8080
+  timeout: 300
+  upstream:
+    openai: https://api.openai.com
+    anthropic: https://api.anthropic.com
+
+context_optimizer:
+  enabled: true
+  dedup_system_prompt: true
+  remove_stale_messages: true
+  dedup_tool_definitions: true
+  remove_ack_messages: true
+  merge_consecutive: true
+
+auto_healing:
+  enabled: true
+  mode: active
+
+thompson_router:
+  enabled: true
+
+agent_discovery:
+  enabled: true
+
+capabilities:
+  tools:
+    default_action: deny
+    rules:
+      read_file: allow
+      web_fetch:
+        action: approve
+        blocked_domains: ["*.local", "internal.corp.com"]
+      system_run:
+        action: block
+
+threat_intel:
+  enabled: true
+
+budgets:
+  daily: 10
+
+recording:
+  enabled: false
+

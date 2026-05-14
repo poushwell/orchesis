@@ -1,0 +1,17 @@
+{
+  "id": "BYPASS-001",
+  "category": "path_traversal",
+  "mutation": "dot_dot: /data/../etc/passwd",
+  "request": {
+    "tool": "read_file",
+    "params": {
+      "path": "/data/../etc/passwd"
+    },
+    "cost": 0.1
+  },
+  "expected_decision": "DENY",
+  "discovered_at": "2026-02-28T18:30:00Z",
+  "fixed": true,
+  "fixed_at": "2026-02-28T18:45:00Z",
+  "cve_reference": null
+}

@@ -1,0 +1,25 @@
+name: hipaa
+version: "1.0"
+description: "HIPAA-aligned policy for healthcare AI agents"
+author: "Orchesis Project"
+tags: ["compliance", "healthcare", "pii"]
+plugins_required: ["pii_detector"]
+rules:
+  - name: pii_guard
+    type: pii_detector
+    check_fields: ["params.*"]
+  - name: file_access
+    allowed_paths: ["/data/approved"]
+    denied_paths: ["/etc", "/root", "/var", "/home"]
+  - name: sql_restriction
+    denied_operations: ["DROP", "DELETE", "TRUNCATE", "ALTER", "GRANT"]
+  - name: budget_limit
+    max_cost_per_call: 1.0
+    daily_budget: 20.0
+  - name: rate_limit
+    max_requests_per_minute: 20
+agents:
+  - id: "default"
+    name: "Default Healthcare Agent"
+    trust_tier: intern
+    daily_budget: 20.0

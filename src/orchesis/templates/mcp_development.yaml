@@ -1,0 +1,27 @@
+# MCP development policy — balanced for Cursor/Claude Code
+version: "1.0"
+default_trust_tier: assistant
+agents:
+  - id: "cursor"
+    name: "Cursor IDE"
+    trust_tier: operator
+    allowed_tools: ["read_file", "write_file", "run_sql", "api_call"]
+    max_cost_per_call: 5.0
+    daily_budget: 100.0
+  - id: "claude_code"
+    name: "Claude Code"
+    trust_tier: operator
+    allowed_tools: ["read_file", "write_file", "run_sql"]
+    max_cost_per_call: 5.0
+    daily_budget: 100.0
+rules:
+  - name: file_access
+    allowed_paths: ["/workspace", "/data", "/tmp"]
+    denied_paths: ["/etc", "/root", "/.ssh", "/.aws", "/.env"]
+  - name: sql_restriction
+    denied_operations: ["DROP", "TRUNCATE", "GRANT"]
+  - name: budget_limit
+    max_cost_per_call: 5.0
+    daily_budget: 100.0
+  - name: rate_limit
+    max_requests_per_minute: 60

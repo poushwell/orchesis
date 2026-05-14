@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\integrations\slack.py
+# hypothesis_version: 6.151.9
+
+[5.0, '+00:00', '; ', 'ANOMALY', 'Agent Blocked', 'BYPASS', 'DENY', 'Denied by policy', 'INVARIANT_FAILURE', 'Z', 'anomaly:', 'blocks', 'channel', 'context', 'detail', 'elements', 'fields', 'header', 'medium', 'mrkdwn', 'plain_text', 'section', 'severity', 'slack send failed', 'slack_notifier', 'text', 'type', 'unknown anomaly']

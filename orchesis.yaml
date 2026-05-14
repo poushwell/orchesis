@@ -1,0 +1,8 @@
+rules: []
+proxy:
+  host: "0.0.0.0"
+  port: 8080
+upstream:
+  url: "https://api.openai.com"
+dashboard:
+  enabled: true

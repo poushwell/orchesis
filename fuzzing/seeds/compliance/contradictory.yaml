@@ -1,0 +1,7 @@
+tool_access:
+  mode: allowlist
+  allowed: ["shell"]
+  denied: ["shell"]
+rules:
+  - name: rate_limit
+    max_requests_per_minute: 100

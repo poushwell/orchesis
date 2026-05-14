@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\marketplace\registry.py
+# hypothesis_version: 6.151.9
+
+['*.yaml', '+00:00', '1.0', 'Orchesis Project', 'Z', 'agents', 'author', 'description', 'generated_at', 'name', 'name is required', 'names', 'packs', 'plugins_required', 'policy.yaml', 'rules', 'tags', 'total_packs', 'utf-8', 'version', 'version is required', '~/.orchesis/packs']

@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\plugins.py
+# hypothesis_version: 6.151.9
+
+['PLUGIN_INFO', 'budget_limit', 'composite', 'context_rules', 'create_plugin', 'file_access', 'get_plugin_info', 'identity_check', 'rate_limit', 'regex_match', 'rules', 'sql_restriction', 'type']

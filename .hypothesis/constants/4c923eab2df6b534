@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\run_e2e_demo.py
+# hypothesis_version: 6.151.9
+
+[0.0, 0.1, 0.2, 2.0, 100, 1000, '-m', '.orchesis', '/data/hack.txt', '/data/report.csv', '/data/safe.txt', '/etc/passwd', 'ALLOW', 'DECISIONS_LOG_PATH', 'DENY', 'DOWNSTREAM_ARGS', 'DOWNSTREAM_COMMAND', 'DROP TABLE users', 'POLICY_PATH', 'SELECT * FROM sales', 'STATE_PATH', 'TEST_MCP_CALL_LOG', '__main__', 'agent_id', 'allowed', 'blocked_agent', 'content', 'cost', 'cursor', 'decisions.jsonl', 'demo-budget', 'demo-rate', 'denied', 'e2e_demo_policy.yaml', 'expensive_operation', 'invariants_passed', 'orchesis.mcp_proxy', 'path', 'query', 'read_file', 'run_sql', 'session_id', 'state.jsonl', 'text', 'total', 'unknown', 'untrusted_bot', 'utf-8', 'write_file', 'x', '─── Summary ───']

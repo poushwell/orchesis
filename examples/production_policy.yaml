@@ -1,0 +1,60 @@
+rules:
+  - name: budget_limit
+    max_cost_per_call: 2.00
+    daily_budget: 100.00
+
+  - name: file_access
+    allowed_paths:
+      - "/data"
+      - "/tmp"
+    denied_paths:
+      - "/etc"
+      - "/root"
+      - "/var"
+      - "~/.ssh"
+      - "~/.aws"
+
+  - name: sql_restriction
+    denied_operations:
+      - "DROP"
+      - "DELETE"
+      - "TRUNCATE"
+      - "ALTER"
+      - "GRANT"
+
+  - name: rate_limit
+    max_requests_per_minute: 60
+
+  - name: command_pattern_guard
+    type: regex_match
+    field: params.command
+    deny_patterns:
+      - "(?i)rm\\s+-rf\\s+"
+      - "(?i)chmod\\s+777\\s+"
+      - "(?i)curl\\s+[^|]*\\|\\s*bash"
+
+  - name: sql_pattern_guard
+    type: regex_match
+    field: params.query
+    deny_patterns:
+      - "(?i)drop\\s+table"
+      - "(?i)truncate\\s+"
+      - "(?i)delete\\s+from\\s+\\w+\\s*$"
+
+  - name: agent_restrictions
+    type: context_rules
+    rules:
+      - agent: "untrusted_bot"
+        denied_tools:
+          - "delete_file"
+          - "write_file"
+          - "run_sql"
+      - agent: "*"
+        max_cost_per_call: 2.00
+
+  - name: write_guard
+    type: composite
+    operator: AND
+    conditions:
+      - rule: file_access
+      - rule: budget_limit

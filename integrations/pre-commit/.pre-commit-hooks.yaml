@@ -1,0 +1,8 @@
+- id: orchesis-mcp-scan
+  name: Orchesis MCP Security Scan
+  description: Scan MCP configuration files for security vulnerabilities
+  language: python
+  entry: orchesis-pre-commit
+  files: '(mcp\.json|claude_desktop_config\.json)$'
+  pass_filenames: true
+  additional_dependencies: ['orchesis']

@@ -1,0 +1,5 @@
+crewai>=0.80.0
+langgraph>=0.2.0
+openai-agents>=0.1.0
+openai>=1.50.0
+pyyaml>=6.0

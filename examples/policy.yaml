@@ -1,0 +1,109 @@
+version: "0.3.0"
+
+agents:
+  - id: "cursor"
+    name: "Cursor IDE Agent"
+    trust_tier: operator
+    allowed_tools:
+      - "read_file"
+      - "write_file"
+      - "run_sql"
+    max_cost_per_call: 2.00
+    daily_budget: 50.00
+
+  - id: "untrusted_bot"
+    name: "External Bot"
+    trust_tier: intern
+    allowed_tools:
+      - "read_file"
+    rate_limit_per_minute: 10
+
+  - id: "admin_agent"
+    name: "System Admin"
+    trust_tier: principal
+
+  - id: "blocked_agent"
+    name: "Blocked Agent"
+    trust_tier: blocked
+
+default_trust_tier: intern
+
+rules:
+  - name: budget_limit
+    max_cost_per_call: 0.50
+    daily_budget: 50.00
+
+  - name: file_access
+    allowed_paths:
+      - "/data"
+      - "/tmp"
+    denied_paths:
+      - "/etc"
+      - "/root"
+      - "/var/secrets"
+
+  - name: sql_restriction
+    allowed_operations:
+      - "SELECT"
+      - "INSERT"
+    denied_operations:
+      - "DROP"
+      - "DELETE"
+      - "TRUNCATE"
+      - "ALTER"
+
+  - name: rate_limit
+    max_requests_per_minute: 100
+
+  - name: sql_pattern
+    type: regex_match
+    field: params.query
+    deny_patterns:
+      - "(?i)drop\\s+table"
+      - "(?i)truncate\\s+"
+      - "(?i)delete\\s+from\\s+\\w+\\s*$"
+
+  - name: agent_restrictions
+    type: context_rules
+    rules:
+      - agent: "untrusted_bot"
+        denied_tools:
+          - "delete_file"
+          - "run_sql"
+          - "write_file"
+      - agent: "cursor"
+        max_cost_per_call: 1.00
+      - agent: "*"
+        max_cost_per_call: 0.50
+
+  - name: write_guard
+    type: composite
+    operator: AND
+    conditions:
+      - rule: file_access
+      - rule: budget_limit
+
+default_action: deny
+
+budgets:
+  daily: 50.0
+  daily_limit_usd: 50.0
+
+loop_detection:
+  enabled: true
+  threshold: 5
+  window_seconds: 60
+  action: warn
+
+secret_scanning:
+  enabled: true
+
+tool_access:
+  default: allow
+
+kill_switch:
+  enabled: false
+
+audit:
+  enabled: true
+  log_path: ".orchesis/audit.jsonl"

@@ -1,0 +1,35 @@
+# Fuzzing
+fuzzing/corpus/
+fuzzing/crashes/
+__pycache__/
+*.pyc
+.orchesis/
+orchesis-report.sarif
+build/
+dist/
+.hypothesis/
+.orchesis/sessions/
+.orchesis/nightly-logs/
+*.egg-info/
+src/*.egg-info/
+policy.yaml
+.orchesis/*.jsonl
+.venv/
+
+# Orchesis runtime artifacts — не коммитить
+decisions.jsonl
+console_output.txt
+orchesis-report.txt
+*.jsonl
+*.sarif
+
+# Build artifacts
+lib/orchesis/
+.casura/
+tmp_hist.jsonl
+analyze_traces.py
+exp5_backpressure.py
+
+# Dashboard build (если хочешь исключить)
+# dashboard/dist/   ← закомментировано: README объясняет
+#                      что dist намеренно закоммичен

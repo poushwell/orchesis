@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "orchesis-filesystem": {
+      "command": "python",
+      "args": ["-m", "orchesis.mcp_proxy"],
+      "env": {
+        "DOWNSTREAM_COMMAND": "npx",
+        "DOWNSTREAM_ARGS": "-y @modelcontextprotocol/server-filesystem /path/to/allowed/dir",
+        "POLICY_PATH": "/path/to/policy.yaml"
+      }
+    }
+  }
+}

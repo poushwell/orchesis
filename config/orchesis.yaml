@@ -1,0 +1,29 @@
+rules: []
+
+proxy:
+  host: 0.0.0.0
+  port: 8080
+  timeout: 300
+  upstream:
+    openai: https://api.openai.com
+    anthropic: https://api.anthropic.com
+
+threat_intel:
+  enabled: true
+
+budgets:
+  daily: 10
+
+recording:
+  enabled: false
+
+cost_attribution:
+  rules:
+    - agent_pattern: "research_*"
+      team: "research"
+      project: "nlp-project"
+      cost_center: "CC-001"
+    - agent_pattern: "coding_*"
+      team: "engineering"
+      cost_center: "CC-002"
+

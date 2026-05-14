@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\mcp_proxy.py
+# hypothesis_version: 6.151.9
+
+[0.0, '0.1.0', '; ', 'DECISIONS_LOG_PATH', 'Denied by policy', 'STATE_PATH', '__main__', 'adapter', 'agent', 'agent_id', 'agents', 'context', 'cost', 'debug', 'debug_trace', 'default_trust_tier', 'mcp_proxy', 'mcp_stdio_proxy', 'orchesis-mcp-proxy', 'params', 'session', 'session_id', 'text', 'timed out', 'timeout', 'tool']

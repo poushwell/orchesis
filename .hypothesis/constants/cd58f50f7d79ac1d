@@ -1,0 +1,4 @@
+# file: C:\Users\lenovo\Desktop\Orchesis_final\orchesis\src\orchesis\recorder.py
+# hypothesis_version: 6.151.9
+
+[0.0, 400, 1024, 10000, 86400, '%Y%m%d', '*.jsonl*', '.gz', '.jsonl', '.jsonl.gz', '.orchesis/sessions', '_', 'ab', 'active_sessions', 'end_time', 'error_count', 'file_path', 'file_size_bytes', 'index.json', 'models_used', 'r', 'request_count', 'rt', 'session_id', 'start_time', 'storage_size_bytes', 'total_cost', 'total_recorded', 'utf-8']

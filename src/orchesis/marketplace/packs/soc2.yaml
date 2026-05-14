@@ -1,0 +1,28 @@
+name: soc2
+version: "1.0"
+description: "SOC2-aligned policy for SaaS AI agents"
+author: "Orchesis Project"
+tags: ["compliance", "saas", "audit"]
+plugins_required: []
+rules:
+  - name: file_access
+    allowed_paths: ["/data", "/tmp"]
+    denied_paths: ["/etc", "/root", "/var", "/home", "/.ssh", "/.aws"]
+  - name: sql_restriction
+    denied_operations: ["DROP", "DELETE", "TRUNCATE", "ALTER", "GRANT"]
+  - name: budget_limit
+    max_cost_per_call: 1.5
+    daily_budget: 30.0
+  - name: rate_limit
+    max_requests_per_minute: 25
+  - name: command_guard
+    type: regex_match
+    field: params.command
+    deny_patterns:
+      - "(?i)rm\\s+-rf"
+      - "(?i)chmod\\s+777"
+agents:
+  - id: "default"
+    name: "Default SaaS Agent"
+    trust_tier: assistant
+    daily_budget: 30.0
